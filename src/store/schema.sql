@@ -40,9 +40,19 @@ CREATE TABLE IF NOT EXISTS tasks (
   objective           TEXT NOT NULL,
   acceptance_criteria TEXT NOT NULL DEFAULT '[]',
   role                TEXT NOT NULL DEFAULT 'implementer',
+  task_class          TEXT NOT NULL DEFAULT 'small_implementation',
+  complexity          TEXT NOT NULL DEFAULT 'medium',
+  ambiguity           TEXT NOT NULL DEFAULT 'low',
+  change_risk         TEXT NOT NULL DEFAULT 'medium',
+  language            TEXT,
+  domain              TEXT,
+  context_size        TEXT NOT NULL DEFAULT 'medium',
+  required_tools      TEXT NOT NULL DEFAULT '[]',
+  allowed_scope       TEXT NOT NULL DEFAULT '[]',
   state               TEXT NOT NULL DEFAULT 'QUEUED',
   priority            INTEGER NOT NULL DEFAULT 100,
   execution_mode      TEXT NOT NULL DEFAULT 'single',   -- single | sequential | parallel | mixed
+  execution_reason    TEXT,
   in_scope_actions    TEXT NOT NULL DEFAULT '[]',
   repair_limit        INTEGER NOT NULL DEFAULT 2,
   repairs_used        INTEGER NOT NULL DEFAULT 0,
@@ -190,6 +200,22 @@ CREATE TABLE IF NOT EXISTS config_versions (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS provider_capacity (
+  provider        TEXT PRIMARY KEY,
+  state           TEXT NOT NULL DEFAULT 'available', -- available | cooldown | unavailable
+  max_concurrency INTEGER NOT NULL DEFAULT 1,
+  blocked_until   TEXT,
+  reason          TEXT,
+  error_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_schedule (
+  project_id         TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  dispatch_count     INTEGER NOT NULL DEFAULT 0,
+  last_dispatched_at TEXT
+);
+
 -- One row per controller process generation; proves liveness without an LLM.
 CREATE TABLE IF NOT EXISTS controller_lease (
   singleton     INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -208,7 +234,12 @@ CREATE TABLE IF NOT EXISTS controller_health (
   db_errors         INTEGER NOT NULL DEFAULT 0,
   queue_depth       INTEGER NOT NULL DEFAULT 0,
   oldest_ready_age_s INTEGER NOT NULL DEFAULT 0,
+  oldest_claim_age_s INTEGER NOT NULL DEFAULT 0,
   active_workers    INTEGER NOT NULL DEFAULT 0,
   worker_limit      INTEGER NOT NULL DEFAULT 2,
+  slot_utilization  REAL NOT NULL DEFAULT 0,
+  uptime_s          INTEGER NOT NULL DEFAULT 0,
+  provider_status   TEXT NOT NULL DEFAULT '[]',
+  backpressure_reason TEXT,
   state             TEXT NOT NULL DEFAULT 'running'      -- running | stopped | degraded
 );

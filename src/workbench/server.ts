@@ -34,7 +34,7 @@ async function load(){const r=await fetch('/api/overview');const d=await r.json(
 const counts=Object.entries(d.taskCounts).map(([k,v])=>'<div class="card"><b>'+esc(k)+'</b><div>'+v+'</div></div>').join('');
 const tasks=d.tasks.map(t=>'<tr><td><code>'+esc(t.id)+'</code></td><td>'+esc(t.title)+'</td><td>'+esc(t.state)+'</td><td>'+esc(t.blockedReason||'')+'</td>'+(t.state==='RUNNING'?'<td><button class="reject" onclick="action(\'/api/tasks/'+encodeURIComponent(t.id)+'/cancel?version='+encodeURIComponent(t.recordVersion)+'\')">Cancel</button></td>':'<td></td>')+'</tr>').join('');
 const approvals=d.approvals.map(a=>'<tr><td>'+esc(a.action)+'</td><td>'+esc(a.target)+'</td><td><code>'+esc(a.revision)+'</code></td><td><button onclick="action(\'/api/approvals/'+encodeURIComponent(a.id)+'/approve\')">Approve</button><button class="reject" onclick="action(\'/api/approvals/'+encodeURIComponent(a.id)+'/reject\')">Reject</button></td></tr>').join('');
-document.querySelector('#app').innerHTML='<div class="grid">'+counts+'</div><div class="card"><h2>Tasks</h2><table><tr><th>ID</th><th>Task</th><th>State</th><th>Reason</th><th></th></tr>'+tasks+'</table></div><div class="card"><h2>Pending approvals</h2><table><tr><th>Action</th><th>Target</th><th>Revision</th><th></th></tr>'+approvals+'</table></div><div class="card"><h2>Controller health</h2><pre>'+esc(JSON.stringify(d.health,null,2))+'</pre></div>'}
+document.querySelector('#app').innerHTML='<div class="grid">'+counts+'</div><div class="card"><h2>Tasks</h2><table><tr><th>ID</th><th>Task</th><th>State</th><th>Reason</th><th></th></tr>'+tasks+'</table></div><div class="card"><h2>Pending approvals</h2><table><tr><th>Action</th><th>Target</th><th>Revision</th><th></th></tr>'+approvals+'</table></div><div class="card"><h2>Provider capacity</h2><pre>'+esc(JSON.stringify(d.providers,null,2))+'</pre></div><div class="card"><h2>Operational metrics</h2><pre>'+esc(JSON.stringify(d.operations,null,2))+'</pre></div><div class="card"><h2>Controller health</h2><pre>'+esc(JSON.stringify(d.health,null,2))+'</pre></div>'}
 load();setInterval(load,3000);
 </script></body></html>`;
 }
@@ -68,6 +68,8 @@ export function createWorkbench(records: Records, options: WorkbenchOptions = {}
           tasks,
           taskCounts,
           approvals: records.listApprovals("pending"),
+          providers: records.listProviderCapacity(),
+          operations: records.operationalMetrics(),
           health: records.latestHealth() ?? null,
         });
         return;
@@ -80,8 +82,10 @@ export function createWorkbench(records: Records, options: WorkbenchOptions = {}
         json(response, 200, {
           task,
           attempts: records.listAttempts(id),
+          routing: records.routingForTask(id),
           gates: records.gatesForTask(id),
           events: records.listEvents(id),
+          latency: records.taskLatency(id),
         });
         return;
       }

@@ -55,6 +55,16 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => ctx.ui.notify(await run(["task", ...words(args)]), "info"),
   });
 
+  pi.registerCommand("mabs-plan", {
+    description: "Validate or apply an execution plan, e.g. /mabs-plan validate plan.json",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["plan", ...words(args)]), "info"),
+  });
+
+  pi.registerCommand("mabs-provider", {
+    description: "Inspect or reset provider capacity, e.g. /mabs-provider list",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["provider", ...words(args)]), "info"),
+  });
+
   pi.registerCommand("mabs-backup", {
     description: "Create a consistent backup of MABS SQLite state",
     handler: async (_args, ctx) => ctx.ui.notify(`Backup: ${await run(["maintenance", "backup"])}`, "info"),
@@ -74,17 +84,18 @@ export default function mabsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("mabs-start", {
-    description: "Start the controller and workbench: /mabs-start [codex|claude]",
+    description: "Start the controller and workbench: /mabs-start [policy|codex|claude]",
     handler: async (args, ctx) => {
-      const adapter = args.trim() || "codex";
-      if (adapter !== "codex" && adapter !== "claude") throw new Error("Usage: /mabs-start [codex|claude]");
-      const child = spawn(process.execPath, [CLI, "controller", "run", `--adapter=${adapter}`, "--ui"], {
+      const adapter = args.trim() || "policy";
+      if (!["policy", "codex", "claude"].includes(adapter)) throw new Error("Usage: /mabs-start [policy|codex|claude]");
+      const adapterArgs = adapter === "policy" ? [] : [`--adapter=${adapter}`];
+      const child = spawn(process.execPath, [CLI, "controller", "run", ...adapterArgs, "--ui"], {
         cwd: ROOT,
         detached: true,
         stdio: "ignore",
       });
       child.unref();
-      ctx.ui.notify(`MABS controller started with ${adapter} (pid ${child.pid ?? "unknown"})`, "info");
+      ctx.ui.notify(`MABS controller started with ${adapter} routing (pid ${child.pid ?? "unknown"})`, "info");
     },
   });
 

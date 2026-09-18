@@ -23,6 +23,18 @@ export interface WorkerInput {
     objective: string;
     acceptance_criteria: string[];
     dependencies: string[];
+    profile: {
+      task_class: string;
+      complexity: string;
+      ambiguity: string;
+      change_risk: string;
+      language: string | null;
+      domain: string | null;
+      context_size: string;
+      required_tools: string[];
+      execution_mode: string;
+      execution_reason: string | null;
+    };
     deadline_at: string | null;
     repairs_used: number;
     repair_limit: number;

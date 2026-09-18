@@ -4,7 +4,7 @@ Updated: 18 September 2026
 
 ## Phase publication policy
 
-At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 1 is complete and this document is part of its publication checkpoint.
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 2 is complete and this document is part of its publication checkpoint.
 
 ## Continuation point recovered
 
@@ -61,12 +61,41 @@ Deliberately deferred:
 
 - Independent AI review and the complete feedback/approval dashboard flow are Phase 3 deliverables. Phase 1 does not claim that substantive changes received independent review.
 
+## Phase 2 — parallel projects and task routing
+
+Implemented:
+
+- [x] Versioned, provisional task-class routing for mechanical, implementation, complex coding, diagnosis, planning, research, review, troubleshooting, and curation work.
+- [x] Explicit language/domain, complexity, ambiguity, context-size, change-risk, tool, allowed-scope, urgency, execution-mode, and execution-rationale inputs on durable tasks and context packets.
+- [x] Configurable global, active-project, per-project, and per-provider concurrency limits, plus optional memory/load backpressure thresholds.
+- [x] Persisted provider availability, quota cooldowns, authentication-unavailable state, capacity utilization, error counts, and operator reset controls.
+- [x] Attempt-boundary subscription fallback on `AUTH`/`QUOTA`, with no repair-budget charge and no paid API route.
+- [x] Starvation-resistant cross-project scheduling using durable dispatch counts while preserving task priority within projects.
+- [x] Execution-plan validation for missing acceptance criteria, unknown dependencies, cycles, unjustified modes, and overlapping parallel edit scopes; valid plans apply atomically in topological order.
+- [x] Parallel edit safety through execution-mode checks, per-project limits, disjoint scope checks, isolated worktrees, downstream dependency-revision materialization, and post-worker rejection of edits outside declared scopes.
+- [x] Deterministic execution of mechanical tasks without a model worker.
+- [x] Expanded controller/provider/operational health: queue age, claim age, utilization, uptime, provider state, restart counts, provider errors, invalid plans, and planning/routing counters.
+- [x] Stage-level task latency data and provider/operations visibility in the CLI and localhost workbench.
+- [x] Tests cover routing policy, global/provider limits, project fairness, mechanical execution, scope enforcement, plan validation/application, provider cooldown/reset, and quota rerouting.
+
+Exit evidence:
+
+- [x] Two independent real Git projects entered `RUNNING` in the same controller cycle under a global worker limit of 2 and Codex provider limit of 2.
+- [x] Both authenticated subscription attempts completed without repair and reached `DONE`; required npm gates passed against revisions `3b9ac1433dced2ffa9d047f1ebaa87498e81e4c3` and `279c16581a52bd089aece9d1fa0710df38b75ab8`.
+- [x] Durable evidence: `~/.local/state/mabs/acceptance/phase2-2026-09-18T13-12-59Z`.
+
+Deliberately deferred:
+
+- Independent review, feedback loops, approval action executors, bounded replanning through an LLM orchestrator, and delivery workflows remain Phase 3+ work.
+- Resource-pressure admission controls and cost-equivalent telemetry remain later optimizations; Phase 2 capacity control is slot/provider based.
+
 ## Verification
 
 ```text
-npm test          16 passing
+npm test          27 passing
 npm run typecheck passing
 mabs verify --quick 3/3 passing
+Pi RPC extension   passing
 ```
 
-The test suite includes strict contracts, lifecycle rules, approval binding, environment scrubbing, durable records, dependency isolation, gate evidence, and controller restart/no-duplicate behavior.
+The test suite includes strict contracts, lifecycle rules, approval binding, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, and allowed-scope enforcement.

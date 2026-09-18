@@ -71,6 +71,19 @@ test("explicit retries require the current task version", (t) => {
   assert.equal(db.listEvents(task.id)[0]?.kind, "task.retry_requested");
 });
 
+test("provider capacity persists cooldowns, expiry, and operator resets", (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  db.configureProvider("codex", 2);
+  const cooldown = db.noteProviderFailure("codex", "QUOTA", "usage limit", 60_000);
+  assert.equal(cooldown.state, "cooldown");
+  assert.equal(cooldown.maxConcurrency, 2);
+  db.store.run("UPDATE provider_capacity SET blocked_until = ? WHERE provider = 'codex'", new Date(Date.now() - 1_000).toISOString());
+  assert.equal(db.getProviderCapacity("codex")?.state, "available");
+  assert.equal(db.noteProviderFailure("codex", "AUTH", "login required").state, "unavailable");
+  assert.equal(db.resetProvider("codex").state, "available");
+});
+
 test("controller lease excludes peers until released or stale", (t) => {
   const db = records();
   t.after(() => db.store.close());

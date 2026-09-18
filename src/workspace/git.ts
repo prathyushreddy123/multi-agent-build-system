@@ -50,6 +50,24 @@ export async function workspaceRevision(path: string): Promise<string> {
   return git(path, ["rev-parse", "HEAD"]);
 }
 
+/** Materialize completed prerequisite revisions into a downstream task branch. */
+export async function integrateDependencyRevisions(path: string, revisions: string[]): Promise<string> {
+  for (const revision of revisions) {
+    const present = await exec("git", ["merge-base", "--is-ancestor", revision, "HEAD"], { cwd: path, timeoutMs: 30_000 });
+    if (present.code === 0) continue;
+    const cherryPick = await exec("git", [
+      "-c", "user.name=MABS Controller",
+      "-c", "user.email=mabs@local",
+      "cherry-pick", revision,
+    ], { cwd: path, timeoutMs: 120_000 });
+    if (cherryPick.code !== 0) {
+      await exec("git", ["cherry-pick", "--abort"], { cwd: path, timeoutMs: 30_000 });
+      throw new Error(`Could not integrate dependency revision ${revision}: ${(cherryPick.stderr || cherryPick.stdout).trim()}`);
+    }
+  }
+  return workspaceRevision(path);
+}
+
 export async function workspaceChangedFiles(path: string, baseRevision: string): Promise<string[]> {
   const committed = await git(path, ["diff", "--name-only", `${baseRevision}...HEAD`]);
   const status = await git(path, ["status", "--porcelain"]);
@@ -66,6 +84,19 @@ export async function workspaceChangedFiles(path: string, baseRevision: string):
  * the controller creates the allowed local commit in its isolated branch.
  */
 export async function finalizeWorkspace(path: string, task: Task): Promise<{ revision: string; changedFiles: string[] }> {
+  const baseRevision = task.baseRevision ?? await workspaceRevision(path);
+  const changedBeforeCommit = await workspaceChangedFiles(path, baseRevision);
+  if (task.allowedScope.length > 0) {
+    const normalize = (value: string) => value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
+    const scopes = task.allowedScope.map(normalize);
+    const outsideScope = changedBeforeCommit.filter((file) => {
+      const normalized = normalize(file);
+      return !scopes.some((scope) => normalized === scope || normalized.startsWith(`${scope}/`));
+    });
+    if (outsideScope.length > 0) {
+      throw new Error(`Worker changed files outside the allowed scope: ${outsideScope.join(", ")}`);
+    }
+  }
   const status = await git(path, ["status", "--porcelain"]);
   if (status !== "") {
     await git(path, ["add", "-A"]);
@@ -76,5 +107,5 @@ export async function finalizeWorkspace(path: string, task: Task): Promise<{ rev
     ]);
   }
   const revision = await workspaceRevision(path);
-  return { revision, changedFiles: await workspaceChangedFiles(path, task.baseRevision ?? revision) };
+  return { revision, changedFiles: await workspaceChangedFiles(path, baseRevision) };
 }

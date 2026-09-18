@@ -1,8 +1,11 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { Controller } from "./controller/controller.ts";
 import { exec } from "./core/exec.ts";
+import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
+import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
 import { openRecords } from "./store/records.ts";
@@ -56,11 +59,14 @@ Commands:
   project list                              List registered projects
   project status <id|name> <active|paused|archived>
   requirement add <project> <id> <text>
-  task add <project> <title> --objective=... [--accept='a;b'] [--depends=id,id]
+  task add <project> <title> --objective=... [--class=small_implementation]
   task list [--project=id] [--state=READY]
   task show <id>
   task retry <id> --version=<recordVersion>
   task cancel <id> --version=<recordVersion>
+  plan validate <file>
+  plan apply <project> <file>
+  provider list | provider reset <name>
   controller once [--adapter=codex]          Reconcile and dispatch one cycle
   controller run [--adapter=codex] [--ui]   Run controller loop
   status                                    Show queue and controller health
@@ -160,6 +166,17 @@ async function main(): Promise<void> {
         acceptanceCriteria: textOption(args, "accept")?.split(";").filter(Boolean) ?? [],
         dependsOn: textOption(args, "depends")?.split(",").filter(Boolean) ?? [],
         role: textOption(args, "role", "implementer"),
+        taskClass: textOption(args, "class") as never,
+        complexity: textOption(args, "complexity") as never,
+        ambiguity: textOption(args, "ambiguity") as never,
+        changeRisk: textOption(args, "risk") as never,
+        language: textOption(args, "language") ?? null,
+        domain: textOption(args, "domain") ?? null,
+        contextSize: textOption(args, "context-size") as never,
+        requiredTools: textOption(args, "tools")?.split(",").filter(Boolean) ?? [],
+        allowedScope: textOption(args, "scope")?.split(",").filter(Boolean) ?? [],
+        executionMode: textOption(args, "mode", "single"),
+        executionReason: textOption(args, "mode-reason", "User submitted a single task.") ?? null,
         priority: numberOption(args, "priority", 100),
         repairLimit: numberOption(args, "repair-limit", 2),
       });
@@ -180,8 +197,10 @@ async function main(): Promise<void> {
       console.log(JSON.stringify({
         task: records.getTask(id),
         attempts: records.listAttempts(id),
+        routing: records.routingForTask(id),
         gates: records.gatesForTask(id),
         events: records.listEvents(id),
+        latency: records.taskLatency(id),
       }, null, 2));
       return;
     }
@@ -195,6 +214,44 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(records.retryTask(id, version), null, 2));
       return;
     }
+    if (area === "plan" && (action === "validate" || action === "apply")) {
+      const [first, second] = rest;
+      const projectValue = action === "apply" ? first : undefined;
+      const file = action === "apply" ? second : first;
+      if (!file) throw new Error(action === "apply" ? "Usage: mabs plan apply <project> <file>" : "Usage: mabs plan validate <file>");
+      const plan = JSON.parse(readFileSync(resolve(file), "utf8")) as ExecutionPlan;
+      const validation = validateExecutionPlan(plan);
+      if (action === "validate") {
+        if (!validation.valid) records.recordEvent({ kind: "plan.invalid", data: { file: resolve(file), errors: validation.errors } });
+        console.log(JSON.stringify(validation, null, 2));
+        if (!validation.valid) process.exitCode = 1;
+        return;
+      }
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project) throw new Error(`Unknown project: ${projectValue ?? ""}`);
+      if (!validation.valid) {
+        records.recordEvent({ kind: "plan.invalid", projectId: project.id, data: { file: resolve(file), errors: validation.errors } });
+        throw new Error(`Invalid execution plan:\n${validation.errors.join("\n")}`);
+      }
+      const tasks = applyExecutionPlan(records, project.id, plan);
+      records.recordEvent({
+        kind: "plan.applied",
+        projectId: project.id,
+        data: { file: resolve(file), mode: plan.mode, reason: plan.reason, taskIds: tasks.map((task) => task.id) },
+      });
+      console.log(JSON.stringify({ validation, tasks }, null, 2));
+      return;
+    }
+    if (area === "provider" && action === "list") {
+      console.log(JSON.stringify(records.listProviderCapacity(), null, 2));
+      return;
+    }
+    if (area === "provider" && action === "reset") {
+      const provider = rest[0];
+      if (!provider) throw new Error("Usage: mabs provider reset <name>");
+      console.log(JSON.stringify(records.resetProvider(provider), null, 2));
+      return;
+    }
     if (area === "status") {
       const tasks = records.listTasks();
       const taskCounts: Record<string, number> = {};
@@ -203,6 +260,8 @@ async function main(): Promise<void> {
         projects: records.listProjects().length,
         taskCounts,
         pendingApprovals: records.listApprovals("pending").length,
+        providers: records.listProviderCapacity(),
+        operations: records.operationalMetrics(),
         health: records.latestHealth() ?? null,
       }, null, 2));
       return;
@@ -232,13 +291,21 @@ async function main(): Promise<void> {
 
     if (area === "controller" && (action === "once" || action === "run")) {
       const args = parseArgs(rest);
-      const adapter = textOption(args, "adapter", process.env.MABS_ADAPTER ?? "codex");
-      if (adapter !== "claude" && adapter !== "codex") throw new Error("--adapter must be claude or codex");
+      const adapter = textOption(args, "adapter") ?? process.env.MABS_ADAPTER;
+      if (adapter !== undefined && adapter !== "claude" && adapter !== "codex") throw new Error("--adapter must be claude or codex");
       const controller = new Controller(records, {
-        defaultAdapter: adapter,
+        defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
+        defaultEffort: textOption(args, "effort") ?? null,
         workerLimit: numberOption(args, "workers", 2),
         activeProjectLimit: numberOption(args, "active-projects", 2),
+        perProjectWorkerLimit: numberOption(args, "per-project-workers", numberOption(args, "workers", 2)),
+        minFreeMemoryMb: numberOption(args, "min-free-memory-mb", 0),
+        maxLoadPerCpu: numberOption(args, "max-load-per-cpu", Number.MAX_SAFE_INTEGER),
+        providerLimits: {
+          claude: numberOption(args, "claude-limit", Math.max(1, Math.ceil(numberOption(args, "workers", 2) / 2))),
+          codex: numberOption(args, "codex-limit", Math.max(1, Math.floor(numberOption(args, "workers", 2) / 2))),
+        },
       });
       if (action === "once") {
         await controller.tick();
@@ -254,7 +321,7 @@ async function main(): Promise<void> {
         const address = await workbench.listen();
         console.log(`workbench: http://${address.host}:${address.port}`);
       }
-      console.log(`controller ${controller.options.controllerId} running with ${adapter}; Ctrl-C to stop`);
+      console.log(`controller ${controller.options.controllerId} running with ${adapter ?? controller.routingPolicy.version}; Ctrl-C to stop`);
       await waitForSignal(async () => {
         await controller.stop();
         if (workbench) await new Promise<void>((resolvePromise) => workbench?.server.close(() => resolvePromise()));

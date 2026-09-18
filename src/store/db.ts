@@ -7,13 +7,14 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "3";
+export const SCHEMA_VERSION = "6";
 
 export type Row = Record<string, unknown>;
 
 export class Store {
   readonly db: DatabaseSync;
   readonly path: string;
+  private transactionDepth = 0;
 
   constructor(path?: string) {
     this.path = path ?? dbPath();
@@ -29,10 +30,26 @@ export class Store {
   private migrate(): void {
     const schema = readFileSync(join(HERE, "schema.sql"), "utf8");
     this.db.exec(schema);
-    const taskColumns = this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-    if (!taskColumns.some((column) => column.name === "record_version")) {
-      this.db.exec("ALTER TABLE tasks ADD COLUMN record_version INTEGER NOT NULL DEFAULT 1");
-    }
+    const ensureColumn = (table: string, name: string, definition: string) => {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    };
+    ensureColumn("tasks", "record_version", "INTEGER NOT NULL DEFAULT 1");
+    ensureColumn("tasks", "task_class", "TEXT NOT NULL DEFAULT 'small_implementation'");
+    ensureColumn("tasks", "complexity", "TEXT NOT NULL DEFAULT 'medium'");
+    ensureColumn("tasks", "ambiguity", "TEXT NOT NULL DEFAULT 'low'");
+    ensureColumn("tasks", "change_risk", "TEXT NOT NULL DEFAULT 'medium'");
+    ensureColumn("tasks", "language", "TEXT");
+    ensureColumn("tasks", "domain", "TEXT");
+    ensureColumn("tasks", "context_size", "TEXT NOT NULL DEFAULT 'medium'");
+    ensureColumn("tasks", "required_tools", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("tasks", "allowed_scope", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("tasks", "execution_reason", "TEXT");
+    ensureColumn("controller_health", "oldest_claim_age_s", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("controller_health", "slot_utilization", "REAL NOT NULL DEFAULT 0");
+    ensureColumn("controller_health", "uptime_s", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("controller_health", "provider_status", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("controller_health", "backpressure_reason", "TEXT");
     this.db
       .prepare("INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(SCHEMA_VERSION);
@@ -55,14 +72,26 @@ export class Store {
    * written together so history can never disagree with current state.
    */
   tx<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    const nested = this.transactionDepth > 0;
+    const savepoint = `mabs_tx_${this.transactionDepth}`;
+    if (nested) this.db.exec(`SAVEPOINT ${savepoint}`);
+    else this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth += 1;
     try {
       const result = fn();
-      this.db.exec("COMMIT");
+      if (nested) this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      else this.db.exec("COMMIT");
+      this.transactionDepth -= 1;
       return result;
     } catch (error) {
+      this.transactionDepth -= 1;
       try {
-        this.db.exec("ROLLBACK");
+        if (nested) {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        } else {
+          this.db.exec("ROLLBACK");
+        }
       } catch {
         // A rollback failure must not mask the original error.
       }

@@ -5,6 +5,8 @@ import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
 import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/policy.ts";
 import type { FailureClass } from "../core/failure.ts";
+import { TASK_CLASSES } from "../routing/router.ts";
+import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
 
 export type ProjectStatus = "active" | "paused" | "archived";
 
@@ -39,9 +41,19 @@ export interface Task {
   objective: string;
   acceptanceCriteria: string[];
   role: string;
+  taskClass: TaskClass;
+  complexity: Complexity;
+  ambiguity: Ambiguity;
+  changeRisk: ChangeRisk;
+  language: string | null;
+  domain: string | null;
+  contextSize: Complexity;
+  requiredTools: string[];
+  allowedScope: string[];
   state: TaskState;
   priority: number;
   executionMode: string;
+  executionReason: string | null;
   inScopeActions: Action[];
   repairLimit: number;
   repairsUsed: number;
@@ -66,7 +78,7 @@ export interface Attempt {
   taskId: string;
   launchId: string;
   attemptNumber: number;
-  kind: "initial" | "repair" | "review";
+  kind: "initial" | "repair" | "review" | "reroute";
   adapter: string;
   model: string | null;
   effort: string | null;
@@ -126,6 +138,28 @@ export interface Approval {
   consumedAt: string | null;
 }
 
+export interface ProviderCapacity {
+  provider: string;
+  state: "available" | "cooldown" | "unavailable";
+  maxConcurrency: number;
+  blockedUntil: string | null;
+  reason: string | null;
+  errorCount: number;
+  updatedAt: string;
+}
+
+function toProviderCapacity(row: Row): ProviderCapacity {
+  return {
+    provider: row.provider as string,
+    state: row.state as ProviderCapacity["state"],
+    maxConcurrency: Number(row.max_concurrency ?? 1),
+    blockedUntil: (row.blocked_until as string) ?? null,
+    reason: (row.reason as string) ?? null,
+    errorCount: Number(row.error_count ?? 0),
+    updatedAt: row.updated_at as string,
+  };
+}
+
 function toProject(row: Row): Project {
   return {
     id: row.id as string,
@@ -151,9 +185,19 @@ function toTask(row: Row): Task {
     objective: row.objective as string,
     acceptanceCriteria: fromJson<string[]>(row.acceptance_criteria, []),
     role: row.role as string,
+    taskClass: row.task_class as TaskClass,
+    complexity: row.complexity as Complexity,
+    ambiguity: row.ambiguity as Ambiguity,
+    changeRisk: row.change_risk as ChangeRisk,
+    language: (row.language as string) ?? null,
+    domain: (row.domain as string) ?? null,
+    contextSize: row.context_size as Complexity,
+    requiredTools: fromJson<string[]>(row.required_tools, []),
+    allowedScope: fromJson<string[]>(row.allowed_scope, []),
     state: row.state as TaskState,
     priority: Number(row.priority ?? 100),
     executionMode: row.execution_mode as string,
+    executionReason: (row.execution_reason as string) ?? null,
     inScopeActions: fromJson<Action[]>(row.in_scope_actions, []),
     repairLimit: Number(row.repair_limit ?? 2),
     repairsUsed: Number(row.repairs_used ?? 0),
@@ -225,8 +269,18 @@ function toApproval(row: Row): Approval {
 
 const TASK_MUTABLE_COLUMNS = new Set([
   "role",
+  "task_class",
+  "complexity",
+  "ambiguity",
+  "change_risk",
+  "language",
+  "domain",
+  "context_size",
+  "required_tools",
+  "allowed_scope",
   "priority",
   "execution_mode",
+  "execution_reason",
   "in_scope_actions",
   "repair_limit",
   "repairs_used",
@@ -425,17 +479,43 @@ export class Records {
     objective: string;
     acceptanceCriteria?: string[];
     role?: string;
+    taskClass?: TaskClass;
+    complexity?: Complexity;
+    ambiguity?: Ambiguity;
+    changeRisk?: ChangeRisk;
+    language?: string | null;
+    domain?: string | null;
+    contextSize?: Complexity;
+    requiredTools?: string[];
+    allowedScope?: string[];
     priority?: number;
     dependsOn?: string[];
     deadlineAt?: string | null;
     repairLimit?: number;
     inScopeActions?: Action[];
     executionMode?: string;
+    executionReason?: string | null;
     reviewOfTaskId?: string | null;
   }): Task {
     const id = ids.task();
     const at = nowIso();
     const dependsOn = [...new Set(input.dependsOn ?? [])];
+    const role = input.role ?? "implementer";
+    const taskClass = input.taskClass ?? (role === "reviewer" ? "review" : role === "researcher" ? "research" : role === "troubleshooter" ? "troubleshooting" : "small_implementation");
+    if (!TASK_CLASSES.includes(taskClass)) throw new Error(`Unknown task class: ${taskClass}`);
+    if (!["low", "medium", "high"].includes(input.complexity ?? "medium")) throw new Error(`Invalid complexity: ${input.complexity}`);
+    if (!["low", "medium", "high"].includes(input.ambiguity ?? "low")) throw new Error(`Invalid ambiguity: ${input.ambiguity}`);
+    if (!["low", "medium", "high"].includes(input.changeRisk ?? "medium")) throw new Error(`Invalid change risk: ${input.changeRisk}`);
+    if (!["low", "medium", "high"].includes(input.contextSize ?? "medium")) throw new Error(`Invalid context size: ${input.contextSize}`);
+    if (!["single", "sequential", "parallel", "mixed"].includes(input.executionMode ?? "single")) {
+      throw new Error(`Invalid execution mode: ${input.executionMode}`);
+    }
+    for (const scope of input.allowedScope ?? []) {
+      const normalized = scope.replaceAll("\\", "/").replace(/^\.\//, "");
+      if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) {
+        throw new Error(`Allowed scope must be a repository-relative path: ${scope}`);
+      }
+    }
     return this.store.tx(() => {
       for (const dependencyId of dependsOn) {
         const dependency = this.getTask(dependencyId);
@@ -445,21 +525,33 @@ export class Records {
         }
       }
       this.store.run(
-        `INSERT INTO tasks(id, project_id, title, objective, acceptance_criteria, role, state, priority,
-           execution_mode, in_scope_actions, repair_limit, repairs_used, deadline_at, review_of_task_id,
-           created_at, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`,
+        `INSERT INTO tasks(id, project_id, title, objective, acceptance_criteria, role, task_class,
+           complexity, ambiguity, change_risk, language, domain, context_size, required_tools, allowed_scope,
+           state, priority, execution_mode, execution_reason, in_scope_actions, repair_limit, repairs_used,
+           deadline_at, review_of_task_id, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.projectId,
         input.title,
         input.objective,
         toJson(input.acceptanceCriteria ?? []),
-        input.role ?? "implementer",
+        role,
+        taskClass,
+        input.complexity ?? "medium",
+        input.ambiguity ?? "low",
+        input.changeRisk ?? "medium",
+        input.language ?? null,
+        input.domain ?? null,
+        input.contextSize ?? "medium",
+        toJson(input.requiredTools ?? []),
+        toJson(input.allowedScope ?? []),
         "QUEUED",
         input.priority ?? 100,
         input.executionMode ?? "single",
+        input.executionReason ?? null,
         toJson(input.inScopeActions ?? []),
         input.repairLimit ?? 2,
+        0,
         input.deadlineAt ?? null,
         input.reviewOfTaskId ?? null,
         at,
@@ -472,7 +564,7 @@ export class Records {
         kind: "task.created",
         projectId: input.projectId,
         taskId: id,
-        data: { title: input.title, dependsOn },
+        data: { title: input.title, dependsOn, taskClass, executionMode: input.executionMode ?? "single" },
       });
       return this.getTask(id) as Task;
     });
@@ -893,7 +985,94 @@ export class Records {
     return row ? toApproval(row) : null;
   }
 
-  // --- routing and context ------------------------------------------------
+  // --- provider capacity, fairness, routing, and context ------------------
+
+  configureProvider(provider: string, maxConcurrency: number): ProviderCapacity {
+    if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
+      throw new Error(`Provider ${provider} concurrency must be a positive integer`);
+    }
+    this.store.run(
+      `INSERT INTO provider_capacity(provider, state, max_concurrency, updated_at)
+       VALUES(?,'available',?,?)
+       ON CONFLICT(provider) DO UPDATE SET max_concurrency = excluded.max_concurrency, updated_at = excluded.updated_at`,
+      provider,
+      maxConcurrency,
+      nowIso(),
+    );
+    return this.getProviderCapacity(provider) as ProviderCapacity;
+  }
+
+  getProviderCapacity(provider: string, now = new Date()): ProviderCapacity | null {
+    let row = this.store.get("SELECT * FROM provider_capacity WHERE provider = ?", provider);
+    if (!row) return null;
+    const capacity = toProviderCapacity(row);
+    if (capacity.state === "cooldown" && capacity.blockedUntil && Date.parse(capacity.blockedUntil) <= now.getTime()) {
+      this.store.run(
+        "UPDATE provider_capacity SET state = 'available', blocked_until = NULL, reason = NULL, updated_at = ? WHERE provider = ?",
+        now.toISOString(),
+        provider,
+      );
+      this.recordEvent({ kind: "provider.available", data: { provider, reason: "cooldown expired" } });
+      row = this.store.get("SELECT * FROM provider_capacity WHERE provider = ?", provider) as Row;
+      return toProviderCapacity(row);
+    }
+    return capacity;
+  }
+
+  listProviderCapacity(now = new Date()): ProviderCapacity[] {
+    const providers = this.store.all("SELECT provider FROM provider_capacity ORDER BY provider").map((row) => row.provider as string);
+    return providers.map((provider) => this.getProviderCapacity(provider, now)).filter((item): item is ProviderCapacity => item !== null);
+  }
+
+  noteProviderFailure(provider: string, failure: FailureClass, reason: string, cooldownMs = 15 * 60_000): ProviderCapacity {
+    const existing = this.getProviderCapacity(provider) ?? this.configureProvider(provider, 1);
+    const state: ProviderCapacity["state"] = failure === "AUTH" ? "unavailable" : failure === "QUOTA" ? "cooldown" : existing.state;
+    const blockedUntil = failure === "QUOTA" ? new Date(Date.now() + cooldownMs).toISOString() : null;
+    this.store.tx(() => {
+      this.store.run(
+        `UPDATE provider_capacity SET state = ?, blocked_until = ?, reason = ?, error_count = error_count + 1,
+           updated_at = ? WHERE provider = ?`,
+        state,
+        blockedUntil,
+        reason,
+        nowIso(),
+        provider,
+      );
+      this.recordEvent({ kind: "provider.failure", data: { provider, failure, state, blockedUntil, reason } });
+    });
+    return this.getProviderCapacity(provider) as ProviderCapacity;
+  }
+
+  resetProvider(provider: string, reason = "operator reset"): ProviderCapacity {
+    const existing = this.getProviderCapacity(provider);
+    if (!existing) throw new Error(`Unknown provider ${provider}`);
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE provider_capacity SET state = 'available', blocked_until = NULL, reason = NULL, updated_at = ? WHERE provider = ?",
+        nowIso(),
+        provider,
+      );
+      this.recordEvent({ kind: "provider.available", data: { provider, reason } });
+    });
+    return this.getProviderCapacity(provider) as ProviderCapacity;
+  }
+
+  markProjectDispatched(projectId: string): void {
+    this.store.run(
+      `INSERT INTO project_schedule(project_id, dispatch_count, last_dispatched_at) VALUES(?,1,?)
+       ON CONFLICT(project_id) DO UPDATE SET dispatch_count = dispatch_count + 1,
+         last_dispatched_at = excluded.last_dispatched_at`,
+      projectId,
+      nowIso(),
+    );
+  }
+
+  projectSchedule(): Map<string, { dispatchCount: number; lastDispatchedAt: string | null }> {
+    return new Map(this.store.all("SELECT * FROM project_schedule").map((row) => [
+      row.project_id as string,
+      { dispatchCount: Number(row.dispatch_count ?? 0), lastDispatchedAt: (row.last_dispatched_at as string) ?? null },
+    ]));
+  }
 
   recordRouting(input: {
     taskId: string;
@@ -918,6 +1097,13 @@ export class Records {
       input.effort ?? null,
       nowIso(),
     );
+  }
+
+  routingForTask(taskId: string): Row[] {
+    return this.store.all("SELECT * FROM routing_decisions WHERE task_id = ? ORDER BY at ASC", taskId).map((row) => ({
+      ...row,
+      eligible: fromJson<string[]>(row.eligible, []),
+    }));
   }
 
   recordPacket(input: {
@@ -954,6 +1140,65 @@ export class Records {
 
   getPacket(id: string): Row | undefined {
     return this.store.get("SELECT * FROM context_packets WHERE id = ?", id);
+  }
+
+  taskLatency(taskId: string): {
+    planningMs: number | null;
+    queueWaitMs: number | null;
+    workerExecutionMs: number;
+    checkingMs: number;
+    reviewMs: number;
+    approvalWaitMs: number;
+    longestStage: string | null;
+    longestStageReason: string | null;
+  } {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Unknown task ${taskId}`);
+    const stateEvents = this.store.all(
+      "SELECT at, data FROM events WHERE task_id = ? AND kind = 'task.state' ORDER BY rowid ASC",
+      taskId,
+    ).map((row) => ({ at: row.at as string, data: fromJson<{ to?: string }>(row.data, {}) }));
+    const firstReady = stateEvents.find((event) => event.data.to === "READY");
+    const queueWaitMs = firstReady ? Date.parse(firstReady.at) - Date.parse(task.createdAt) : null;
+    const workerExecutionMs = this.listAttempts(taskId).reduce((total, attempt) => {
+      const end = attempt.endedAt ? Date.parse(attempt.endedAt) : Date.now();
+      return total + Math.max(0, end - Date.parse(attempt.startedAt));
+    }, 0);
+    const durationInState = (state: string) => stateEvents.reduce((total, event, index) => {
+      if (event.data.to !== state) return total;
+      const end = stateEvents[index + 1]?.at ?? task.updatedAt;
+      return total + Math.max(0, Date.parse(end) - Date.parse(event.at));
+    }, 0);
+    const checkingMs = durationInState("CHECKING");
+    const reviewMs = durationInState("REVIEWING");
+    const approvalWaitMs = this.store.all("SELECT requested_at, decided_at FROM approvals WHERE task_id = ?", taskId)
+      .reduce((total, row) => total + Math.max(0, Date.parse((row.decided_at as string | null) ?? new Date().toISOString()) - Date.parse(row.requested_at as string)), 0);
+    const stages: [string, number][] = [
+      ["queue_wait", queueWaitMs ?? 0],
+      ["worker_execution", workerExecutionMs],
+      ["checking", checkingMs],
+      ["review", reviewMs],
+      ["approval_wait", approvalWaitMs],
+    ];
+    const longest = stages.sort((a, b) => b[1] - a[1])[0];
+    const longestStage = longest && longest[1] > 0 ? longest[0] : null;
+    const reasons: Record<string, string> = {
+      queue_wait: "Waiting for dependencies, project admission, execution locks, or worker/provider capacity.",
+      worker_execution: "Subscription worker execution and attempt-boundary collection.",
+      checking: "Registered deterministic quality gates.",
+      review: "Independent review work.",
+      approval_wait: "Human approval wait; not a model bottleneck.",
+    };
+    return {
+      planningMs: null,
+      queueWaitMs,
+      workerExecutionMs,
+      checkingMs,
+      reviewMs,
+      approvalWaitMs,
+      longestStage,
+      longestStageReason: longestStage ? reasons[longestStage] ?? null : null,
+    };
   }
 
   // --- controller health --------------------------------------------------
@@ -1015,18 +1260,27 @@ export class Records {
     dbErrors: number;
     queueDepth: number;
     oldestReadyAgeS: number;
+    oldestClaimAgeS: number;
     activeWorkers: number;
     workerLimit: number;
+    slotUtilization: number;
+    uptimeS: number;
+    providerStatus: Record<string, unknown>[];
+    backpressureReason: string | null;
     state: "running" | "stopped" | "degraded";
   }): void {
     this.store.run(
       `INSERT INTO controller_health(id, pid, started_at, heartbeat_at, loop_delay_ms, db_errors, queue_depth,
-         oldest_ready_age_s, active_workers, worker_limit, state)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+         oldest_ready_age_s, oldest_claim_age_s, active_workers, worker_limit, slot_utilization, uptime_s,
+         provider_status, backpressure_reason, state)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, loop_delay_ms = excluded.loop_delay_ms,
          db_errors = excluded.db_errors, queue_depth = excluded.queue_depth,
-         oldest_ready_age_s = excluded.oldest_ready_age_s, active_workers = excluded.active_workers,
-         worker_limit = excluded.worker_limit, state = excluded.state`,
+         oldest_ready_age_s = excluded.oldest_ready_age_s, oldest_claim_age_s = excluded.oldest_claim_age_s,
+         active_workers = excluded.active_workers, worker_limit = excluded.worker_limit,
+         slot_utilization = excluded.slot_utilization, uptime_s = excluded.uptime_s,
+         provider_status = excluded.provider_status, backpressure_reason = excluded.backpressure_reason,
+         state = excluded.state`,
       input.id,
       input.pid,
       input.startedAt,
@@ -1035,14 +1289,44 @@ export class Records {
       input.dbErrors,
       input.queueDepth,
       input.oldestReadyAgeS,
+      input.oldestClaimAgeS,
       input.activeWorkers,
       input.workerLimit,
+      input.slotUtilization,
+      input.uptimeS,
+      toJson(input.providerStatus),
+      input.backpressureReason,
       input.state,
     );
   }
 
   latestHealth(): Row | undefined {
     return this.store.get("SELECT * FROM controller_health ORDER BY heartbeat_at DESC LIMIT 1");
+  }
+
+  operationalMetrics(): {
+    controllerRestarts: number;
+    providerErrors: number;
+    invalidPlans: number;
+    routingOverrides: number;
+    repeatedReplans: number;
+    orchestratorState: "idle" | "active";
+    lastDecisionDurationMs: number | null;
+  } {
+    const generations = this.store.get("SELECT COUNT(*) AS n FROM controller_health");
+    const providerErrors = this.store.get("SELECT COALESCE(SUM(error_count), 0) AS n FROM provider_capacity");
+    const countEvents = (kind: string) => Number(this.store.get("SELECT COUNT(*) AS n FROM events WHERE kind = ?", kind)?.n ?? 0);
+    const decision = this.store.get("SELECT data FROM events WHERE kind = 'orchestrator.decision' ORDER BY rowid DESC LIMIT 1");
+    const decisionData = decision ? fromJson<{ durationMs?: number }>(decision.data, {}) : {};
+    return {
+      controllerRestarts: Math.max(0, Number(generations?.n ?? 0) - 1),
+      providerErrors: Number(providerErrors?.n ?? 0),
+      invalidPlans: countEvents("plan.invalid"),
+      routingOverrides: countEvents("routing.override"),
+      repeatedReplans: countEvents("plan.replanned"),
+      orchestratorState: "idle",
+      lastDecisionDurationMs: typeof decisionData.durationMs === "number" ? decisionData.durationMs : null,
+    };
   }
 }
 
