@@ -1,0 +1,28 @@
+{
+  "name": "mabs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-agent build system: LLM orchestrator + deterministic task controller over subscription coding workers.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "mabs": "./src/cli.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./.pi/extensions/mabs.ts"
+    ]
+  },
+  "scripts": {
+    "mabs": "node src/cli.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "node src/cli.ts verify"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "typescript": "^7.0.2"
+  }
+}

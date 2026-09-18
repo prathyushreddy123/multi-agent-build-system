@@ -1,0 +1,214 @@
+-- MABS schema v1.
+--
+-- SQLite is authoritative for coordination state. Large logs and transcripts
+-- are files on disk; records keep the path, never the payload.
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL UNIQUE,
+  repo_path       TEXT NOT NULL,
+  base_branch     TEXT NOT NULL DEFAULT 'main',
+  status          TEXT NOT NULL DEFAULT 'active',      -- active | paused | archived
+  routing_profile TEXT NOT NULL DEFAULT 'default',
+  approval_policy TEXT NOT NULL DEFAULT '{"overrides":{},"standing":[]}',
+  check_commands  TEXT NOT NULL DEFAULT '[]',
+  config_version  TEXT NOT NULL,
+  goal            TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+-- Requirements carry stable IDs so context packets can prove coverage.
+CREATE TABLE IF NOT EXISTS requirements (
+  id         TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  text       TEXT NOT NULL,
+  mandatory  INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id                  TEXT PRIMARY KEY,
+  project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title               TEXT NOT NULL,
+  objective           TEXT NOT NULL,
+  acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+  role                TEXT NOT NULL DEFAULT 'implementer',
+  state               TEXT NOT NULL DEFAULT 'QUEUED',
+  priority            INTEGER NOT NULL DEFAULT 100,
+  execution_mode      TEXT NOT NULL DEFAULT 'single',   -- single | sequential | parallel | mixed
+  in_scope_actions    TEXT NOT NULL DEFAULT '[]',
+  repair_limit        INTEGER NOT NULL DEFAULT 2,
+  repairs_used        INTEGER NOT NULL DEFAULT 0,
+  deadline_at         TEXT,
+  branch              TEXT,
+  worktree_path       TEXT,
+  base_revision       TEXT,
+  result_revision     TEXT,
+  claimed_by          TEXT,                             -- controller launch id
+  claimed_at          TEXT,
+  blocked_reason      TEXT,
+  failure_class       TEXT,
+  result_summary      TEXT,
+  review_of_task_id   TEXT REFERENCES tasks(id),
+  record_version      INTEGER NOT NULL DEFAULT 1,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS tasks_by_state   ON tasks(state);
+CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks(project_id, state);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+  task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  PRIMARY KEY (task_id, depends_on_id)
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+  id              TEXT PRIMARY KEY,
+  task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  launch_id       TEXT NOT NULL UNIQUE,
+  attempt_number  INTEGER NOT NULL,
+  kind            TEXT NOT NULL DEFAULT 'initial',      -- initial | repair | review
+  adapter         TEXT NOT NULL,
+  model           TEXT,
+  effort          TEXT,
+  auth_mode       TEXT,
+  state           TEXT NOT NULL DEFAULT 'running',      -- running | succeeded | failed | cancelled
+  pid             INTEGER,
+  session_id      TEXT,
+  worktree_path   TEXT,
+  base_revision   TEXT,
+  result_revision TEXT,
+  outcome         TEXT,
+  failure_class   TEXT,
+  reason          TEXT,
+  exit_status     INTEGER,
+  usage_json      TEXT,
+  output_path     TEXT,
+  packet_id       TEXT,
+  started_at      TEXT NOT NULL,
+  heartbeat_at    TEXT,
+  ended_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts(task_id);
+CREATE INDEX IF NOT EXISTS attempts_running ON attempts(state) WHERE state = 'running';
+
+-- Append-only. Every state change writes its event in the same transaction.
+CREATE TABLE IF NOT EXISTS events (
+  id         TEXT PRIMARY KEY,
+  at         TEXT NOT NULL,
+  project_id TEXT,
+  task_id    TEXT,
+  attempt_id TEXT,
+  kind       TEXT NOT NULL,
+  data       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS events_by_task ON events(task_id, at);
+CREATE INDEX IF NOT EXISTS events_by_kind ON events(kind, at);
+
+CREATE TABLE IF NOT EXISTS gate_results (
+  id            TEXT PRIMARY KEY,
+  task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_id    TEXT,
+  name          TEXT NOT NULL,
+  status        TEXT NOT NULL,                          -- PASS | FAIL | ERROR | SKIPPED
+  required      INTEGER NOT NULL DEFAULT 1,
+  command       TEXT NOT NULL,
+  tool_version  TEXT,
+  revision      TEXT NOT NULL,
+  evidence_path TEXT,
+  duration_ms   INTEGER,
+  waiver_id     TEXT REFERENCES approvals(id),
+  created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS gates_by_task ON gate_results(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id        TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+  action         TEXT NOT NULL,
+  target         TEXT NOT NULL,
+  revision       TEXT NOT NULL,
+  config_version TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'pending',       -- pending | approved | rejected | invalidated | consumed
+  reason         TEXT,
+  evidence       TEXT NOT NULL DEFAULT '{}',
+  requested_at   TEXT NOT NULL,
+  decided_at     TEXT,
+  decided_by     TEXT,
+  consumed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(state, requested_at);
+
+CREATE TABLE IF NOT EXISTS routing_decisions (
+  id          TEXT PRIMARY KEY,
+  task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_id  TEXT,
+  rule        TEXT NOT NULL,
+  reason      TEXT NOT NULL,
+  eligible    TEXT NOT NULL DEFAULT '[]',
+  chosen      TEXT NOT NULL,
+  model       TEXT,
+  effort      TEXT,
+  at          TEXT NOT NULL
+);
+
+-- Context packets: exactly what was supplied to a worker, for continuity checks.
+CREATE TABLE IF NOT EXISTS context_packets (
+  id              TEXT PRIMARY KEY,
+  task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_id      TEXT,
+  requirement_ids TEXT NOT NULL DEFAULT '[]',
+  omitted         TEXT NOT NULL DEFAULT '[]',
+  files           TEXT NOT NULL DEFAULT '[]',
+  artifacts       TEXT NOT NULL DEFAULT '[]',
+  base_revision   TEXT,
+  token_estimate  INTEGER,
+  manifest_path   TEXT,
+  warnings        TEXT NOT NULL DEFAULT '[]',
+  created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS config_versions (
+  id         TEXT PRIMARY KEY,
+  source     TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  active     INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+-- One row per controller process generation; proves liveness without an LLM.
+CREATE TABLE IF NOT EXISTS controller_lease (
+  singleton     INTEGER PRIMARY KEY CHECK(singleton = 1),
+  controller_id TEXT NOT NULL,
+  pid           INTEGER NOT NULL,
+  acquired_at   TEXT NOT NULL,
+  heartbeat_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS controller_health (
+  id                TEXT PRIMARY KEY,
+  pid               INTEGER NOT NULL,
+  started_at        TEXT NOT NULL,
+  heartbeat_at      TEXT NOT NULL,
+  loop_delay_ms     INTEGER NOT NULL DEFAULT 0,
+  db_errors         INTEGER NOT NULL DEFAULT 0,
+  queue_depth       INTEGER NOT NULL DEFAULT 0,
+  oldest_ready_age_s INTEGER NOT NULL DEFAULT 0,
+  active_workers    INTEGER NOT NULL DEFAULT 0,
+  worker_limit      INTEGER NOT NULL DEFAULT 2,
+  state             TEXT NOT NULL DEFAULT 'running'      -- running | stopped | degraded
+);

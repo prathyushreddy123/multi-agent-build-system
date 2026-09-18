@@ -1,0 +1,351 @@
+Multi Agent Product Development Plan
+Architecture and implementation strategy for Prathyush Reddy
+Version 1.1  |  17 September 2026  |  Updated review draft
+## Recommendation
+Build one orchestrator supported by a deterministic task controller, a persistent SQLite queue, and subscription-authenticated coding workers. Use established tools for formatting, linting, type checks, and tests. Keep custom code focused on coordination, routing, approvals, and recovery.
+This plan consolidates our agreed requirements and the useful additions from the supplied architecture document. Version 1.1 adds project growth, controller monitoring, portable context, task-based routing, execution-mode selection, and an interactive workbench. These are proposed implementation requirements; integrations remain subject to phase 0 verification.
+## Scope and constraints
+Area
+Proposed baseline
+Environment
+One WSL Ubuntu machine; initially 2–3 registered projects. Default maximum of 2 actively executing projects; additional projects remain registered or queued.
+Concurrency
+Start with 2 active workers; configurable maximum of 4 across all projects. The orchestrator is separate but also consumes allowance when it calls a model.
+Model access
+Existing Claude Pro and ChatGPT Plus subscriptions only. No paid API, extra-credit, or automatic subscription-upgrade fallback.
+Autonomy
+Workers may edit, test, and commit in assigned worktrees. Approval gates cover publication, merges, deployments, and material scope changes.
+Quality and security
+Quality checks are part of the first coding workflow. Preserve extension points for later security gates.
+User experience
+Herdr for terminals; a small local dashboard for plans, outputs, task status, approvals, and troubleshooting.
+
+## Primary success measure
+Optimize accepted product work per unit of subscription usage and manual attention. Track completion quality, repair cycles, elapsed time, and interventions. Fewer tokens alone is not a success if errors or rework increase.
+## Design decisions retained from the review
+Adopt rules-first routing, compact evidence-based handoffs, and an on-demand configuration curator. Keep the queue and task controller from day one. Defer local-model serving, LiteLLM, codebase indexing, and dedicated tracing services until measured needs justify them.
+
+# Architecture and component ownership
+The orchestrator proposes plans and assignments. The controller validates and executes them under configured policy. Routine polling, scheduling, state updates, and tool execution do not require model calls.
+Component
+Owns
+Does not own
+Orchestrator
+LLM-assisted task decomposition, ambiguous routing, blocker interpretation, and summaries. Invoked on events, not for polling.
+Authoritative state or unrestricted approval decisions.
+Task controller
+Ordinary code with no LLM inference: state transitions, queue claims, scheduling, retries, cancellation, and approvals.
+Product reasoning or code review judgment.
+SQLite store
+Projects, tasks, dependencies, attempts, events, gate results, approvals, routing/config versions.
+Large logs or model transcripts; retain file references instead.
+Worker adapters
+Launch, status, cancellation, structured results, supported model and effort options.
+Deciding whether a task has met all completion gates.
+Herdr
+Terminal organization and supported process/session controls.
+Proof of task completion or safe replay of external actions.
+Quality runners
+Repository-specific deterministic commands and normalized results.
+Business requirement acceptance.
+Dashboard
+Read task records and submit explicit control requests.
+Direct database mutations or bypassing controller policy.
+
+## Project and workspace isolation
+Register each project with its repository, base branch, check commands, routing profile, and approval policy. Give each concurrent coding task its own branch and worktree. Record the base and resulting revisions. Worktrees separate edits but are not security sandboxes.
+Integrate changes serially per target branch. If the target changes, check the proposed combined result again and invalidate approvals whose relevant code or action changed. Do not let two workers overwrite one working directory.
+## Implementation strategy
+Use one local controller process initially, with explicit adapter and gate interfaces. Prefer a language that fits the existing Pi extension project; finalize that choice after inspecting the current repository. Keep migrations, configuration, and contracts versioned in Git. SQLite transactions should update task state and its corresponding event together.
+## Pi execution prerequisite
+Pi is the desired interface, but its model execution path must be proven compatible with the no-extra-spend constraint. Do not assume a third-party provider login receives subscription allowance. If no compliant Pi path is available, present a specific interface or orchestrator alternative for review before continuing that integration. Local models remain optional.
+
+# Task lifecycle and recovery
+State
+Meaning and next step
+QUEUED
+Recorded with scope and acceptance criteria; wait for dependencies.
+READY
+Eligible for assignment when project and provider capacity permit.
+RUNNING
+A worker owns an active attempt and reports progress.
+CHECKING
+Required deterministic gates run against the recorded revision.
+REVIEWING
+A separate review task assesses substantive changes and relevant context.
+AWAITING_APPROVAL
+A defined action is prepared with evidence for your decision.
+BLOCKED
+Missing input, unavailable subscription capacity, or unresolved dependency.
+DONE
+The agreed deliverable and required gates are satisfied.
+FAILED
+Automatic attempts are exhausted or an unrecoverable error occurred.
+CANCELLED
+Work stopped intentionally; partial artifacts remain available.
+
+Normal path: QUEUED → READY → RUNNING → CHECKING → REVIEWING → DONE. Approval gates can intervene at any action boundary. Pure formatting changes may skip AI review under project policy. Implementation, merge, and deployment are separate tasks when they have different completion criteria.
+## Bounded execution
+Allow at most two automatic repair cycles after the initial implementation. Record each attempt and why it was launched.
+Distinguish code failures from authentication, infrastructure, and quota failures. Do not spend repair attempts repeatedly retrying an unavailable provider.
+Set task-specific deadlines and a configurable heartbeat threshold. Investigate a stale heartbeat before declaring failure; a long tool run may still be active.
+Claim tasks atomically and assign unique launch identifiers. On restart, reconcile recorded attempts with actual processes and worktrees before launching replacements.
+Never promise exactly-once execution. Check the external result before retrying actions such as publishing, merging, or deploying. Block when the outcome is uncertain.
+## Scheduling
+Use a global worker limit and fair scheduling between projects. A blocked task releases its execution slot once its worker is safely stopped. Dependency failures block downstream tasks without blocking unrelated projects. Preserve artifacts before cancelling or cleaning up worktrees.
+
+# Worker contract and model routing
+Worker input
+Required content
+Identity
+project_id, task_id, attempt_id, role, contract_version
+Task
+Objective, acceptance criteria, dependencies, deadline, repair limits
+Workspace
+Worktree path, base revision, allowed scope and actions
+Execution
+Harness, requested model, effort where supported, authentication mode
+Context
+Relevant file references, previous findings, artifact references, configuration version
+
+Worker output
+Required content
+Outcome
+Completed, blocked, or failed; structured reason and summary
+Evidence
+Changed files, resulting revision, test and review artifacts
+Operations
+Process/session identifiers, timestamps, exit status, cancellation outcome
+Follow up
+Unresolved concerns, requested decisions, suggested next step
+Usage
+Reported model and token fields where available; unknown values remain null
+
+Adapters expose start, status, cancel, and collect_result. Resume is optional and advertised as a capability. Validate output schemas; missing or malformed output cannot silently become success. Store detailed logs locally and pass summaries plus evidence references to the orchestrator.
+## Routing policy
+Task class
+Default behavior
+Mechanical checks
+Use deterministic tools without model inference.
+Small implementation
+Configured role model with low or medium effort where supported.
+Complex coding or diagnosis
+Configured capable model with higher effort; escalate on evidence of difficulty.
+Planning and architecture
+Reasoning-capable model; ask for decisions when requirements materially affect design.
+Review
+Separate context; inspect the diff, requirements, tests, and relevant surrounding code.
+Provider unavailable
+Route to another eligible subscription provider or block. Never use paid fallback.
+
+Choose harness, model, and effort at task or attempt boundaries. Populate exact model IDs and role defaults during capability verification; do not copy an unverified model list into code. Record routing reasons and actual reported model. Reserve capacity for interactive use through adjustable limits; concurrency does not guarantee sustained subscription capacity.
+
+# Quality gates and approval policy
+Run configured formatting, linting, type checks, and relevant tests before substantive AI review. Use pre-commit plus the repository’s existing tools: examples include Ruff, ESLint, mypy, tsc, pytest, and Playwright. Add reviewdog when PR annotations become useful. Avoid installing every tool in every project.
+A gate returns PASS, FAIL, ERROR, or SKIPPED, with its command, tool version, checked revision, and evidence path. A skipped required gate needs an explicit waiver. Re-run affected gates after fixes; passing an earlier revision is not evidence for the new one.
+Action
+Initial policy
+Read, plan, edit, check and local commit
+Automatic within the accepted task and assigned worktree.
+Runtime dependencies or breaking interfaces
+Automatic only when explicitly included in scope; otherwise request approval.
+Scope or major architectural change
+Your approval before proceeding.
+Push branch or open draft PR
+Your approval until standing authorization is configured per project.
+Merge or deploy
+Your approval; prepare exact target, revision, evidence, and recovery notes first.
+Destructive migration or shared-data deletion
+Explicit action-specific approval.
+Waive required quality gate
+Your approval with the failed check and consequence visible.
+Activate setup changes
+Your approval after evaluation of proposed routing, prompt, or policy changes.
+
+Bind each approval to the action, target, revision, and relevant configuration. Reject stale approvals. Enforce consequential actions through controller-owned capabilities or access boundaries; a prompt instruction alone is not an approval mechanism. Keep scoped credentials and project isolation in the foundation while broader security analysis is deferred.
+## Two feedback loops
+Task feedback: tests and independent review return actionable findings to the worker within the repair limit. Reviewers should verify evidence and avoid relying only on the implementer’s summary.
+Setup feedback: an on-demand curator reads recurring failures and configuration, proposes a Git diff on a separate branch, and evaluates the proposal on representative tasks. It cannot activate changes itself. Track accepted and rejected suggestions to avoid repeated unhelpful proposals.
+## Future security extensions
+Add secret scanning, dependency checks, static security analysis, and deployment policy through the same gate contract. Candidate tools include Gitleaks and Semgrep Community Edition. Security gates can later become mandatory per project without redesigning task states.
+
+# Dashboard and operational evidence
+Build a local web workbench for plans, readable outputs, follow-up questions, requested changes, approvals, and troubleshooting. Start a minimal version in phase 1 and expand it in phase 3. A Pi command opens the workbench; both interfaces use the same controller and project records. Herdr remains available for terminal inspection.
+View
+Fields and controls
+Overview
+Active workers and limit; projects; ready, blocked, and failed tasks; pending approvals.
+Project
+Goal, milestone, repository, task counts, latest accepted result, active configuration.
+Task
+State, dependencies, acceptance criteria, role, model, effort, attempts, elapsed time.
+Worker
+Session/process identifiers, heartbeat, worktree, last reported activity, cancel control.
+Quality
+Gate statuses, checked revision, review findings, tests, evidence links.
+Approvals
+Prepared action, reason, target/revision, evidence, approve and reject controls.
+Troubleshooting
+Error category, event timeline, logs, checkpoint, explicit retry or cancel.
+Usage and improvement
+Reported usage, provider-limit events, repair counts, curator suggestions and evaluations.
+
+## Evidence and accounting
+Use project, task, attempt, and event IDs consistently. Record raw reported usage separately from any derived estimate. Do not label an API-equivalent estimate as subscription spend or remaining quota. Unknown measurements stay unknown. Do not store credentials in logs.
+Keep SQLite authoritative. Store larger artifacts and logs as files referenced by task records. Define retention and backup settings before using the system for client work. Initially retain failed-run evidence and completed-task summaries; confirm a practical retention period during setup.
+## Productivity evaluation
+Use the same small feature, bug fix, research task, and complex change to establish a baseline. Compare accepted outcomes, interventions, repair cycles, elapsed time, and reported usage. Add new components only when the comparison shows a useful improvement or resolves a demonstrated reliability gap.
+## Deferred components
+Local models, LiteLLM, embeddings, whole-repository indexes, SonarQube, dedicated trace servers, and remote worker infrastructure are outside v1. Revisit local models only after hardware and task-quality evaluation. Revisit remote execution when local capacity or availability becomes the actual constraint.
+
+# Implementation phases and review decisions
+Phase
+Deliverable
+Exit evidence
+0 Access proof
+One subscription worker per provider; Pi execution decision; supported model and output options.
+Confirm authentication, structured result, cancellation, and absence of paid fallback. Resolve Pi blocker before committing to that path.
+1 Reliable local task
+Controller, SQLite states, worktree, portable context, worker contract, quality gates, approvals, and minimal workbench.
+One task reaches acceptance; crash/restart preserves state and does not duplicate work.
+2 Parallel projects
+Task-based routing, execution-mode planning, provider limits, fair queue, and controller health monitoring.
+Two projects progress independently; global cap holds; quota failure blocks or reroutes correctly.
+3 Review and dashboard
+Independent review, full workbench feedback flow, evidence and context diagnostics, approval controls.
+Failed gates prevent completion; stale approvals are rejected; logs explain a failed run.
+4 Curator
+Configuration proposals, small evaluation suite, approval and activation history.
+A proposal is evaluated and activated only after approval; configuration can be reverted.
+5 Optimization
+Targeted improvements to context, routing, or optional infrastructure.
+Comparison shows improved accepted work or a resolved operational limitation.
+
+## Acceptance scenarios before routine use
+Complete a feature and a bug fix with quality evidence tied to the final revision.
+Kill a worker and restart the controller; detect existing work and recover without duplicate consequential actions.
+Simulate subscription exhaustion, malformed worker output, failed tests, and a stale heartbeat; show actionable states.
+Verify worker limits, project separation, two-cycle repair limit, and blocked merges without valid approval.
+Change the target branch after review; verify integration checks and relevant approval invalidation.
+## Decisions for your review
+Review the baseline of two active projects, two workers initially, four maximum, two repair cycles, SQLite from day one, portable context, and a minimal workbench in phase 1. During phase 0, inspect installed versions, identify pilot repositories, verify subscription execution, and populate exact role models. The following four sections specify the additional requirements from your review.
+## Reference basis
+Consolidated from our design discussion and your supplied Pasted markdown.md. Product behavior must be rechecked against installed versions during phase 0. Primary references for that verification:
+Pi  https://pi.dev/
+Herdr  https://github.com/herdrdev/herdr
+Claude programmatic execution  https://code.claude.com/docs/en/headless
+Codex authentication  https://learn.chatgpt.com/docs/auth
+pre-commit  https://pre-commit.com/
+reviewdog  https://github.com/reviewdog/reviewdog
+
+# Project growth and controller health
+The number of registered projects is independent of the number of active projects and workers. Paused projects keep their plans, context, and history without keeping agents alive. The architecture has no fixed two-project storage limit; practical capacity must be measured on your machine.
+Setting
+Initial policy
+Registered projects
+Start with 2–3. Add more without launching an agent per project. Support search, archive, and resume.
+Active projects
+Default limit 2, matching your attention capacity. Extra projects wait; changing this limit is a configuration decision.
+Worker pool
+Start with 2 total; configurable to 4 total across active projects, including review/research workers.
+Parallel work
+Two projects can each receive one worker initially. With four workers, allocation can be 2+2 or 3+1 when dependencies and capacity allow.
+Actual throughput
+Subscription availability, CPU/RAM, builds, tests, and your review workload determine sustainable throughput. Four workers is a ceiling, not a performance promise.
+Growth checkpoint
+Before substantially increasing the project registry, test queue latency, dashboard loading, context retrieval, backup/restore, and database contention with representative records.
+
+## Monitor the decision maker and the controller
+A non-LLM health check must distinguish an idle orchestrator from an unhealthy controller. Record controller heartbeat, uptime/restarts, event-loop delay, database errors, queue depth and oldest ready-task age, task claim age, and worker-slot utilization. Record orchestrator decision duration, provider errors, invalid plans, routing overrides, and repeated replanning.
+Break latency into queue wait, planning, worker execution, tool checks, review, and approval wait. Show the longest stage and its reason. A human approval wait is not a model bottleneck. Use configurable timeouts and alert thresholds derived from early baseline runs.
+## Recovery and backpressure
+Use a process supervisor compatible with the WSL environment to restart the controller after a crash. Reconcile outstanding work before scheduling new attempts. If SQLite is unavailable, stop dispatching rather than lose task ownership. Throttle new work when machine resources or provider capacity are constrained. WSL shutdown pauses local execution; v1 does not promise continuous availability.
+## Additional acceptance checks
+Register many inactive projects while running two active ones. Confirm inactive projects consume no model calls, the active-project limit holds, and neither active project starves. Stop the controller, introduce a database error, and simulate slow planning; the UI must identify each condition and preserve recoverable state.
+
+# Portable context and continuity checks
+Cross-provider continuity will use project-owned records rather than depend on a provider conversation being transferable. A handoff can preserve explicit facts and evidence, but cannot transfer hidden reasoning or guarantee identical behavior between models.
+Context layer
+Contents and ownership
+Project record
+Goal, requirements with stable IDs, constraints, approved decisions, interfaces, project terminology, and known issues. User-approved decisions remain authoritative.
+Task record
+Scope, acceptance criteria, dependency outputs, relevant files and revision, completed steps, unresolved questions, and current gate results.
+Handoff packet
+Versioned snapshot of required constraints, task progress, changed files, evidence references, unresolved issues, next action, and source revisions.
+Artifact store
+Diffs, test logs, research sources, review findings, and full attempt logs. Fetch relevant portions on demand.
+Retrieval manifest
+Exact records and versions supplied to the worker, omitted optional material, token estimate where available, and retrieval reasons.
+
+## Fetch and save strategy
+Build context deterministically from project, task, role, and dependency IDs. Include mandatory constraints verbatim; retrieve relevant source files and evidence by explicit reference. Start with file search and structured metadata. Embeddings are optional later. Budget each packet for the selected model, removing redundant logs before authoritative requirements.
+Save structured checkpoints after meaningful task milestones and before planned provider changes. Each checkpoint cites the base/result revision and source records. A worker may propose changes to project facts; the controller validates their schema and provenance, and material decisions require approval. Do not let a generated summary overwrite the authoritative record.
+Switch at task or attempt boundaries. Build a fresh packet from current state, record what was sent, and have the receiving worker identify required constraints and next steps. Resume an existing provider session only if its adapter supports it and its stored state still matches the task. Avoid repeated switching that rebuilds context unnecessarily.
+## Diagnose context loss through observable signals
+Check that every mandatory requirement ID is present in the packet; flag missing, stale, or conflicting revisions before execution.
+Track requirements addressed by output and tests; flag previously rejected approaches repeated without explanation.
+Show compression events, dropped optional records, re-fetches, repeated questions, and requirement violations in a context-health view.
+Treat acknowledgments and model self-reports as weak signals. Independent review and acceptance tests provide stronger evidence of behavioral continuity.
+Do not show a fabricated context-loss percentage. Report measurable coverage and warnings. Test handoffs in both provider directions using fixed tasks with known constraints; compare violations, repairs, and acceptance with a same-provider baseline.
+
+# Routing tools and execution mode
+Route by a task profile: role, language/domain, complexity, ambiguity, required tools, context size, change risk, and urgency. First filter eligible harnesses/models by subscription access and capabilities. Then apply configured role defaults, task-specific evaluation results, current availability, and effort settings. Explain the selection in the task record.
+## Learn model strengths from your own work
+During phase 0, evaluate available models on a small representative set: implementation, diagnosis, architecture, research, and review. Score correctness, supported findings, acceptance-test success, repair count, duration, and usage where reported. Publish a versioned task-class-to-model map. Initial assignments remain provisional until this evidence exists; do not presume one provider is best at every task.
+Keep primary and fallback models per task class. Start with explicit rules; do not add an LLM routing call for every simple task. The orchestrator resolves ambiguous assignments, and the controller enforces the eligible choices. Curator-proposed routing changes require evaluation and approval before activation.
+## You do not need to manually route individual tools
+A project onboarding command inspects repository manifests, existing scripts, CI configuration, and installed tools, then proposes a small quality profile. Reuse project commands where present. You review unusual installs or material configuration changes once; the controller subsequently runs the configured commands automatically.
+For example, a Python feature task invokes its registered formatter, linter, type checker if configured, and tests after editing. Their exit codes and structured reports become gate results. Only a failure needing interpretation or repair invokes a model. Commands, timeouts, working directories, and parsers are registered explicitly; the scheduler does not invent shell commands from arbitrary text.
+Mode
+Use when
+Controller enforcement
+Single worker
+Small or tightly coupled task; delegation would add overhead.
+One execution attempt; checks and required review still follow.
+Sequential workers
+A step needs another step’s result, such as design before implementation or review after changes.
+Represent prerequisites as dependencies; run only ready tasks.
+Parallel workers
+Independent outputs can be integrated, such as separate research questions or non-conflicting modules.
+Require bounded scopes, available slots, separate worktrees for edits, and an integration task.
+Mixed workflow
+Some independent branches exist within an otherwise sequential plan.
+Run ready branches concurrently, then join and check the combined result.
+
+The orchestrator proposes a dependency graph and execution mode with a reason. The controller rejects cycles, enforces slot limits and shared-resource locks, and prevents premature downstream execution. Overlapping edits default to sequential execution unless a clear integration plan exists. Parallelism is justified by useful independence, not by having idle agents.
+
+# Interactive workbench and packaging
+Use a local web workbench as the primary readable surface for plans, outputs, and follow-ups. Package it alongside the controller, with a thin Pi extension for commands and notifications. These are proposed components and command names, not claims that Pi already provides them.
+Surface
+Interaction
+Plan view
+Readable objectives, milestones, task dependencies, assumptions, and routing reasons. Comment on a specific task or plan item.
+Output view
+Rendered text, tables, artifact previews or links, diffs, and check evidence; retain access to raw logs.
+Follow ups
+Ask questions, request changes, or adjust priorities in a project-scoped thread. Submit task/plan IDs and the version being discussed.
+Control view
+Pause, cancel, retry, approve, or reject through controller APIs. Show the effect and preserve the event history.
+Health view
+Project and worker capacity, controller/orchestrator health, bottlenecks, usage signals, and context warnings.
+
+## Handle feedback without losing work
+A UI comment becomes a durable feedback event. Questions trigger a response; actionable requests create a scoped revision proposal or follow-up task. Changes affecting active work take effect at a safe checkpoint, or require cancellation and replanning. Show pending versus applied feedback. Invalidate affected gate results and approvals when relevant content changes.
+The browser calls the controller, which validates record versions and permissions. Bind to localhost, protect mutating requests, and render artifacts safely.
+## Two responsibilities in one deliverable
+The orchestrator uses an LLM for goals, plans, ambiguity, and explanations. The controller uses ordinary code for queues, timers, validation, gates, and approvals. They can ship in one package while retaining distinct responsibilities, reducing model calls and enabling recovery when the model is unavailable.
+Packaging element
+Proposed use
+Pi extension
+Expose controller tools, project selection, task submission, status, and workbench opening.
+Commands
+Proposed /project add, /plan, /status, /ui, /pause, and /curate. Final names depend on the installed Pi interfaces.
+Skills
+Reusable role guidance and project conventions, loaded only when relevant.
+Agents or subagents
+On-demand implementer, researcher, reviewer, troubleshooter, and curator roles. No permanent model loop per role.
+Controller adapters
+Provider execution and deterministic tool integrations, schemas, context assembly, and state management.
+Workbench package
+Browser UI and local API client using the same project/task records as the Pi extension.

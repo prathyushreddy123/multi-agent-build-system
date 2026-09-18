@@ -1,0 +1,72 @@
+# Implementation status
+
+Updated: 18 September 2026
+
+## Phase publication policy
+
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 1 is complete and this document is part of its publication checkpoint.
+
+## Continuation point recovered
+
+The prior run completed the full Phase 0 access proof, then stopped during the task-class baseline after Claude returned a subscription session-limit (HTTP 429). The missing final `complex / codex` cell was resumed and passed in 77 seconds with a valid worker contract. The Claude diagnosis and complex cells are provider-unavailable observations, not coding-quality failures.
+
+Evidence remains outside Git under `~/.local/state/mabs`:
+
+- Full access proof: `phase0/2026-09-18T03-27-48-134Z` — 9/9 probes passed.
+- Original baseline: `baseline/2026-09-18T03-31-48-077Z`.
+- Resumed complex Codex cell: `baseline/2026-09-18T03-45-13-035Z`.
+
+## Phase 0 — access proof
+
+- [x] Claude Pro authentication verified as first-party `claude.ai` subscription.
+- [x] Codex authentication verified as ChatGPT subscription with no stored API key.
+- [x] Paid API environment routes are stripped and launches fail closed.
+- [x] Both harnesses can edit, test, and emit a valid structured result.
+- [x] Cancellation leaves no observed orphan process.
+- [x] Claude aliases resolved against installed versions.
+- [x] Invalid-model failures do not consume code-repair budget.
+- [x] Representative bug fix, feature, diagnosis, and complex tasks exercised.
+- [x] Pi execution decision recorded in ADR 0001.
+- [x] A real Claude session-limit event was captured by the controller as `QUOTA`; it blocked without consuming repair budget or dispatching a duplicate.
+
+## Phase 1 — reliable local task
+
+Implemented:
+
+- [x] SQLite projects, requirements, tasks, dependencies, attempts, events, gates, approvals, routing decisions, context manifests, and controller health.
+- [x] Transactional task-state/event writes and atomic READY-task claims.
+- [x] Strict worker output validation; malformed output becomes `CONTRACT`, never success.
+- [x] Code/auth/quota/infrastructure/config/contract/timeout failure classes.
+- [x] Isolated task branches and Git worktrees; final checks bind to a local commit revision.
+- [x] Deterministic context packet with stable requirements and dependency summaries.
+- [x] Detached Claude/Codex adapter runner with start, status, cancel, and collect-result operations.
+- [x] Restart reconciliation from SQLite and completion envelopes; missing processes block rather than duplicate work.
+- [x] Registered deterministic gates with evidence files and final-revision binding.
+- [x] At most two code-repair cycles by default; provider failures do not spend the budget.
+- [x] Revision/config/action/target-bound approvals and stale-approval invalidation primitives.
+- [x] Local controller health records and a SQLite lease preventing competing controller generations.
+- [x] Minimal localhost workbench with overview, pending approvals, cancellation, and mutation token.
+- [x] CLI for project onboarding, requirements, tasks, controller operation, status, approvals, verification, baseline, and workbench.
+- [x] Automated restart test proves an existing launch is collected without duplicate dispatch.
+- [x] Explicit retry and cancellation controls use optimistic record-version checks.
+- [x] Retention defaults, dry-run-first pruning, and consistent SQLite backups with 14-copy rotation.
+- [x] Thin project-local Pi extension for status, project/task commands, controller/workbench startup, backup, status tooling, and scoped task submission.
+
+Exit evidence:
+
+- [x] A real controller-managed Codex task reached `DONE`; registered tests passed against revision `f0ce9fb2030653798b7554d7f274b42bd4a6b92b`. Evidence: `~/.local/state/mabs/acceptance/2026-09-18T04-00-31Z`.
+- [x] A real controller process was killed with a Claude worker active. The worker survived, a fresh controller acquired the stale lease and collected the same launch, and the attempt count remained exactly one. The provider returned a genuine session-limit, so the recovered task correctly became `BLOCKED/QUOTA`. Evidence: `~/.local/state/mabs/acceptance/restart-2026-09-18T04-15-35Z`.
+
+Deliberately deferred:
+
+- Independent AI review and the complete feedback/approval dashboard flow are Phase 3 deliverables. Phase 1 does not claim that substantive changes received independent review.
+
+## Verification
+
+```text
+npm test          16 passing
+npm run typecheck passing
+mabs verify --quick 3/3 passing
+```
+
+The test suite includes strict contracts, lifecycle rules, approval binding, environment scrubbing, durable records, dependency isolation, gate evidence, and controller restart/no-duplicate behavior.

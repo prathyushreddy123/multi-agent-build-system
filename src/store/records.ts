@@ -1,0 +1,1051 @@
+import { Store, nowIso, toJson, fromJson } from "./db.ts";
+import type { Row } from "./db.ts";
+import { ids } from "../core/ids.ts";
+import { assertTransition } from "../domain/states.ts";
+import type { TaskState } from "../domain/states.ts";
+import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/policy.ts";
+import type { FailureClass } from "../core/failure.ts";
+
+export type ProjectStatus = "active" | "paused" | "archived";
+
+export interface GateSpec {
+  name: string;
+  command: string[];
+  required: boolean;
+  timeoutMs?: number;
+  cwd?: string;
+  versionCommand?: string[];
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  repoPath: string;
+  baseBranch: string;
+  status: ProjectStatus;
+  routingProfile: string;
+  approvalPolicy: ProjectApprovalPolicy;
+  checkCommands: GateSpec[];
+  configVersion: string;
+  goal: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  role: string;
+  state: TaskState;
+  priority: number;
+  executionMode: string;
+  inScopeActions: Action[];
+  repairLimit: number;
+  repairsUsed: number;
+  deadlineAt: string | null;
+  branch: string | null;
+  worktreePath: string | null;
+  baseRevision: string | null;
+  resultRevision: string | null;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  blockedReason: string | null;
+  failureClass: FailureClass | null;
+  resultSummary: string | null;
+  reviewOfTaskId: string | null;
+  recordVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Attempt {
+  id: string;
+  taskId: string;
+  launchId: string;
+  attemptNumber: number;
+  kind: "initial" | "repair" | "review";
+  adapter: string;
+  model: string | null;
+  effort: string | null;
+  authMode: string | null;
+  state: "running" | "succeeded" | "failed" | "cancelled";
+  pid: number | null;
+  sessionId: string | null;
+  worktreePath: string | null;
+  baseRevision: string | null;
+  resultRevision: string | null;
+  outcome: string | null;
+  failureClass: FailureClass | null;
+  reason: string | null;
+  exitStatus: number | null;
+  usage: Record<string, unknown> | null;
+  outputPath: string | null;
+  packetId: string | null;
+  startedAt: string;
+  heartbeatAt: string | null;
+  endedAt: string | null;
+}
+
+export type GateStatus = "PASS" | "FAIL" | "ERROR" | "SKIPPED";
+
+export interface GateResult {
+  id: string;
+  taskId: string;
+  attemptId: string | null;
+  name: string;
+  status: GateStatus;
+  required: boolean;
+  command: string;
+  toolVersion: string | null;
+  revision: string;
+  evidencePath: string | null;
+  durationMs: number | null;
+  waiverId: string | null;
+  createdAt: string;
+}
+
+export type ApprovalState = "pending" | "approved" | "rejected" | "invalidated" | "consumed";
+
+export interface Approval {
+  id: string;
+  projectId: string;
+  taskId: string | null;
+  action: Action;
+  target: string;
+  revision: string;
+  configVersion: string;
+  state: ApprovalState;
+  reason: string | null;
+  evidence: Record<string, unknown>;
+  requestedAt: string;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  consumedAt: string | null;
+}
+
+function toProject(row: Row): Project {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    repoPath: row.repo_path as string,
+    baseBranch: row.base_branch as string,
+    status: row.status as ProjectStatus,
+    routingProfile: row.routing_profile as string,
+    approvalPolicy: fromJson<ProjectApprovalPolicy>(row.approval_policy, { overrides: {}, standing: [] }),
+    checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
+    configVersion: row.config_version as string,
+    goal: (row.goal as string) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toTask(row: Row): Task {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    title: row.title as string,
+    objective: row.objective as string,
+    acceptanceCriteria: fromJson<string[]>(row.acceptance_criteria, []),
+    role: row.role as string,
+    state: row.state as TaskState,
+    priority: Number(row.priority ?? 100),
+    executionMode: row.execution_mode as string,
+    inScopeActions: fromJson<Action[]>(row.in_scope_actions, []),
+    repairLimit: Number(row.repair_limit ?? 2),
+    repairsUsed: Number(row.repairs_used ?? 0),
+    deadlineAt: (row.deadline_at as string) ?? null,
+    branch: (row.branch as string) ?? null,
+    worktreePath: (row.worktree_path as string) ?? null,
+    baseRevision: (row.base_revision as string) ?? null,
+    resultRevision: (row.result_revision as string) ?? null,
+    claimedBy: (row.claimed_by as string) ?? null,
+    claimedAt: (row.claimed_at as string) ?? null,
+    blockedReason: (row.blocked_reason as string) ?? null,
+    failureClass: (row.failure_class as FailureClass) ?? null,
+    resultSummary: (row.result_summary as string) ?? null,
+    reviewOfTaskId: (row.review_of_task_id as string) ?? null,
+    recordVersion: Number(row.record_version ?? 1),
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toAttempt(row: Row): Attempt {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    launchId: row.launch_id as string,
+    attemptNumber: Number(row.attempt_number ?? 1),
+    kind: row.kind as Attempt["kind"],
+    adapter: row.adapter as string,
+    model: (row.model as string) ?? null,
+    effort: (row.effort as string) ?? null,
+    authMode: (row.auth_mode as string) ?? null,
+    state: row.state as Attempt["state"],
+    pid: row.pid === null || row.pid === undefined ? null : Number(row.pid),
+    sessionId: (row.session_id as string) ?? null,
+    worktreePath: (row.worktree_path as string) ?? null,
+    baseRevision: (row.base_revision as string) ?? null,
+    resultRevision: (row.result_revision as string) ?? null,
+    outcome: (row.outcome as string) ?? null,
+    failureClass: (row.failure_class as FailureClass) ?? null,
+    reason: (row.reason as string) ?? null,
+    exitStatus: row.exit_status === null || row.exit_status === undefined ? null : Number(row.exit_status),
+    usage: fromJson<Record<string, unknown> | null>(row.usage_json, null),
+    outputPath: (row.output_path as string) ?? null,
+    packetId: (row.packet_id as string) ?? null,
+    startedAt: row.started_at as string,
+    heartbeatAt: (row.heartbeat_at as string) ?? null,
+    endedAt: (row.ended_at as string) ?? null,
+  };
+}
+
+function toApproval(row: Row): Approval {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    taskId: (row.task_id as string) ?? null,
+    action: row.action as Action,
+    target: row.target as string,
+    revision: row.revision as string,
+    configVersion: row.config_version as string,
+    state: row.state as ApprovalState,
+    reason: (row.reason as string) ?? null,
+    evidence: fromJson<Record<string, unknown>>(row.evidence, {}),
+    requestedAt: row.requested_at as string,
+    decidedAt: (row.decided_at as string) ?? null,
+    decidedBy: (row.decided_by as string) ?? null,
+    consumedAt: (row.consumed_at as string) ?? null,
+  };
+}
+
+const TASK_MUTABLE_COLUMNS = new Set([
+  "role",
+  "priority",
+  "execution_mode",
+  "in_scope_actions",
+  "repair_limit",
+  "repairs_used",
+  "deadline_at",
+  "branch",
+  "worktree_path",
+  "base_revision",
+  "result_revision",
+  "claimed_by",
+  "claimed_at",
+  "blocked_reason",
+  "failure_class",
+  "result_summary",
+]);
+
+function assertTaskFields(fields: Record<string, unknown>): void {
+  const invalid = Object.keys(fields).filter((key) => !TASK_MUTABLE_COLUMNS.has(key));
+  if (invalid.length > 0) throw new Error(`Invalid task field(s): ${invalid.join(", ")}`);
+}
+
+function toGate(row: Row): GateResult {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    attemptId: (row.attempt_id as string) ?? null,
+    name: row.name as string,
+    status: row.status as GateStatus,
+    required: Number(row.required) === 1,
+    command: row.command as string,
+    toolVersion: (row.tool_version as string) ?? null,
+    revision: row.revision as string,
+    evidencePath: (row.evidence_path as string) ?? null,
+    durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
+    waiverId: (row.waiver_id as string) ?? null,
+    createdAt: row.created_at as string,
+  };
+}
+
+export interface EventInput {
+  kind: string;
+  projectId?: string | null;
+  taskId?: string | null;
+  attemptId?: string | null;
+  data?: Record<string, unknown>;
+}
+
+/** Typed data access over the SQLite store. */
+export class Records {
+  readonly store: Store;
+
+  constructor(store: Store) {
+    this.store = store;
+  }
+
+  // --- events -------------------------------------------------------------
+
+  recordEvent(input: EventInput): string {
+    const id = ids.event();
+    this.store.run(
+      "INSERT INTO events(id, at, project_id, task_id, attempt_id, kind, data) VALUES(?,?,?,?,?,?,?)",
+      id,
+      nowIso(),
+      input.projectId ?? null,
+      input.taskId ?? null,
+      input.attemptId ?? null,
+      input.kind,
+      toJson(input.data ?? {}),
+    );
+    return id;
+  }
+
+  listEvents(taskId: string, limit = 200): Row[] {
+    return this.store.all("SELECT * FROM events WHERE task_id = ? ORDER BY rowid DESC LIMIT ?", taskId, limit);
+  }
+
+  recentEvents(limit = 100): Row[] {
+    return this.store.all("SELECT * FROM events ORDER BY rowid DESC LIMIT ?", limit);
+  }
+
+  // --- projects -----------------------------------------------------------
+
+  createProject(input: {
+    name: string;
+    repoPath: string;
+    baseBranch?: string;
+    goal?: string;
+    checkCommands?: GateSpec[];
+    approvalPolicy?: ProjectApprovalPolicy;
+    routingProfile?: string;
+  }): Project {
+    const id = ids.project();
+    const at = nowIso();
+    const configVersion = ids.config();
+    return this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO projects(id, name, repo_path, base_branch, status, routing_profile, approval_policy,
+           check_commands, config_version, goal, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id,
+        input.name,
+        input.repoPath,
+        input.baseBranch ?? "main",
+        "active",
+        input.routingProfile ?? "default",
+        toJson(input.approvalPolicy ?? { overrides: {}, standing: [] }),
+        toJson(input.checkCommands ?? []),
+        configVersion,
+        input.goal ?? null,
+        at,
+        at,
+      );
+      this.recordEvent({ kind: "project.registered", projectId: id, data: { name: input.name, repoPath: input.repoPath } });
+      return this.getProject(id) as Project;
+    });
+  }
+
+  getProject(id: string): Project | null {
+    const row = this.store.get("SELECT * FROM projects WHERE id = ?", id);
+    return row ? toProject(row) : null;
+  }
+
+  findProjectByName(name: string): Project | null {
+    const row = this.store.get("SELECT * FROM projects WHERE name = ?", name);
+    return row ? toProject(row) : null;
+  }
+
+  listProjects(status?: ProjectStatus): Project[] {
+    const rows = status
+      ? this.store.all("SELECT * FROM projects WHERE status = ? ORDER BY name", status)
+      : this.store.all("SELECT * FROM projects ORDER BY name");
+    return rows.map(toProject);
+  }
+
+  setProjectStatus(id: string, status: ProjectStatus): void {
+    this.store.tx(() => {
+      this.store.run("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), id);
+      this.recordEvent({ kind: "project.status", projectId: id, data: { status } });
+    });
+  }
+
+  updateProjectChecks(id: string, checks: GateSpec[]): string {
+    const configVersion = ids.config();
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE projects SET check_commands = ?, config_version = ?, updated_at = ? WHERE id = ?",
+        toJson(checks),
+        configVersion,
+        nowIso(),
+        id,
+      );
+      this.recordEvent({ kind: "project.checks_updated", projectId: id, data: { count: checks.length, configVersion } });
+    });
+    return configVersion;
+  }
+
+  setProjectPolicy(id: string, policy: ProjectApprovalPolicy): string {
+    const configVersion = ids.config();
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE projects SET approval_policy = ?, config_version = ?, updated_at = ? WHERE id = ?",
+        toJson(policy),
+        configVersion,
+        nowIso(),
+        id,
+      );
+      this.recordEvent({ kind: "project.policy_updated", projectId: id, data: { configVersion } });
+    });
+    return configVersion;
+  }
+
+  // --- requirements -------------------------------------------------------
+
+  addRequirement(projectId: string, id: string, text: string, mandatory = true): void {
+    this.store.run(
+      "INSERT INTO requirements(id, project_id, text, mandatory, created_at) VALUES(?,?,?,?,?) " +
+        "ON CONFLICT(project_id, id) DO UPDATE SET text = excluded.text, mandatory = excluded.mandatory",
+      id,
+      projectId,
+      text,
+      mandatory ? 1 : 0,
+      nowIso(),
+    );
+  }
+
+  listRequirements(projectId: string): { id: string; text: string; mandatory: boolean }[] {
+    return this.store
+      .all("SELECT id, text, mandatory FROM requirements WHERE project_id = ? ORDER BY id", projectId)
+      .map((row) => ({ id: row.id as string, text: row.text as string, mandatory: Number(row.mandatory) === 1 }));
+  }
+
+  // --- tasks --------------------------------------------------------------
+
+  createTask(input: {
+    projectId: string;
+    title: string;
+    objective: string;
+    acceptanceCriteria?: string[];
+    role?: string;
+    priority?: number;
+    dependsOn?: string[];
+    deadlineAt?: string | null;
+    repairLimit?: number;
+    inScopeActions?: Action[];
+    executionMode?: string;
+    reviewOfTaskId?: string | null;
+  }): Task {
+    const id = ids.task();
+    const at = nowIso();
+    const dependsOn = [...new Set(input.dependsOn ?? [])];
+    return this.store.tx(() => {
+      for (const dependencyId of dependsOn) {
+        const dependency = this.getTask(dependencyId);
+        if (!dependency) throw new Error(`Unknown dependency ${dependencyId}`);
+        if (dependency.projectId !== input.projectId) {
+          throw new Error(`Dependency ${dependencyId} belongs to another project`);
+        }
+      }
+      this.store.run(
+        `INSERT INTO tasks(id, project_id, title, objective, acceptance_criteria, role, state, priority,
+           execution_mode, in_scope_actions, repair_limit, repairs_used, deadline_at, review_of_task_id,
+           created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`,
+        id,
+        input.projectId,
+        input.title,
+        input.objective,
+        toJson(input.acceptanceCriteria ?? []),
+        input.role ?? "implementer",
+        "QUEUED",
+        input.priority ?? 100,
+        input.executionMode ?? "single",
+        toJson(input.inScopeActions ?? []),
+        input.repairLimit ?? 2,
+        input.deadlineAt ?? null,
+        input.reviewOfTaskId ?? null,
+        at,
+        at,
+      );
+      for (const dep of dependsOn) {
+        this.store.run("INSERT OR IGNORE INTO task_dependencies(task_id, depends_on_id) VALUES(?,?)", id, dep);
+      }
+      this.recordEvent({
+        kind: "task.created",
+        projectId: input.projectId,
+        taskId: id,
+        data: { title: input.title, dependsOn },
+      });
+      return this.getTask(id) as Task;
+    });
+  }
+
+  getTask(id: string): Task | null {
+    const row = this.store.get("SELECT * FROM tasks WHERE id = ?", id);
+    return row ? toTask(row) : null;
+  }
+
+  listTasks(filter: { projectId?: string; state?: TaskState; limit?: number } = {}): Task[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filter.projectId) {
+      clauses.push("project_id = ?");
+      params.push(filter.projectId);
+    }
+    if (filter.state) {
+      clauses.push("state = ?");
+      params.push(filter.state);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    params.push(filter.limit ?? 500);
+    return this.store
+      .all(`SELECT * FROM tasks ${where} ORDER BY priority ASC, created_at ASC LIMIT ?`, ...params)
+      .map(toTask);
+  }
+
+  dependenciesOf(taskId: string): string[] {
+    return this.store
+      .all("SELECT depends_on_id FROM task_dependencies WHERE task_id = ?", taskId)
+      .map((row) => row.depends_on_id as string);
+  }
+
+  dependentsOf(taskId: string): string[] {
+    return this.store
+      .all("SELECT task_id FROM task_dependencies WHERE depends_on_id = ?", taskId)
+      .map((row) => row.task_id as string);
+  }
+
+  /**
+   * Validated state transition plus its event, in one transaction.
+   * `fields` carries the columns that change with the state.
+   */
+  transition(taskId: string, to: TaskState, fields: Partial<Record<string, unknown>> = {}, eventData: Record<string, unknown> = {}): Task {
+    assertTaskFields(fields);
+    return this.store.tx(() => {
+      const current = this.getTask(taskId);
+      if (!current) throw new Error(`Unknown task ${taskId}`);
+      if (current.state !== to) assertTransition(current.state, to);
+
+      const columns = ["state = ?", "updated_at = ?", "record_version = record_version + 1"];
+      const params: unknown[] = [to, nowIso()];
+      for (const [key, value] of Object.entries(fields)) {
+        columns.push(`${key} = ?`);
+        params.push(value ?? null);
+      }
+      params.push(taskId);
+      this.store.run(`UPDATE tasks SET ${columns.join(", ")} WHERE id = ?`, ...params);
+      this.recordEvent({
+        kind: "task.state",
+        projectId: current.projectId,
+        taskId,
+        data: { from: current.state, to, ...eventData },
+      });
+      return this.getTask(taskId) as Task;
+    });
+  }
+
+  updateTaskFields(taskId: string, fields: Record<string, unknown>): void {
+    assertTaskFields(fields);
+    const columns = Object.keys(fields).map((key) => `${key} = ?`);
+    if (columns.length === 0) return;
+    const params = [...Object.values(fields).map((v) => v ?? null), nowIso(), taskId];
+    this.store.run(`UPDATE tasks SET ${columns.join(", ")}, updated_at = ?, record_version = record_version + 1 WHERE id = ?`, ...params);
+  }
+
+  /**
+   * Atomic claim. The UPDATE only succeeds for a task that is still READY and
+   * unclaimed, so two controller loops can never own the same task.
+   */
+  claimTask(taskId: string, launchId: string): Task | null {
+    return this.store.tx(() => {
+      const result = this.store.db
+        .prepare("UPDATE tasks SET claimed_by = ?, claimed_at = ?, updated_at = ?, record_version = record_version + 1 WHERE id = ? AND state = 'READY' AND claimed_by IS NULL")
+        .run(launchId, nowIso(), nowIso(), taskId);
+      if (Number(result.changes) !== 1) return null;
+      const task = this.getTask(taskId) as Task;
+      this.recordEvent({ kind: "task.claimed", projectId: task.projectId, taskId, data: { launchId } });
+      return task;
+    });
+  }
+
+  releaseClaim(taskId: string): void {
+    this.store.run(
+      "UPDATE tasks SET claimed_by = NULL, claimed_at = NULL, updated_at = ?, record_version = record_version + 1 WHERE id = ?",
+      nowIso(),
+      taskId,
+    );
+  }
+
+  /** Explicit operator retry with optimistic version checking. */
+  retryTask(taskId: string, expectedVersion: number): Task {
+    return this.store.tx(() => {
+      const current = this.getTask(taskId);
+      if (!current) throw new Error(`Unknown task ${taskId}`);
+      if (current.recordVersion !== expectedVersion) {
+        throw new Error(`Task ${taskId} changed since version ${expectedVersion}; current version is ${current.recordVersion}`);
+      }
+      if (current.state !== "BLOCKED" && current.state !== "FAILED") {
+        throw new Error(`Task ${taskId} is ${current.state}; only BLOCKED or FAILED tasks can be retried`);
+      }
+      assertTransition(current.state, "READY");
+      const at = nowIso();
+      this.store.run(
+        `UPDATE tasks SET state = 'READY', claimed_by = NULL, claimed_at = NULL, blocked_reason = NULL,
+           failure_class = NULL, updated_at = ?, record_version = record_version + 1
+         WHERE id = ? AND record_version = ?`,
+        at,
+        taskId,
+        expectedVersion,
+      );
+      this.recordEvent({
+        kind: "task.retry_requested",
+        projectId: current.projectId,
+        taskId,
+        data: { from: current.state, expectedVersion },
+      });
+      return this.getTask(taskId) as Task;
+    });
+  }
+
+  // --- attempts -----------------------------------------------------------
+
+  startAttempt(input: {
+    id?: string;
+    taskId: string;
+    launchId: string;
+    kind: Attempt["kind"];
+    adapter: string;
+    model?: string | null;
+    effort?: string | null;
+    authMode?: string | null;
+    worktreePath?: string | null;
+    baseRevision?: string | null;
+    packetId?: string | null;
+    outputPath?: string | null;
+  }): Attempt {
+    const id = input.id ?? ids.attempt();
+    const at = nowIso();
+    return this.store.tx(() => {
+      const previous = this.store.get("SELECT COUNT(*) AS n FROM attempts WHERE task_id = ?", input.taskId);
+      const attemptNumber = Number(previous?.n ?? 0) + 1;
+      this.store.run(
+        `INSERT INTO attempts(id, task_id, launch_id, attempt_number, kind, adapter, model, effort, auth_mode,
+           state, worktree_path, base_revision, packet_id, output_path, started_at, heartbeat_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?)`,
+        id,
+        input.taskId,
+        input.launchId,
+        attemptNumber,
+        input.kind,
+        input.adapter,
+        input.model ?? null,
+        input.effort ?? null,
+        input.authMode ?? null,
+        input.worktreePath ?? null,
+        input.baseRevision ?? null,
+        input.packetId ?? null,
+        input.outputPath ?? null,
+        at,
+        at,
+      );
+      this.recordEvent({
+        kind: "attempt.started",
+        taskId: input.taskId,
+        attemptId: id,
+        data: { adapter: input.adapter, model: input.model ?? null, kind: input.kind, launchId: input.launchId },
+      });
+      return this.getAttempt(id) as Attempt;
+    });
+  }
+
+  getAttempt(id: string): Attempt | null {
+    const row = this.store.get("SELECT * FROM attempts WHERE id = ?", id);
+    return row ? toAttempt(row) : null;
+  }
+
+  listAttempts(taskId: string): Attempt[] {
+    return this.store.all("SELECT * FROM attempts WHERE task_id = ? ORDER BY attempt_number", taskId).map(toAttempt);
+  }
+
+  listRunningAttempts(): Attempt[] {
+    return this.store.all("SELECT * FROM attempts WHERE state = 'running' ORDER BY started_at").map(toAttempt);
+  }
+
+  setAttemptProcess(id: string, pid: number | null, sessionId: string | null): void {
+    this.store.run("UPDATE attempts SET pid = ?, session_id = ? WHERE id = ?", pid, sessionId, id);
+  }
+
+  heartbeat(id: string): void {
+    this.store.run("UPDATE attempts SET heartbeat_at = ? WHERE id = ?", nowIso(), id);
+  }
+
+  finishAttempt(input: {
+    attemptId: string;
+    state: Attempt["state"];
+    outcome?: string | null;
+    failureClass?: FailureClass | null;
+    reason?: string | null;
+    exitStatus?: number | null;
+    resultRevision?: string | null;
+    usage?: Record<string, unknown> | null;
+    outputPath?: string | null;
+  }): void {
+    this.store.tx(() => {
+      const attempt = this.getAttempt(input.attemptId);
+      if (!attempt) throw new Error(`Unknown attempt ${input.attemptId}`);
+      this.store.run(
+        `UPDATE attempts SET state = ?, outcome = ?, failure_class = ?, reason = ?, exit_status = ?,
+           result_revision = ?, usage_json = ?, output_path = COALESCE(?, output_path), ended_at = ?
+         WHERE id = ?`,
+        input.state,
+        input.outcome ?? null,
+        input.failureClass ?? null,
+        input.reason ?? null,
+        input.exitStatus ?? null,
+        input.resultRevision ?? null,
+        input.usage ? toJson(input.usage) : null,
+        input.outputPath ?? null,
+        nowIso(),
+        input.attemptId,
+      );
+      this.recordEvent({
+        kind: "attempt.finished",
+        taskId: attempt.taskId,
+        attemptId: input.attemptId,
+        data: {
+          state: input.state,
+          outcome: input.outcome ?? null,
+          failureClass: input.failureClass ?? null,
+          reason: input.reason ?? null,
+        },
+      });
+    });
+  }
+
+  // --- gates --------------------------------------------------------------
+
+  recordGate(input: Omit<GateResult, "id" | "createdAt">): GateResult {
+    const id = ids.gate();
+    this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO gate_results(id, task_id, attempt_id, name, status, required, command, tool_version,
+           revision, evidence_path, duration_ms, waiver_id, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id,
+        input.taskId,
+        input.attemptId,
+        input.name,
+        input.status,
+        input.required ? 1 : 0,
+        input.command,
+        input.toolVersion,
+        input.revision,
+        input.evidencePath,
+        input.durationMs,
+        input.waiverId,
+        nowIso(),
+      );
+      this.recordEvent({
+        kind: "gate.result",
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        data: { name: input.name, status: input.status, revision: input.revision },
+      });
+    });
+    return toGate(this.store.get("SELECT * FROM gate_results WHERE id = ?", id) as Row);
+  }
+
+  /** Gate results for one revision. Passing an earlier revision is not evidence for a new one. */
+  gatesForRevision(taskId: string, revision: string): GateResult[] {
+    return this.store
+      .all("SELECT * FROM gate_results WHERE task_id = ? AND revision = ? ORDER BY created_at", taskId, revision)
+      .map(toGate);
+  }
+
+  gatesForTask(taskId: string): GateResult[] {
+    return this.store.all("SELECT * FROM gate_results WHERE task_id = ? ORDER BY created_at", taskId).map(toGate);
+  }
+
+  waiveGate(gateId: string, approvalId: string): void {
+    this.store.run("UPDATE gate_results SET waiver_id = ? WHERE id = ?", approvalId, gateId);
+  }
+
+  // --- approvals ----------------------------------------------------------
+
+  requestApproval(input: {
+    projectId: string;
+    taskId?: string | null;
+    binding: ApprovalBinding;
+    reason: string;
+    evidence?: Record<string, unknown>;
+  }): Approval {
+    const id = ids.approval();
+    this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO approvals(id, project_id, task_id, action, target, revision, config_version, state,
+           reason, evidence, requested_at)
+         VALUES(?,?,?,?,?,?,?,'pending',?,?,?)`,
+        id,
+        input.projectId,
+        input.taskId ?? null,
+        input.binding.action,
+        input.binding.target,
+        input.binding.revision,
+        input.binding.configVersion,
+        input.reason,
+        toJson(input.evidence ?? {}),
+        nowIso(),
+      );
+      this.recordEvent({
+        kind: "approval.requested",
+        projectId: input.projectId,
+        taskId: input.taskId ?? null,
+        data: { approvalId: id, ...input.binding, reason: input.reason },
+      });
+    });
+    return this.getApproval(id) as Approval;
+  }
+
+  getApproval(id: string): Approval | null {
+    const row = this.store.get("SELECT * FROM approvals WHERE id = ?", id);
+    return row ? toApproval(row) : null;
+  }
+
+  listApprovals(state?: ApprovalState): Approval[] {
+    const rows = state
+      ? this.store.all("SELECT * FROM approvals WHERE state = ? ORDER BY requested_at DESC", state)
+      : this.store.all("SELECT * FROM approvals ORDER BY requested_at DESC LIMIT 200");
+    return rows.map(toApproval);
+  }
+
+  decideApproval(id: string, state: "approved" | "rejected", decidedBy: string, reason?: string): Approval {
+    return this.store.tx(() => {
+      const approval = this.getApproval(id);
+      if (!approval) throw new Error(`Unknown approval ${id}`);
+      if (approval.state !== "pending") {
+        throw new Error(`Approval ${id} is ${approval.state}; only a pending approval can be decided`);
+      }
+      this.store.run(
+        "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = COALESCE(?, reason) WHERE id = ?",
+        state,
+        nowIso(),
+        decidedBy,
+        reason ?? null,
+        id,
+      );
+      this.recordEvent({
+        kind: `approval.${state}`,
+        projectId: approval.projectId,
+        taskId: approval.taskId,
+        data: { approvalId: id, decidedBy, reason: reason ?? null },
+      });
+      return this.getApproval(id) as Approval;
+    });
+  }
+
+  markApprovalConsumed(id: string): void {
+    this.store.tx(() => {
+      const approval = this.getApproval(id);
+      if (!approval) throw new Error(`Unknown approval ${id}`);
+      if (approval.state !== "approved") {
+        throw new Error(`Approval ${id} is ${approval.state}; only an approved decision can be consumed`);
+      }
+      this.store.run("UPDATE approvals SET state = 'consumed', consumed_at = ? WHERE id = ?", nowIso(), id);
+      this.recordEvent({
+        kind: "approval.consumed",
+        projectId: approval.projectId,
+        taskId: approval.taskId,
+        data: { approvalId: id },
+      });
+    });
+  }
+
+  /** Invalidate approvals whose bound revision or configuration no longer matches. */
+  invalidateApprovals(taskId: string, reason: string, keepRevision?: string): number {
+    return this.store.tx(() => {
+      const open = this.store
+        .all("SELECT * FROM approvals WHERE task_id = ? AND state IN ('pending','approved')", taskId)
+        .map(toApproval);
+      let count = 0;
+      for (const approval of open) {
+        if (keepRevision && approval.revision === keepRevision) continue;
+        this.store.run("UPDATE approvals SET state = 'invalidated', decided_at = ? WHERE id = ?", nowIso(), approval.id);
+        this.recordEvent({
+          kind: "approval.invalidated",
+          projectId: approval.projectId,
+          taskId,
+          data: { approvalId: approval.id, reason },
+        });
+        count += 1;
+      }
+      return count;
+    });
+  }
+
+  findApprovalFor(taskId: string, binding: ApprovalBinding): Approval | null {
+    const row = this.store.get(
+      `SELECT * FROM approvals WHERE task_id = ? AND action = ? AND target = ? AND revision = ?
+         AND config_version = ? AND state = 'approved' ORDER BY decided_at DESC LIMIT 1`,
+      taskId,
+      binding.action,
+      binding.target,
+      binding.revision,
+      binding.configVersion,
+    );
+    return row ? toApproval(row) : null;
+  }
+
+  // --- routing and context ------------------------------------------------
+
+  recordRouting(input: {
+    taskId: string;
+    attemptId?: string | null;
+    rule: string;
+    reason: string;
+    eligible: string[];
+    chosen: string;
+    model?: string | null;
+    effort?: string | null;
+  }): void {
+    this.store.run(
+      "INSERT INTO routing_decisions(id, task_id, attempt_id, rule, reason, eligible, chosen, model, effort, at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      ids.event(),
+      input.taskId,
+      input.attemptId ?? null,
+      input.rule,
+      input.reason,
+      toJson(input.eligible),
+      input.chosen,
+      input.model ?? null,
+      input.effort ?? null,
+      nowIso(),
+    );
+  }
+
+  recordPacket(input: {
+    id: string;
+    taskId: string;
+    attemptId?: string | null;
+    requirementIds: string[];
+    omitted: string[];
+    files: string[];
+    artifacts: string[];
+    baseRevision: string | null;
+    tokenEstimate: number | null;
+    manifestPath: string | null;
+    warnings: string[];
+  }): void {
+    this.store.run(
+      `INSERT INTO context_packets(id, task_id, attempt_id, requirement_ids, omitted, files, artifacts,
+         base_revision, token_estimate, manifest_path, warnings, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      input.id,
+      input.taskId,
+      input.attemptId ?? null,
+      toJson(input.requirementIds),
+      toJson(input.omitted),
+      toJson(input.files),
+      toJson(input.artifacts),
+      input.baseRevision,
+      input.tokenEstimate,
+      input.manifestPath,
+      toJson(input.warnings),
+      nowIso(),
+    );
+  }
+
+  getPacket(id: string): Row | undefined {
+    return this.store.get("SELECT * FROM context_packets WHERE id = ?", id);
+  }
+
+  // --- controller health --------------------------------------------------
+
+  acquireControllerLease(controllerId: string, pid: number, staleAfterMs: number): boolean {
+    return this.store.tx(() => {
+      const row = this.store.get("SELECT * FROM controller_lease WHERE singleton = 1");
+      const at = nowIso();
+      if (!row) {
+        this.store.run(
+          "INSERT INTO controller_lease(singleton, controller_id, pid, acquired_at, heartbeat_at) VALUES(1,?,?,?,?)",
+          controllerId,
+          pid,
+          at,
+          at,
+        );
+        this.recordEvent({ kind: "controller.lease_acquired", data: { controllerId, pid } });
+        return true;
+      }
+      if (row.controller_id === controllerId) {
+        this.store.run("UPDATE controller_lease SET pid = ?, heartbeat_at = ? WHERE singleton = 1", pid, at);
+        return true;
+      }
+      const heartbeat = Date.parse(row.heartbeat_at as string);
+      if (Number.isFinite(heartbeat) && Date.now() - heartbeat <= staleAfterMs) return false;
+      this.store.run(
+        "UPDATE controller_lease SET controller_id = ?, pid = ?, acquired_at = ?, heartbeat_at = ? WHERE singleton = 1",
+        controllerId,
+        pid,
+        at,
+        at,
+      );
+      this.recordEvent({
+        kind: "controller.lease_stolen",
+        data: { controllerId, pid, previousControllerId: row.controller_id, previousPid: row.pid },
+      });
+      return true;
+    });
+  }
+
+  releaseControllerLease(controllerId: string): void {
+    this.store.tx(() => {
+      const result = this.store.db.prepare("DELETE FROM controller_lease WHERE singleton = 1 AND controller_id = ?").run(controllerId);
+      if (Number(result.changes) === 1) {
+        this.recordEvent({ kind: "controller.lease_released", data: { controllerId } });
+      }
+    });
+  }
+
+  currentControllerLease(): Row | undefined {
+    return this.store.get("SELECT * FROM controller_lease WHERE singleton = 1");
+  }
+
+  writeHealth(input: {
+    id: string;
+    pid: number;
+    startedAt: string;
+    loopDelayMs: number;
+    dbErrors: number;
+    queueDepth: number;
+    oldestReadyAgeS: number;
+    activeWorkers: number;
+    workerLimit: number;
+    state: "running" | "stopped" | "degraded";
+  }): void {
+    this.store.run(
+      `INSERT INTO controller_health(id, pid, started_at, heartbeat_at, loop_delay_ms, db_errors, queue_depth,
+         oldest_ready_age_s, active_workers, worker_limit, state)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, loop_delay_ms = excluded.loop_delay_ms,
+         db_errors = excluded.db_errors, queue_depth = excluded.queue_depth,
+         oldest_ready_age_s = excluded.oldest_ready_age_s, active_workers = excluded.active_workers,
+         worker_limit = excluded.worker_limit, state = excluded.state`,
+      input.id,
+      input.pid,
+      input.startedAt,
+      nowIso(),
+      input.loopDelayMs,
+      input.dbErrors,
+      input.queueDepth,
+      input.oldestReadyAgeS,
+      input.activeWorkers,
+      input.workerLimit,
+      input.state,
+    );
+  }
+
+  latestHealth(): Row | undefined {
+    return this.store.get("SELECT * FROM controller_health ORDER BY heartbeat_at DESC LIMIT 1");
+  }
+}
+
+export function openRecords(path?: string): Records {
+  return new Records(new Store(path));
+}
