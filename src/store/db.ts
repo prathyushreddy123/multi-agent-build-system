@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "7";
+export const SCHEMA_VERSION = "8";
 
 export type Row = Record<string, unknown>;
 
@@ -35,6 +35,16 @@ export class Store {
       if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
     };
     ensureColumn("projects", "review_policy", "TEXT NOT NULL DEFAULT '{\"mode\":\"substantive\",\"skipTaskClasses\":[\"mechanical\",\"planning\",\"research\"]}'");
+    ensureColumn("projects", "routing_overrides", "TEXT NOT NULL DEFAULT '{}'");
+    ensureColumn("projects", "prompt_profile", "TEXT NOT NULL DEFAULT '{\"implementationAddendum\":null,\"reviewAddendum\":null,\"researchAddendum\":null}'");
+    ensureColumn("projects", "controller_settings", "TEXT NOT NULL DEFAULT '{\"defaultRepairLimit\":2}'");
+    ensureColumn("config_versions", "project_id", "TEXT REFERENCES projects(id) ON DELETE CASCADE");
+    ensureColumn("config_versions", "parent_id", "TEXT REFERENCES config_versions(id)");
+    ensureColumn("config_versions", "kind", "TEXT NOT NULL DEFAULT 'snapshot'");
+    ensureColumn("config_versions", "revision", "TEXT");
+    ensureColumn("config_activations", "source_config_version", "TEXT");
+    ensureColumn("curator_evaluations", "case_results", "TEXT NOT NULL DEFAULT '[]'");
+    this.db.exec("CREATE INDEX IF NOT EXISTS config_versions_by_project ON config_versions(project_id, active, created_at)");
     ensureColumn("tasks", "record_version", "INTEGER NOT NULL DEFAULT 1");
     ensureColumn("tasks", "task_class", "TEXT NOT NULL DEFAULT 'small_implementation'");
     ensureColumn("tasks", "complexity", "TEXT NOT NULL DEFAULT 'medium'");

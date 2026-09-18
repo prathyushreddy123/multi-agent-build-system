@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Script } from "node:vm";
 
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
@@ -26,10 +27,22 @@ test("workbench binds locally, serves controller state, and protects mutations",
   });
   const origin = `http://${address.host}:${address.port}`;
 
+  const page = await (await fetch(`${origin}/`)).text();
+  const browserScript = page.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(browserScript);
+  assert.doesNotThrow(() => new Script(browserScript));
+
   const overview = await fetch(`${origin}/api/overview`);
   assert.equal(overview.status, 200);
-  const body = await overview.json() as { taskCounts: Record<string, number>; approvals: { id: string }[] };
+  const body = await overview.json() as {
+    taskCounts: Record<string, number>;
+    approvals: { id: string }[];
+    curatorProposals: unknown[];
+    activations: unknown[];
+  };
   assert.equal(body.taskCounts.QUEUED, 1);
+  assert.deepEqual(body.curatorProposals, []);
+  assert.deepEqual(body.activations, []);
   assert.equal(body.approvals[0]?.id, approval.id);
 
   const denied = await fetch(`${origin}/api/approvals/${approval.id}/approve`, { method: "POST" });

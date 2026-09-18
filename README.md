@@ -4,9 +4,9 @@ A local multi-agent build system with an LLM-assisted orchestrator and a determi
 
 ## Current status
 
-Phases 0–3 are complete. The system now includes durable projects/tasks/attempts/events, isolated Git worktrees, portable context packets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing, persisted execution plans, evidence/context diagnostics, durable user feedback, and a localhost workbench.
+Phases 0–4 are complete. The system now includes durable projects/tasks/attempts/events, isolated Git worktrees, portable context packets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing, persisted execution plans, evidence/context diagnostics, durable user feedback, an approval-gated configuration curator, and a localhost workbench.
 
-See [`docs/implementation-status.md`](docs/implementation-status.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
+See [`docs/implementation-status.md`](docs/implementation-status.md), the [configuration curator guide](docs/curator.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
 
 ## Requirements
 
@@ -47,7 +47,7 @@ node src/cli.ts controller run --adapter=codex --ui
 
 The default workbench is `http://127.0.0.1:4317`. Runtime state defaults to `~/.local/state/mabs`; worktrees default to `~/worktrees`. Override these with `MABS_STATE_DIR`, `MABS_DB_PATH`, and `MABS_WORKTREE_ROOT`.
 
-When this repository is trusted by Pi, `.pi/extensions/mabs.ts` adds `/mabs-status`, `/mabs-project`, `/mabs-task`, `/mabs-plan`, `/mabs-feedback`, `/mabs-approval`, `/mabs-provider`, `/mabs-start`, `/mabs-ui`, and `/mabs-backup`, plus read-status and submit-task tools.
+When this repository is trusted by Pi, `.pi/extensions/mabs.ts` adds `/mabs-status`, `/mabs-project`, `/mabs-task`, `/mabs-plan`, `/mabs-feedback`, `/mabs-approval`, `/mabs-curate`, `/mabs-provider`, `/mabs-start`, `/mabs-ui`, and `/mabs-backup`, plus read-status and submit-task tools.
 
 ## Useful commands
 
@@ -60,6 +60,11 @@ node src/cli.ts plan apply demo plan.json
 node src/cli.ts plan list --project=<id>
 node src/cli.ts feedback add task <id> question --body="..." --version=<recordVersion>
 node src/cli.ts approval request <task> deploy <target> --reason="..."
+node src/cli.ts curator snapshot demo > config.json
+node src/cli.ts curator suggest demo --title="Rules-first suggestion"
+node src/cli.ts curator propose demo config.json --title="..." --rationale="..."
+node src/cli.ts curator evaluate <proposal>
+node src/cli.ts curator history demo
 node src/cli.ts provider list
 node src/cli.ts provider reset codex
 node src/cli.ts controller once --workers=2 --codex-limit=1 --claude-limit=1
@@ -76,4 +81,6 @@ Routing is task-class based and evidence-informed. Supplying `--adapter=codex|cl
 
 New CLI-onboarded projects default to substantive independent review after revision-bound quality gates. Review uses a fresh context, prefers a provider different from the implementer when eligible, records structured findings, and can return bounded repairs for re-check and re-review.
 
-Consequential actions such as push, merge, and deploy are not performed by the Phase 3 controller. The workbench and CLI can prepare and decide exact revision/configuration-bound approvals, but no approval is itself an external-action executor. Target, revision, or project-configuration drift invalidates open approvals.
+The Phase 4 curator writes proposed configuration to an isolated local Git branch, runs deterministic policy replay, and requires an exact `activate_config_change` approval before changing active local configuration. Activation and revert history are durable, and equivalent rejected suggestions require new evidence before reconsideration.
+
+Consequential actions such as push, merge, and deploy are not performed by the controller. The workbench and CLI can prepare and decide exact revision/configuration-bound approvals, but no approval is itself an external-action executor. Target, revision, or project-configuration drift invalidates open approvals.

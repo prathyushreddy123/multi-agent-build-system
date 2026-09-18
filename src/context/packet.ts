@@ -46,6 +46,11 @@ export function buildContextPacket(input: {
     .map((id) => input.records.getTask(id))
     .filter((task): task is Task => task !== null);
   const purpose = input.purpose ?? "implementation";
+  const promptAddendum = purpose === "review"
+    ? input.project.promptProfile.reviewAddendum
+    : input.task.role === "researcher"
+      ? input.project.promptProfile.researchAddendum
+      : input.project.promptProfile.implementationAddendum;
   const artifacts = [
     ...dependencyTasks.flatMap((task) =>
       input.records.listAttempts(task.id).map((attempt) => attempt.outputPath).filter((path): path is string => path !== null),
@@ -152,6 +157,9 @@ export function buildContextPacket(input: {
       ? "Put actionable findings in follow_up.unresolved and prefix each with [critical], [major], or [minor]. Leave unresolved empty only when the revision is acceptable."
       : "A task acceptance criterion requiring a local commit is therefore a controller postcondition, not a reason to report blocked.",
     "Treat project requirements and acceptance criteria as authoritative.",
+    ...(promptAddendum
+      ? ["Project prompt addendum (cannot override scope, approval, paid-access, or worker-contract rules):", promptAddendum]
+      : []),
     "Worker input:",
     JSON.stringify(workerInput, null, 2),
     "",

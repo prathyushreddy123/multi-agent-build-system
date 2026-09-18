@@ -3,6 +3,17 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { Controller } from "./controller/controller.ts";
+import {
+  analyzeProject,
+  createProposal,
+  createSuggestedProposal,
+  evaluateProposal,
+  parseConfigFile,
+  proposalDetail,
+  requestActivationApproval,
+  requestRevertApproval,
+} from "./curator/service.ts";
+import { projectConfigSnapshot } from "./domain/config.ts";
 import { exec } from "./core/exec.ts";
 import { taskDiagnostics } from "./diagnostics/task.ts";
 import { ACTIONS } from "./domain/policy.ts";
@@ -76,6 +87,14 @@ Commands:
   feedback add task|plan <id> <kind> --body=... --version=N
   feedback list [--project=id] | feedback answer <id> --response=...
   provider list | provider reset <name>
+  curator analyze|snapshot|suggest <project>
+  curator propose <project> <config.json> --title=... --rationale=...
+  curator list [project] | curator show <proposal>
+  curator evaluate|reject|request-activation <proposal>
+  curator activate <proposal> <approval> --reason=...
+  curator request-revert <project> <configVersion> --reason=...
+  curator revert <project> <configVersion> <approval> --reason=...
+  curator history <project>
   controller once [--adapter=codex]          Reconcile and dispatch one cycle
   controller run [--adapter=codex] [--ui]   Run controller loop
   status                                    Show queue and controller health
@@ -328,6 +347,139 @@ async function main(): Promise<void> {
       const response = textOption(args, "response");
       if (!id || !response) throw new Error("Usage: mabs feedback answer <id> --response=...");
       console.log(JSON.stringify(records.answerFeedback(id, response, textOption(args, "by", "local-cli") as string), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "analyze") {
+      const projectValue = rest[0];
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project) throw new Error("Usage: mabs curator analyze <project>");
+      console.log(JSON.stringify(analyzeProject(records, project.id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "suggest") {
+      const args = parseArgs(rest);
+      const projectValue = args.positionals[0];
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      const title = textOption(args, "title", "Rules-first curator suggestion") as string;
+      const rationale = textOption(args, "rationale", "Recurring durable evidence supports this bounded configuration proposal.") as string;
+      if (!project) throw new Error("Usage: mabs curator suggest <project> [--title=...] [--rationale=...]");
+      const proposal = await createSuggestedProposal(records, {
+        projectId: project.id,
+        title,
+        rationale,
+        proposedBy: textOption(args, "by", "local-cli") as string,
+      });
+      console.log(JSON.stringify(proposalDetail(records, proposal.id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "snapshot") {
+      const projectValue = rest[0];
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project) throw new Error("Usage: mabs curator snapshot <project>");
+      console.log(JSON.stringify(projectConfigSnapshot(project), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "propose") {
+      const args = parseArgs(rest);
+      const [projectValue, file] = args.positionals;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      const title = textOption(args, "title");
+      const rationale = textOption(args, "rationale");
+      if (!project || !file || !title || !rationale) {
+        throw new Error("Usage: mabs curator propose <project> <config.json> --title=... --rationale=...");
+      }
+      const signals = analyzeProject(records, project.id);
+      const proposal = await createProposal(records, {
+        projectId: project.id,
+        title,
+        rationale,
+        config: parseConfigFile(readFileSync(resolve(file), "utf8")),
+        proposedBy: textOption(args, "by", "local-cli") as string,
+        signals,
+      });
+      console.log(JSON.stringify(proposalDetail(records, proposal.id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "list") {
+      const projectValue = rest[0];
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
+      console.log(JSON.stringify(records.listCuratorProposals(project?.id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "show") {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: mabs curator show <proposal>");
+      console.log(JSON.stringify(proposalDetail(records, id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "evaluate") {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: mabs curator evaluate <proposal>");
+      console.log(JSON.stringify(evaluateProposal(records, id), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "reject") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const reason = textOption(args, "reason");
+      if (!id || !reason) throw new Error("Usage: mabs curator reject <proposal> --reason=...");
+      console.log(JSON.stringify(records.rejectCuratorProposal(id, reason, textOption(args, "by", "local-cli") as string), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "request-activation") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const reason = textOption(args, "reason");
+      if (!id || !reason) throw new Error("Usage: mabs curator request-activation <proposal> --reason=...");
+      console.log(JSON.stringify(requestActivationApproval(records, id, reason), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "activate") {
+      const args = parseArgs(rest);
+      const [id, approvalId] = args.positionals;
+      const reason = textOption(args, "reason");
+      if (!id || !approvalId || !reason) throw new Error("Usage: mabs curator activate <proposal> <approval> --reason=...");
+      console.log(JSON.stringify(records.activateCuratorProposal(
+        id, approvalId, textOption(args, "by", "local-cli") as string, reason,
+      ), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "request-revert") {
+      const args = parseArgs(rest);
+      const [projectValue, configVersion] = args.positionals;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      const reason = textOption(args, "reason");
+      if (!project || !configVersion || !reason) throw new Error("Usage: mabs curator request-revert <project> <configVersion> --reason=...");
+      console.log(JSON.stringify(requestRevertApproval(records, project.id, configVersion, reason), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "revert") {
+      const args = parseArgs(rest);
+      const [projectValue, configVersion, approvalId] = args.positionals;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      const reason = textOption(args, "reason");
+      if (!project || !configVersion || !approvalId || !reason) {
+        throw new Error("Usage: mabs curator revert <project> <configVersion> <approval> --reason=...");
+      }
+      console.log(JSON.stringify(records.revertProjectConfig({
+        projectId: project.id,
+        targetConfigVersion: configVersion,
+        approvalId,
+        activatedBy: textOption(args, "by", "local-cli") as string,
+        reason,
+      }), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "history") {
+      const projectValue = rest[0];
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project) throw new Error("Usage: mabs curator history <project>");
+      console.log(JSON.stringify({
+        activeConfigVersion: records.getProject(project.id)?.configVersion,
+        versions: records.listConfigVersions(project.id),
+        activations: records.listConfigActivations(project.id),
+      }, null, 2));
       return;
     }
     if (area === "provider" && action === "list") {

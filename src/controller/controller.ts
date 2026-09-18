@@ -209,6 +209,20 @@ export class Controller {
       excludedAdapters: exclusions,
       availableTools,
     });
+    const projectOverride = this.records.getProject(task.projectId)?.routingOverrides[task.taskClass];
+    if (projectOverride) {
+      const eligibleOverride = selection.eligible.find((candidate) =>
+        candidate.adapter === projectOverride.adapter &&
+        candidate.model === projectOverride.model &&
+        candidate.effort === projectOverride.effort,
+      );
+      if (eligibleOverride) {
+        selection.chosen = eligibleOverride;
+        selection.reason += ` Project configuration selected verified ${task.taskClass} route ${eligibleOverride.adapter}:${eligibleOverride.model ?? "default"}.`;
+      } else {
+        selection.reason += ` Configured ${task.taskClass} route was not currently eligible; retained the eligible policy fallback.`;
+      }
+    }
     if (selection.chosen?.adapter === this.options.defaultAdapter) {
       selection.chosen = {
         ...selection.chosen,

@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS projects (
   routing_profile TEXT NOT NULL DEFAULT 'default',
   approval_policy TEXT NOT NULL DEFAULT '{"overrides":{},"standing":[]}',
   review_policy   TEXT NOT NULL DEFAULT '{"mode":"substantive","skipTaskClasses":["mechanical","planning","research"]}',
+  routing_overrides TEXT NOT NULL DEFAULT '{}',
+  prompt_profile TEXT NOT NULL DEFAULT '{"implementationAddendum":null,"reviewAddendum":null,"researchAddendum":null}',
+  controller_settings TEXT NOT NULL DEFAULT '{"defaultRepairLimit":2}',
   check_commands  TEXT NOT NULL DEFAULT '[]',
   config_version  TEXT NOT NULL,
   goal            TEXT,
@@ -195,11 +198,71 @@ CREATE TABLE IF NOT EXISTS context_packets (
 
 CREATE TABLE IF NOT EXISTS config_versions (
   id         TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  parent_id  TEXT REFERENCES config_versions(id),
   source     TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'snapshot',
   payload    TEXT NOT NULL,
+  revision   TEXT,
   active     INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS curator_proposals (
+  id                      TEXT PRIMARY KEY,
+  project_id              TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title                   TEXT NOT NULL,
+  rationale               TEXT NOT NULL,
+  fingerprint             TEXT NOT NULL,
+  evidence_fingerprint    TEXT NOT NULL,
+  status                  TEXT NOT NULL DEFAULT 'draft',
+  base_config_version     TEXT NOT NULL,
+  proposed_config_version TEXT NOT NULL REFERENCES config_versions(id),
+  branch                  TEXT,
+  worktree_path           TEXT,
+  base_revision           TEXT,
+  result_revision         TEXT,
+  diff_path               TEXT,
+  proposed_by             TEXT NOT NULL,
+  rejection_reason        TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS curator_proposals_by_project ON curator_proposals(project_id, created_at);
+CREATE INDEX IF NOT EXISTS curator_proposals_by_fingerprint ON curator_proposals(project_id, fingerprint, evidence_fingerprint);
+
+CREATE TABLE IF NOT EXISTS curator_evaluations (
+  id               TEXT PRIMARY KEY,
+  proposal_id      TEXT NOT NULL REFERENCES curator_proposals(id) ON DELETE CASCADE,
+  suite_version    TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  baseline_metrics TEXT NOT NULL,
+  candidate_metrics TEXT NOT NULL,
+  case_results     TEXT NOT NULL DEFAULT '[]',
+  errors           TEXT NOT NULL DEFAULT '[]',
+  evidence_path    TEXT,
+  started_at       TEXT NOT NULL,
+  ended_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS curator_evaluations_by_proposal ON curator_evaluations(proposal_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS config_activations (
+  id                     TEXT PRIMARY KEY,
+  project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  proposal_id            TEXT REFERENCES curator_proposals(id),
+  action                 TEXT NOT NULL, -- activate | revert
+  from_config_version    TEXT NOT NULL,
+  to_config_version      TEXT NOT NULL,
+  source_config_version  TEXT,
+  approval_id            TEXT NOT NULL REFERENCES approvals(id),
+  activated_by           TEXT NOT NULL,
+  reason                 TEXT NOT NULL,
+  created_at             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS config_activations_by_project ON config_activations(project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS provider_capacity (
   provider        TEXT PRIMARY KEY,

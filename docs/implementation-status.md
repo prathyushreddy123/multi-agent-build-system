@@ -4,7 +4,7 @@ Updated: 18 September 2026
 
 ## Phase publication policy
 
-At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 3 is complete and this document is part of its publication checkpoint.
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 4 is complete and this document is part of its publication checkpoint.
 
 ## Continuation point recovered
 
@@ -117,13 +117,41 @@ Deliberately deferred:
 - The Phase 4 curator, configuration evaluation/activation history, and revert workflow.
 - Push, pull-request, merge, release, deployment, or destructive-action executors. Approvals are durable authorization records, not execution authority by themselves.
 
+## Phase 4 — approval-gated configuration curator
+
+Implemented:
+
+- [x] Complete versioned project configuration snapshots for routing overrides, approval/review policy, quality commands, bounded prompt addenda, and default repair limits.
+- [x] Deterministic schema validation rejects unknown fields, unverified provider/model routes, unsafe quality commands, weakened consequential-action approval policy, unsafe prompt instructions, and repair limits above two.
+- [x] On-demand analysis of durable failures, repairs, review findings, routing overrides, provider events, repeated questions, and previously rejected fingerprints; explicit rules can derive bounded suggestions from recurring evidence, with no permanent curator loop.
+- [x] Config proposals materialize as config-only commits in isolated local Git branches/worktrees with retained diff evidence. The configured target branch is not changed.
+- [x] `policy-replay-v1` evaluation records safety results and compares observable historical task, repair, review, gate, routing, prompt-size, and reported-usage metrics without presenting them as candidate product quality or subscription spend.
+- [x] Exact `activate_config_change` approvals bind proposal ID, proposal Git revision, evaluation evidence, and current project config version.
+- [x] Activation requires an inactive-task safe checkpoint, then atomically consumes its approval, updates effective routing/prompt/controller configuration, records actor/reason/history, invalidates other open approvals, and supersedes competing proposals.
+- [x] Revert is independently approval-gated and restores a historical payload as a new auditable configuration version with its source version retained.
+- [x] Candidate/evidence fingerprints suppress equivalent rejected or already-open suggestions until observable evidence changes.
+- [x] Workbench, CLI, and Pi surfaces expose analysis, snapshots, proposal/evaluation details, diff evidence, rejection, activation approval, activation, history, and revert controls.
+- [x] Schema v8 migration safely upgrades the pre-curator `config_versions` table before creating its project-history index.
+
+Exit evidence:
+
+- [x] A real local proposal was created on isolated branch `mabs/curator/prp_01m2thhdnbtg3pmd392xgzh9e1` at revision `b023eb4e53b41e605438c1f3b769ea56457c63a5`; the registered target branch remained unchanged.
+- [x] Activation failed before evaluation and failed again before owner approval. After `policy-replay-v1` passed and the exact approval was granted, activation succeeded and consumed the approval.
+- [x] A separately approved revert restored the initial payload as a new configuration version; activation history contains both operations and their source versions.
+- [x] Durable evidence: `~/.local/state/mabs/acceptance/phase4-2026-09-18T15-18-10Z`.
+
+Deliberately deferred:
+
+- Phase 5 measured optimization experiments. Policy replay validates configuration safety and compares historical observations, but does not claim that a candidate improves product-task outcomes without a targeted experiment.
+- Push, pull-request, merge, release, deployment, or destructive-action executors remain absent.
+
 ## Verification
 
 ```text
-npm test          32 passing
+npm test          35 passing
 npm run typecheck passing
 mabs verify --quick 3/3 passing
 Pi RPC extension   passing
 ```
 
-The test suite includes strict contracts, lifecycle rules, approval binding and invalidation, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, allowed-scope enforcement, independent review/repair loops, context/evidence diagnostics, feedback, plan persistence, workbench controls, and gate-before-review enforcement.
+The test suite includes strict contracts, lifecycle rules, approval binding and invalidation, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, allowed-scope enforcement, independent review/repair loops, context/evidence diagnostics, feedback, plan persistence, workbench controls, gate-before-review enforcement, schema migration, curator safety validation, proposal isolation, evaluation gating, duplicate suppression, stale activation rejection, applied config behavior, and approved revert history.

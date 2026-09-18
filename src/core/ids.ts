@@ -33,6 +33,9 @@ export const ids = {
   plan: () => newId("pln"),
   review: () => newId("rev"),
   feedback: () => newId("fbk"),
+  proposal: () => newId("prp"),
+  evaluation: () => newId("evl"),
+  activation: () => newId("act"),
 };
 
 /** RFC 4122 v4 UUID, required by harnesses that accept an explicit session id. */

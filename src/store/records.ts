@@ -1,6 +1,9 @@
 import { Store, nowIso, toJson, fromJson } from "./db.ts";
+import type { ConfigActivation, CuratorEvaluation, CuratorProposal, EvaluationCase, EvaluationMetrics, ProposalStatus } from "../curator/types.ts";
 import type { Row } from "./db.ts";
 import { ids } from "../core/ids.ts";
+import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, validateProjectConfig } from "../domain/config.ts";
+import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
 import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
 import { evaluate } from "../domain/policy.ts";
@@ -39,6 +42,9 @@ export interface Project {
   routingProfile: string;
   approvalPolicy: ProjectApprovalPolicy;
   reviewPolicy: ReviewPolicy;
+  routingOverrides: RoutingOverrides;
+  promptProfile: PromptProfile;
+  controllerSettings: ProjectControllerSettings;
   checkCommands: GateSpec[];
   configVersion: string;
   goal: string | null;
@@ -225,6 +231,9 @@ function toProject(row: Row): Project {
     routingProfile: row.routing_profile as string,
     approvalPolicy: fromJson<ProjectApprovalPolicy>(row.approval_policy, { overrides: {}, standing: [] }),
     reviewPolicy: fromJson<ReviewPolicy>(row.review_policy, DEFAULT_REVIEW_POLICY),
+    routingOverrides: fromJson<RoutingOverrides>(row.routing_overrides, {}),
+    promptProfile: fromJson<PromptProfile>(row.prompt_profile, DEFAULT_PROMPT_PROFILE),
+    controllerSettings: fromJson<ProjectControllerSettings>(row.controller_settings, DEFAULT_CONTROLLER_SETTINGS),
     checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
     configVersion: row.config_version as string,
     goal: (row.goal as string) ?? null,
@@ -372,6 +381,61 @@ function toFeedback(row: Row): Feedback {
   };
 }
 
+function toProposal(row: Row): CuratorProposal {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    title: row.title as string,
+    rationale: row.rationale as string,
+    fingerprint: row.fingerprint as string,
+    evidenceFingerprint: row.evidence_fingerprint as string,
+    status: row.status as ProposalStatus,
+    baseConfigVersion: row.base_config_version as string,
+    proposedConfigVersion: row.proposed_config_version as string,
+    branch: (row.branch as string) ?? null,
+    worktreePath: (row.worktree_path as string) ?? null,
+    baseRevision: (row.base_revision as string) ?? null,
+    resultRevision: (row.result_revision as string) ?? null,
+    diffPath: (row.diff_path as string) ?? null,
+    proposedBy: row.proposed_by as string,
+    rejectionReason: (row.rejection_reason as string) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toEvaluation(row: Row): CuratorEvaluation {
+  return {
+    id: row.id as string,
+    proposalId: row.proposal_id as string,
+    suiteVersion: row.suite_version as string,
+    status: row.status as CuratorEvaluation["status"],
+    baselineMetrics: fromJson<EvaluationMetrics>(row.baseline_metrics, {} as EvaluationMetrics),
+    candidateMetrics: fromJson<EvaluationMetrics>(row.candidate_metrics, {} as EvaluationMetrics),
+    cases: fromJson<EvaluationCase[]>(row.case_results, []),
+    errors: fromJson<string[]>(row.errors, []),
+    evidencePath: (row.evidence_path as string) ?? null,
+    startedAt: row.started_at as string,
+    endedAt: row.ended_at as string,
+  };
+}
+
+function toActivation(row: Row): ConfigActivation {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    proposalId: (row.proposal_id as string) ?? null,
+    action: row.action as ConfigActivation["action"],
+    fromConfigVersion: row.from_config_version as string,
+    toConfigVersion: row.to_config_version as string,
+    sourceConfigVersion: (row.source_config_version as string) ?? null,
+    approvalId: row.approval_id as string,
+    activatedBy: row.activated_by as string,
+    reason: row.reason as string,
+    createdAt: row.created_at as string,
+  };
+}
+
 const TASK_MUTABLE_COLUMNS = new Set([
   "role",
   "task_class",
@@ -475,6 +539,9 @@ export class Records {
     checkCommands?: GateSpec[];
     approvalPolicy?: ProjectApprovalPolicy;
     reviewPolicy?: ReviewPolicy;
+    routingOverrides?: RoutingOverrides;
+    promptProfile?: PromptProfile;
+    controllerSettings?: ProjectControllerSettings;
     routingProfile?: string;
   }): Project {
     const reviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
@@ -486,8 +553,9 @@ export class Records {
     return this.store.tx(() => {
       this.store.run(
         `INSERT INTO projects(id, name, repo_path, base_branch, status, routing_profile, approval_policy,
-           review_policy, check_commands, config_version, goal, created_at, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           review_policy, routing_overrides, prompt_profile, controller_settings, check_commands,
+           config_version, goal, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.name,
         input.repoPath,
@@ -496,14 +564,32 @@ export class Records {
         input.routingProfile ?? "default",
         toJson(input.approvalPolicy ?? { overrides: {}, standing: [] }),
         toJson(reviewPolicy),
+        toJson(input.routingOverrides ?? {}),
+        toJson(input.promptProfile ?? DEFAULT_PROMPT_PROFILE),
+        toJson(input.controllerSettings ?? DEFAULT_CONTROLLER_SETTINGS),
         toJson(input.checkCommands ?? []),
         configVersion,
         input.goal ?? null,
         at,
         at,
       );
+      const project = this.getProject(id) as Project;
+      const initialConfig: ProjectConfigSnapshot = {
+        routingProfile: project.routingProfile,
+        routingOverrides: project.routingOverrides,
+        approvalPolicy: project.approvalPolicy,
+        reviewPolicy: project.reviewPolicy,
+        checkCommands: project.checkCommands,
+        promptProfile: project.promptProfile,
+        controllerSettings: project.controllerSettings,
+      };
+      this.store.run(
+        `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
+         VALUES(?,?,NULL,'project-registration','snapshot',?,1,?)`,
+        configVersion, id, toJson(initialConfig), at,
+      );
       this.recordEvent({ kind: "project.registered", projectId: id, data: { name: input.name, repoPath: input.repoPath } });
-      return this.getProject(id) as Project;
+      return project;
     });
   }
 
@@ -524,6 +610,27 @@ export class Records {
     return rows.map(toProject);
   }
 
+  private recordCurrentProjectConfig(projectId: string, configVersion: string, source: string, parentId: string | null): void {
+    const project = this.getProject(projectId);
+    if (!project) throw new Error(`Unknown project ${projectId}`);
+    const parentExists = parentId && this.store.get("SELECT id FROM config_versions WHERE id = ?", parentId) ? parentId : null;
+    const payload: ProjectConfigSnapshot = {
+      routingProfile: project.routingProfile,
+      routingOverrides: project.routingOverrides,
+      approvalPolicy: project.approvalPolicy,
+      reviewPolicy: project.reviewPolicy,
+      checkCommands: project.checkCommands,
+      promptProfile: project.promptProfile,
+      controllerSettings: project.controllerSettings,
+    };
+    this.store.run("UPDATE config_versions SET active = 0 WHERE project_id = ?", projectId);
+    this.store.run(
+      `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
+       VALUES(?,?,?,?, 'snapshot', ?,1,?)`,
+      configVersion, projectId, parentExists, source, toJson(payload), nowIso(),
+    );
+  }
+
   setProjectStatus(id: string, status: ProjectStatus): void {
     this.store.tx(() => {
       this.store.run("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", status, nowIso(), id);
@@ -533,6 +640,7 @@ export class Records {
 
   setProjectBaseBranch(id: string, baseBranch: string): string {
     if (!baseBranch.trim()) throw new Error("Base branch is required");
+    const parentId = this.getProject(id)?.configVersion ?? null;
     const configVersion = ids.config();
     this.store.tx(() => {
       this.store.run(
@@ -540,12 +648,14 @@ export class Records {
         baseBranch, configVersion, nowIso(), id,
       );
       this.invalidateProjectApprovals(id, `Target branch changed to ${baseBranch}.`);
+      this.recordCurrentProjectConfig(id, configVersion, "target-branch-change", parentId);
       this.recordEvent({ kind: "project.base_branch_updated", projectId: id, data: { baseBranch, configVersion } });
     });
     return configVersion;
   }
 
   updateProjectChecks(id: string, checks: GateSpec[]): string {
+    const parentId = this.getProject(id)?.configVersion ?? null;
     const configVersion = ids.config();
     this.store.tx(() => {
       this.store.run(
@@ -556,12 +666,14 @@ export class Records {
         id,
       );
       this.invalidateProjectApprovals(id, "Quality configuration changed.");
+      this.recordCurrentProjectConfig(id, configVersion, "quality-check-change", parentId);
       this.recordEvent({ kind: "project.checks_updated", projectId: id, data: { count: checks.length, configVersion } });
     });
     return configVersion;
   }
 
   setProjectPolicy(id: string, policy: ProjectApprovalPolicy): string {
+    const parentId = this.getProject(id)?.configVersion ?? null;
     const configVersion = ids.config();
     this.store.tx(() => {
       this.store.run(
@@ -572,6 +684,7 @@ export class Records {
         id,
       );
       this.invalidateProjectApprovals(id, "Approval policy changed.");
+      this.recordCurrentProjectConfig(id, configVersion, "approval-policy-change", parentId);
       this.recordEvent({ kind: "project.policy_updated", projectId: id, data: { configVersion } });
     });
     return configVersion;
@@ -581,6 +694,7 @@ export class Records {
     if (!["required", "substantive", "none"].includes(policy.mode)) throw new Error(`Invalid review mode: ${policy.mode}`);
     const invalid = policy.skipTaskClasses.filter((taskClass) => !TASK_CLASSES.includes(taskClass));
     if (invalid.length > 0) throw new Error(`Unknown review task classes: ${invalid.join(", ")}`);
+    const parentId = this.getProject(id)?.configVersion ?? null;
     const configVersion = ids.config();
     this.store.tx(() => {
       this.store.run(
@@ -588,6 +702,7 @@ export class Records {
         toJson(policy), configVersion, nowIso(), id,
       );
       this.invalidateProjectApprovals(id, "Review policy changed.");
+      this.recordCurrentProjectConfig(id, configVersion, "review-policy-change", parentId);
       this.recordEvent({ kind: "project.review_policy_updated", projectId: id, data: { configVersion, policy } });
     });
     return configVersion;
@@ -642,6 +757,7 @@ export class Records {
     const id = ids.task();
     const at = nowIso();
     const dependsOn = [...new Set(input.dependsOn ?? [])];
+    const defaultRepairLimit = this.getProject(input.projectId)?.controllerSettings.defaultRepairLimit ?? 2;
     const role = input.role ?? "implementer";
     const taskClass = input.taskClass ?? (role === "reviewer" ? "review" : role === "researcher" ? "research" : role === "troubleshooter" ? "troubleshooting" : "small_implementation");
     if (!TASK_CLASSES.includes(taskClass)) throw new Error(`Unknown task class: ${taskClass}`);
@@ -692,7 +808,7 @@ export class Records {
         input.executionMode ?? "single",
         input.executionReason ?? null,
         toJson(input.inScopeActions ?? []),
-        input.repairLimit ?? 2,
+        input.repairLimit ?? defaultRepairLimit,
         0,
         input.deadlineAt ?? null,
         input.reviewOfTaskId ?? null,
@@ -1226,6 +1342,368 @@ export class Records {
       binding.configVersion,
     );
     return row ? toApproval(row) : null;
+  }
+
+  // --- curated configuration ----------------------------------------------
+
+  getConfigVersion(id: string): (Row & { payload: ProjectConfigSnapshot }) | null {
+    const row = this.store.get("SELECT * FROM config_versions WHERE id = ?", id);
+    return row ? { ...row, payload: fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot) } : null;
+  }
+
+  listConfigVersions(projectId: string): (Row & { payload: ProjectConfigSnapshot })[] {
+    return this.store.all(
+      "SELECT * FROM config_versions WHERE project_id = ? ORDER BY created_at DESC",
+      projectId,
+    ).map((row) => ({ ...row, payload: fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot) }));
+  }
+
+  ensureProjectConfigVersion(projectId: string, payload: ProjectConfigSnapshot): string {
+    const project = this.getProject(projectId);
+    if (!project) throw new Error(`Unknown project ${projectId}`);
+    const existing = this.store.get("SELECT * FROM config_versions WHERE id = ?", project.configVersion);
+    if (!existing) {
+      this.store.run(
+        `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
+         VALUES(?,?,NULL,'migration-snapshot','snapshot',?,1,?)`,
+        project.configVersion, projectId, toJson(payload), nowIso(),
+      );
+    } else if (existing.project_id === null || existing.project_id === undefined) {
+      this.store.run(
+        "UPDATE config_versions SET project_id = ?, payload = ?, active = 1 WHERE id = ?",
+        projectId, toJson(payload), project.configVersion,
+      );
+    }
+    return project.configVersion;
+  }
+
+  createCuratorProposal(input: {
+    projectId: string;
+    title: string;
+    rationale: string;
+    fingerprint: string;
+    evidenceFingerprint: string;
+    config: ProjectConfigSnapshot;
+    proposedBy: string;
+  }): CuratorProposal {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new Error(`Unknown project ${input.projectId}`);
+    const duplicate = this.store.get(
+      `SELECT * FROM curator_proposals WHERE project_id = ? AND fingerprint = ? AND evidence_fingerprint = ?
+       AND status IN ('proposed','evaluated','rejected','activated') ORDER BY created_at DESC LIMIT 1`,
+      input.projectId, input.fingerprint, input.evidenceFingerprint,
+    );
+    if (duplicate) {
+      throw new Error(`Equivalent curator proposal ${String(duplicate.id)} already ended in status ${String(duplicate.status)}; new evidence is required`);
+    }
+    const proposalId = ids.proposal();
+    const configVersion = ids.config();
+    const at = nowIso();
+    return this.store.tx(() => {
+      const parentExists = this.store.get("SELECT id FROM config_versions WHERE id = ?", project.configVersion);
+      this.store.run(
+        `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
+         VALUES(?,?,?,?, 'curator-proposal', ?,0,?)`,
+        configVersion, project.id, parentExists ? project.configVersion : null, `proposal:${proposalId}`, toJson(input.config), at,
+      );
+      this.store.run(
+        `INSERT INTO curator_proposals(id, project_id, title, rationale, fingerprint, evidence_fingerprint,
+           status, base_config_version, proposed_config_version, proposed_by, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,'draft',?,?,?,?,?)`,
+        proposalId, project.id, input.title, input.rationale, input.fingerprint, input.evidenceFingerprint,
+        project.configVersion, configVersion, input.proposedBy, at, at,
+      );
+      this.recordEvent({
+        kind: "curator.proposal_created",
+        projectId: project.id,
+        data: { proposalId, configVersion, fingerprint: input.fingerprint, evidenceFingerprint: input.evidenceFingerprint },
+      });
+      return this.getCuratorProposal(proposalId) as CuratorProposal;
+    });
+  }
+
+  updateCuratorProposalEvidence(id: string, input: {
+    branch: string;
+    worktreePath: string;
+    baseRevision: string;
+    resultRevision: string;
+    diffPath: string;
+  }): CuratorProposal {
+    const proposal = this.getCuratorProposal(id);
+    if (!proposal || proposal.status !== "draft") throw new Error(`Proposal ${id} is not a draft`);
+    this.store.tx(() => {
+      this.store.run(
+        `UPDATE curator_proposals SET status = 'proposed', branch = ?, worktree_path = ?, base_revision = ?,
+           result_revision = ?, diff_path = ?, updated_at = ? WHERE id = ?`,
+        input.branch, input.worktreePath, input.baseRevision, input.resultRevision, input.diffPath, nowIso(), id,
+      );
+      this.store.run("UPDATE config_versions SET revision = ? WHERE id = ?", input.resultRevision, proposal.proposedConfigVersion);
+      this.recordEvent({
+        kind: "curator.proposal_materialized",
+        projectId: proposal.projectId,
+        data: { proposalId: id, revision: input.resultRevision, branch: input.branch, diffPath: input.diffPath },
+      });
+    });
+    return this.getCuratorProposal(id) as CuratorProposal;
+  }
+
+  getCuratorProposal(id: string): CuratorProposal | null {
+    const row = this.store.get("SELECT * FROM curator_proposals WHERE id = ?", id);
+    return row ? toProposal(row) : null;
+  }
+
+  listCuratorProposals(projectId?: string): CuratorProposal[] {
+    const rows = projectId
+      ? this.store.all("SELECT * FROM curator_proposals WHERE project_id = ? ORDER BY created_at DESC", projectId)
+      : this.store.all("SELECT * FROM curator_proposals ORDER BY created_at DESC LIMIT 200");
+    return rows.map(toProposal);
+  }
+
+  failCuratorProposal(id: string, reason: string): CuratorProposal {
+    const proposal = this.getCuratorProposal(id);
+    if (!proposal || proposal.status !== "draft") throw new Error(`Proposal ${id} is not a draft`);
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE curator_proposals SET status = 'failed', rejection_reason = ?, updated_at = ? WHERE id = ?",
+        reason, nowIso(), id,
+      );
+      this.recordEvent({ kind: "curator.proposal_failed", projectId: proposal.projectId, data: { proposalId: id, reason } });
+    });
+    return this.getCuratorProposal(id) as CuratorProposal;
+  }
+
+  rejectCuratorProposal(id: string, reason: string, rejectedBy: string): CuratorProposal {
+    if (!reason.trim()) throw new Error("Rejection reason is required");
+    return this.store.tx(() => {
+      const proposal = this.getCuratorProposal(id);
+      if (!proposal || !["proposed", "evaluated"].includes(proposal.status)) throw new Error(`Proposal ${id} cannot be rejected from its current state`);
+      this.store.run(
+        "UPDATE curator_proposals SET status = 'rejected', rejection_reason = ?, updated_at = ? WHERE id = ?",
+        reason, nowIso(), id,
+      );
+      const approvals = this.store.all(
+        `SELECT * FROM approvals WHERE project_id = ? AND task_id IS NULL AND action = 'activate_config_change'
+         AND target = ? AND state IN ('pending','approved')`,
+        proposal.projectId, proposal.id,
+      ).map(toApproval);
+      for (const approval of approvals) {
+        this.store.run("UPDATE approvals SET state = 'invalidated', decided_at = ? WHERE id = ?", nowIso(), approval.id);
+        this.recordEvent({
+          kind: "approval.invalidated",
+          projectId: proposal.projectId,
+          data: { approvalId: approval.id, reason: `Curator proposal ${id} was rejected.` },
+        });
+      }
+      this.recordEvent({ kind: "curator.proposal_rejected", projectId: proposal.projectId, data: { proposalId: id, reason, rejectedBy } });
+      return this.getCuratorProposal(id) as CuratorProposal;
+    });
+  }
+
+  recordCuratorEvaluation(input: {
+    proposalId: string;
+    suiteVersion: string;
+    status: CuratorEvaluation["status"];
+    baselineMetrics: EvaluationMetrics;
+    candidateMetrics: EvaluationMetrics;
+    cases: EvaluationCase[];
+    errors: string[];
+    evidencePath: string | null;
+    startedAt: string;
+  }): CuratorEvaluation {
+    const proposal = this.getCuratorProposal(input.proposalId);
+    if (!proposal || !["proposed", "evaluated"].includes(proposal.status)) throw new Error(`Proposal ${input.proposalId} is not ready for evaluation`);
+    const id = ids.evaluation();
+    const endedAt = nowIso();
+    return this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO curator_evaluations(id, proposal_id, suite_version, status, baseline_metrics,
+           candidate_metrics, case_results, errors, evidence_path, started_at, ended_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        id, input.proposalId, input.suiteVersion, input.status, toJson(input.baselineMetrics),
+        toJson(input.candidateMetrics), toJson(input.cases), toJson(input.errors), input.evidencePath, input.startedAt, endedAt,
+      );
+      this.store.run(
+        "UPDATE curator_proposals SET status = 'evaluated', updated_at = ? WHERE id = ?",
+        endedAt, input.proposalId,
+      );
+      this.recordEvent({
+        kind: "curator.evaluated",
+        projectId: proposal.projectId,
+        data: { proposalId: input.proposalId, evaluationId: id, status: input.status, suiteVersion: input.suiteVersion },
+      });
+      return this.getCuratorEvaluation(id) as CuratorEvaluation;
+    });
+  }
+
+  getCuratorEvaluation(id: string): CuratorEvaluation | null {
+    const row = this.store.get("SELECT * FROM curator_evaluations WHERE id = ?", id);
+    return row ? toEvaluation(row) : null;
+  }
+
+  evaluationsForProposal(proposalId: string): CuratorEvaluation[] {
+    return this.store.all(
+      "SELECT * FROM curator_evaluations WHERE proposal_id = ? ORDER BY ended_at",
+      proposalId,
+    ).map(toEvaluation);
+  }
+
+  findProjectApprovalFor(projectId: string, binding: ApprovalBinding): Approval | null {
+    const row = this.store.get(
+      `SELECT * FROM approvals WHERE project_id = ? AND task_id IS NULL AND action = ? AND target = ?
+       AND revision = ? AND config_version = ? AND state = 'approved' ORDER BY decided_at DESC LIMIT 1`,
+      projectId, binding.action, binding.target, binding.revision, binding.configVersion,
+    );
+    return row ? toApproval(row) : null;
+  }
+
+  activateCuratorProposal(id: string, approvalId: string, activatedBy: string, reason: string): ConfigActivation {
+    if (!reason.trim()) throw new Error("Activation reason is required");
+    const proposal = this.getCuratorProposal(id);
+    if (!proposal || proposal.status !== "evaluated" || !proposal.resultRevision) throw new Error(`Proposal ${id} is not evaluated and revision-bound`);
+    const evaluation = this.evaluationsForProposal(id).at(-1);
+    if (!evaluation || evaluation.status !== "passed") throw new Error(`Proposal ${id} has no passing evaluation`);
+    const project = this.getProject(proposal.projectId);
+    if (!project) throw new Error(`Unknown project ${proposal.projectId}`);
+    if (project.configVersion !== proposal.baseConfigVersion) throw new Error(`Proposal ${id} is stale because project configuration changed`);
+    const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
+    if (activeTasks.length > 0) throw new Error(`Configuration activation requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
+    const binding: ApprovalBinding = {
+      action: "activate_config_change",
+      target: id,
+      revision: proposal.resultRevision,
+      configVersion: project.configVersion,
+    };
+    const approval = this.getApproval(approvalId);
+    if (!approval || approval.id !== this.findProjectApprovalFor(project.id, binding)?.id) {
+      throw new Error("Activation requires an exact approved proposal revision and configuration binding");
+    }
+    const version = this.getConfigVersion(proposal.proposedConfigVersion);
+    if (!version) throw new Error(`Missing proposed configuration ${proposal.proposedConfigVersion}`);
+    const errors = validateProjectConfig(version.payload);
+    if (errors.length > 0) throw new Error(`Proposed configuration is invalid: ${errors.join("; ")}`);
+    return this.applyConfiguration({
+      project,
+      configVersion: proposal.proposedConfigVersion,
+      config: version.payload,
+      proposalId: proposal.id,
+      action: "activate",
+      sourceConfigVersion: proposal.proposedConfigVersion,
+      approval,
+      activatedBy,
+      reason,
+    });
+  }
+
+  revertProjectConfig(input: {
+    projectId: string;
+    targetConfigVersion: string;
+    approvalId: string;
+    activatedBy: string;
+    reason: string;
+  }): ConfigActivation {
+    if (!input.reason.trim()) throw new Error("Revert reason is required");
+    const project = this.getProject(input.projectId);
+    if (!project) throw new Error(`Unknown project ${input.projectId}`);
+    const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
+    if (activeTasks.length > 0) throw new Error(`Configuration revert requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
+    const target = this.getConfigVersion(input.targetConfigVersion);
+    if (!target || target.project_id !== project.id) throw new Error(`Unknown project configuration ${input.targetConfigVersion}`);
+    const binding: ApprovalBinding = {
+      action: "activate_config_change",
+      target: `revert:${input.targetConfigVersion}`,
+      revision: input.targetConfigVersion,
+      configVersion: project.configVersion,
+    };
+    const approval = this.getApproval(input.approvalId);
+    if (!approval || approval.id !== this.findProjectApprovalFor(project.id, binding)?.id) {
+      throw new Error("Revert requires an exact approved target and current configuration binding");
+    }
+    const errors = validateProjectConfig(target.payload);
+    if (errors.length > 0) throw new Error(`Target configuration is invalid: ${errors.join("; ")}`);
+    const revertVersion = ids.config();
+    this.store.run(
+      `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, revision, active, created_at)
+       VALUES(?,?,?,'curator-revert','snapshot',?,NULL,0,?)`,
+      revertVersion, project.id, project.configVersion, toJson(target.payload), nowIso(),
+    );
+    return this.applyConfiguration({
+      project,
+      configVersion: revertVersion,
+      config: target.payload,
+      proposalId: null,
+      action: "revert",
+      sourceConfigVersion: input.targetConfigVersion,
+      approval,
+      activatedBy: input.activatedBy,
+      reason: input.reason,
+    });
+  }
+
+  private applyConfiguration(input: {
+    project: Project;
+    configVersion: string;
+    config: ProjectConfigSnapshot;
+    proposalId: string | null;
+    action: ConfigActivation["action"];
+    sourceConfigVersion: string;
+    approval: Approval;
+    activatedBy: string;
+    reason: string;
+  }): ConfigActivation {
+    const activationId = ids.activation();
+    return this.store.tx(() => {
+      this.markApprovalConsumed(input.approval.id);
+      this.store.run("UPDATE config_versions SET active = 0 WHERE project_id = ?", input.project.id);
+      this.store.run("UPDATE config_versions SET active = 1 WHERE id = ?", input.configVersion);
+      this.store.run(
+        `UPDATE projects SET routing_profile = ?, routing_overrides = ?, approval_policy = ?, review_policy = ?,
+           check_commands = ?, prompt_profile = ?, controller_settings = ?, config_version = ?, updated_at = ? WHERE id = ?`,
+        input.config.routingProfile, toJson(input.config.routingOverrides), toJson(input.config.approvalPolicy),
+        toJson(input.config.reviewPolicy), toJson(input.config.checkCommands), toJson(input.config.promptProfile),
+        toJson(input.config.controllerSettings), input.configVersion, nowIso(), input.project.id,
+      );
+      if (input.proposalId) {
+        this.store.run("UPDATE curator_proposals SET status = 'activated', updated_at = ? WHERE id = ?", nowIso(), input.proposalId);
+        this.store.run(
+          `UPDATE curator_proposals SET status = 'superseded', updated_at = ? WHERE project_id = ? AND id <> ?
+           AND status IN ('proposed','evaluated')`,
+          nowIso(), input.project.id, input.proposalId,
+        );
+      }
+      this.invalidateProjectApprovals(input.project.id, `Configuration ${input.action} completed.`);
+      this.store.run(
+        `INSERT INTO config_activations(id, project_id, proposal_id, action, from_config_version,
+           to_config_version, source_config_version, approval_id, activated_by, reason, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        activationId, input.project.id, input.proposalId, input.action, input.project.configVersion,
+        input.configVersion, input.sourceConfigVersion, input.approval.id, input.activatedBy, input.reason, nowIso(),
+      );
+      this.recordEvent({
+        kind: input.action === "activate" ? "config.activated" : "config.reverted",
+        projectId: input.project.id,
+        data: {
+          activationId,
+          proposalId: input.proposalId,
+          fromConfigVersion: input.project.configVersion,
+          toConfigVersion: input.configVersion,
+          approvalId: input.approval.id,
+          activatedBy: input.activatedBy,
+        },
+      });
+      return this.getConfigActivation(activationId) as ConfigActivation;
+    });
+  }
+
+  getConfigActivation(id: string): ConfigActivation | null {
+    const row = this.store.get("SELECT * FROM config_activations WHERE id = ?", id);
+    return row ? toActivation(row) : null;
+  }
+
+  listConfigActivations(projectId: string): ConfigActivation[] {
+    return this.store.all(
+      "SELECT * FROM config_activations WHERE project_id = ? ORDER BY created_at DESC",
+      projectId,
+    ).map(toActivation);
   }
 
   // --- plans, review, and feedback ----------------------------------------
@@ -1807,6 +2285,9 @@ export class Records {
     repeatedReplans: number;
     reviewChangesRequested: number;
     pendingFeedback: number;
+    curatorProposals: number;
+    curatorRejected: number;
+    configActivations: number;
     orchestratorState: "idle" | "active";
     lastDecisionDurationMs: number | null;
   } {
@@ -1823,6 +2304,9 @@ export class Records {
       repeatedReplans: countEvents("plan.replanned"),
       reviewChangesRequested: Number(this.store.get("SELECT COUNT(*) AS n FROM review_results WHERE verdict = 'request_changes'")?.n ?? 0),
       pendingFeedback: Number(this.store.get("SELECT COUNT(*) AS n FROM feedback WHERE state = 'pending'")?.n ?? 0),
+      curatorProposals: Number(this.store.get("SELECT COUNT(*) AS n FROM curator_proposals")?.n ?? 0),
+      curatorRejected: Number(this.store.get("SELECT COUNT(*) AS n FROM curator_proposals WHERE status = 'rejected'")?.n ?? 0),
+      configActivations: Number(this.store.get("SELECT COUNT(*) AS n FROM config_activations")?.n ?? 0),
       orchestratorState: "idle",
       lastDecisionDurationMs: typeof decisionData.durationMs === "number" ? decisionData.durationMs : null,
     };
