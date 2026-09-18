@@ -60,6 +60,16 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => ctx.ui.notify(await run(["plan", ...words(args)]), "info"),
   });
 
+  pi.registerCommand("mabs-feedback", {
+    description: "Record or answer durable feedback, e.g. /mabs-feedback add task <id> question --body=... --version=N",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["feedback", ...words(args)]), "info"),
+  });
+
+  pi.registerCommand("mabs-approval", {
+    description: "Request or decide a revision-bound approval",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["approval", ...words(args)]), "info"),
+  });
+
   pi.registerCommand("mabs-provider", {
     description: "Inspect or reset provider capacity, e.g. /mabs-provider list",
     handler: async (args, ctx) => ctx.ui.notify(await run(["provider", ...words(args)]), "info"),

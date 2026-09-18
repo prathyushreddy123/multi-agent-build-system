@@ -52,7 +52,7 @@ test("state machine enforces lifecycle boundaries", () => {
   assert.equal(canTransition("QUEUED", "DONE"), false);
   assert.throws(() => assertTransition("DONE", "RUNNING"), /Invalid task transition/);
   assert.equal(holdsSlot("RUNNING"), true);
-  assert.equal(holdsSlot("REVIEWING"), false);
+  assert.equal(holdsSlot("REVIEWING"), true);
   assert.equal(isTerminal("CANCELLED"), true);
 });
 

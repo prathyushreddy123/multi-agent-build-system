@@ -23,7 +23,7 @@ export type TaskState = (typeof TASK_STATES)[number];
 export const TERMINAL_STATES: readonly TaskState[] = ["DONE", "FAILED", "CANCELLED"];
 
 /** A task in one of these states owns a worker slot. */
-export const SLOT_HOLDING_STATES: readonly TaskState[] = ["RUNNING", "CHECKING"];
+export const SLOT_HOLDING_STATES: readonly TaskState[] = ["RUNNING", "CHECKING", "REVIEWING"];
 
 const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   QUEUED: ["READY", "BLOCKED", "CANCELLED"],

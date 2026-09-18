@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 
 import { Controller } from "./controller/controller.ts";
 import { exec } from "./core/exec.ts";
+import { taskDiagnostics } from "./diagnostics/task.ts";
+import { ACTIONS } from "./domain/policy.ts";
+import type { Action } from "./domain/policy.ts";
 import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
 import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
@@ -55,9 +58,12 @@ function printHelp(): void {
 Commands:
   verify [--quick]                          Run Phase 0 subscription/access proof
   baseline [--only=a,b] [--harness=codex]  Run task-class baseline
-  project add <name> <repo> [--goal=...]    Register a project and discover existing checks
+  project add <name> <repo> [--goal=...] [--review=substantive]
+                                               Register a project and discover existing checks
   project list                              List registered projects
   project status <id|name> <active|paused|archived>
+  project review <id|name> <required|substantive|none>
+  project base <id|name> <branch>              Change target and invalidate open approvals
   requirement add <project> <id> <text>
   task add <project> <title> --objective=... [--class=small_implementation]
   task list [--project=id] [--state=READY]
@@ -66,10 +72,14 @@ Commands:
   task cancel <id> --version=<recordVersion>
   plan validate <file>
   plan apply <project> <file>
+  plan list [--project=id] | plan show <id>
+  feedback add task|plan <id> <kind> --body=... --version=N
+  feedback list [--project=id] | feedback answer <id> --response=...
   provider list | provider reset <name>
   controller once [--adapter=codex]          Reconcile and dispatch one cycle
   controller run [--adapter=codex] [--ui]   Run controller loop
   status                                    Show queue and controller health
+  approval request <task> <action> <target> --reason=...
   approval approve|reject <id> [--by=name]
   maintenance policy                         Show retention and backup defaults
   maintenance backup                        Create a consistent SQLite backup
@@ -126,6 +136,10 @@ async function main(): Promise<void> {
         repoPath,
         baseBranch: textOption(args, "base") ?? await baseBranch(repoPath),
         goal: textOption(args, "goal"),
+        reviewPolicy: {
+          mode: (textOption(args, "review", "substantive") as "required" | "substantive" | "none"),
+          skipTaskClasses: ["mechanical", "planning", "research"],
+        },
         checkCommands: args.options.has("no-checks") ? [] : discoverChecks(repoPath),
       });
       console.log(JSON.stringify(project, null, 2));
@@ -143,6 +157,26 @@ async function main(): Promise<void> {
       }
       records.setProjectStatus(project.id, status as "active" | "paused" | "archived");
       console.log(`${project.name}: ${status}`);
+      return;
+    }
+    if (area === "project" && action === "base") {
+      const [projectValue, branch] = rest;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project || !branch) throw new Error("Usage: mabs project base <id|name> <branch>");
+      console.log(JSON.stringify({ projectId: project.id, baseBranch: branch, configVersion: records.setProjectBaseBranch(project.id, branch) }, null, 2));
+      return;
+    }
+    if (area === "project" && action === "review") {
+      const [projectValue, mode] = rest;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project || !mode || !["required", "substantive", "none"].includes(mode)) {
+        throw new Error("Usage: mabs project review <id|name> <required|substantive|none>");
+      }
+      const configVersion = records.setProjectReviewPolicy(project.id, {
+        mode: mode as "required" | "substantive" | "none",
+        skipTaskClasses: mode === "required" ? [] : ["mechanical", "planning", "research"],
+      });
+      console.log(JSON.stringify({ projectId: project.id, mode, configVersion }, null, 2));
       return;
     }
     if (area === "requirement" && action === "add") {
@@ -199,8 +233,11 @@ async function main(): Promise<void> {
         attempts: records.listAttempts(id),
         routing: records.routingForTask(id),
         gates: records.gatesForTask(id),
+        reviews: records.reviewsForTask(id),
+        feedback: records.listFeedback({ taskId: id }),
         events: records.listEvents(id),
         latency: records.taskLatency(id),
+        diagnostics: records.getTask(id) ? taskDiagnostics(records, id) : null,
       }, null, 2));
       return;
     }
@@ -212,6 +249,19 @@ async function main(): Promise<void> {
         throw new Error("Usage: mabs task retry <id> --version=<recordVersion from task show>");
       }
       console.log(JSON.stringify(records.retryTask(id, version), null, 2));
+      return;
+    }
+    if (area === "plan" && action === "list") {
+      const args = parseArgs(rest);
+      console.log(JSON.stringify(records.listExecutionPlans(textOption(args, "project")), null, 2));
+      return;
+    }
+    if (area === "plan" && action === "show") {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: mabs plan show <id>");
+      const plan = records.getExecutionPlan(id);
+      if (!plan) throw new Error(`Unknown plan ${id}`);
+      console.log(JSON.stringify({ ...plan, feedback: records.listFeedback({ planId: id }) }, null, 2));
       return;
     }
     if (area === "plan" && (action === "validate" || action === "apply")) {
@@ -240,6 +290,44 @@ async function main(): Promise<void> {
         data: { file: resolve(file), mode: plan.mode, reason: plan.reason, taskIds: tasks.map((task) => task.id) },
       });
       console.log(JSON.stringify({ validation, tasks }, null, 2));
+      return;
+    }
+    if (area === "feedback" && action === "list") {
+      const args = parseArgs(rest);
+      console.log(JSON.stringify(records.listFeedback({ projectId: textOption(args, "project") }), null, 2));
+      return;
+    }
+    if (area === "feedback" && action === "add") {
+      const args = parseArgs(rest);
+      const [targetType, targetId, kind] = args.positionals;
+      const body = textOption(args, "body");
+      const expectedVersion = Number(textOption(args, "version"));
+      if (!targetId || !body || !["task", "plan"].includes(targetType ?? "") ||
+          !["comment", "question", "request_change", "priority"].includes(kind ?? "") ||
+          !Number.isSafeInteger(expectedVersion)) {
+        throw new Error("Usage: mabs feedback add task|plan <id> <comment|question|request_change|priority> --body=... --version=N");
+      }
+      const task = targetType === "task" ? records.getTask(targetId) : null;
+      const plan = targetType === "plan" ? records.getExecutionPlan(targetId)?.plan : null;
+      const projectId = task?.projectId ?? plan?.projectId;
+      if (!projectId) throw new Error(`Unknown ${targetType} ${targetId}`);
+      console.log(JSON.stringify(records.submitFeedback({
+        projectId,
+        taskId: task?.id,
+        planId: plan?.id,
+        kind: kind as "comment" | "question" | "request_change" | "priority",
+        body,
+        expectedVersion,
+        createdBy: textOption(args, "by", "local-cli") as string,
+      }), null, 2));
+      return;
+    }
+    if (area === "feedback" && action === "answer") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const response = textOption(args, "response");
+      if (!id || !response) throw new Error("Usage: mabs feedback answer <id> --response=...");
+      console.log(JSON.stringify(records.answerFeedback(id, response, textOption(args, "by", "local-cli") as string), null, 2));
       return;
     }
     if (area === "provider" && action === "list") {
@@ -279,6 +367,23 @@ async function main(): Promise<void> {
       const applied = args.options.has("apply");
       const candidates = pruneArtifacts(records, { apply: applied });
       console.log(JSON.stringify({ applied, candidates }, null, 2));
+      return;
+    }
+    if (area === "approval" && action === "request") {
+      const args = parseArgs(rest);
+      const [taskId, actionName, target] = args.positionals;
+      const task = taskId ? records.getTask(taskId) : null;
+      const project = task ? records.getProject(task.projectId) : null;
+      const reason = textOption(args, "reason");
+      if (!task || !project || !target || !reason || !ACTIONS.includes(actionName as Action)) {
+        throw new Error("Usage: mabs approval request <task> <action> <target> --reason=...");
+      }
+      console.log(JSON.stringify(records.prepareApproval({
+        taskId: task.id,
+        action: actionName as Action,
+        target,
+        reason,
+      }), null, 2));
       return;
     }
     if (area === "approval" && (action === "approve" || action === "reject")) {

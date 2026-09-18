@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS projects (
   status          TEXT NOT NULL DEFAULT 'active',      -- active | paused | archived
   routing_profile TEXT NOT NULL DEFAULT 'default',
   approval_policy TEXT NOT NULL DEFAULT '{"overrides":{},"standing":[]}',
+  review_policy   TEXT NOT NULL DEFAULT '{"mode":"substantive","skipTaskClasses":["mechanical","planning","research"]}',
   check_commands  TEXT NOT NULL DEFAULT '[]',
   config_version  TEXT NOT NULL,
   goal            TEXT,
@@ -215,6 +216,63 @@ CREATE TABLE IF NOT EXISTS project_schedule (
   dispatch_count     INTEGER NOT NULL DEFAULT 0,
   last_dispatched_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS execution_plans (
+  id         TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  objective  TEXT NOT NULL,
+  mode       TEXT NOT NULL,
+  reason     TEXT NOT NULL,
+  assumptions TEXT NOT NULL DEFAULT '[]',
+  milestones  TEXT NOT NULL DEFAULT '[]',
+  version    INTEGER NOT NULL DEFAULT 1,
+  state      TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_plan_tasks (
+  plan_id  TEXT NOT NULL REFERENCES execution_plans(id) ON DELETE CASCADE,
+  task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  task_key TEXT NOT NULL,
+  PRIMARY KEY(plan_id, task_id),
+  UNIQUE(plan_id, task_key)
+);
+
+CREATE TABLE IF NOT EXISTS review_results (
+  id                   TEXT PRIMARY KEY,
+  task_id              TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_id           TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  revision             TEXT NOT NULL,
+  verdict              TEXT NOT NULL, -- approved | request_changes | blocked
+  summary              TEXT NOT NULL,
+  findings             TEXT NOT NULL DEFAULT '[]',
+  requirements_checked TEXT NOT NULL DEFAULT '[]',
+  evidence_path        TEXT,
+  created_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS reviews_by_task ON review_results(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS feedback (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id        TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+  plan_id        TEXT REFERENCES execution_plans(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL, -- comment | question | request_change | priority
+  body           TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'pending', -- pending | applied | answered | rejected
+  response       TEXT,
+  linked_task_id TEXT REFERENCES tasks(id),
+  submitted_for_version INTEGER NOT NULL,
+  created_by     TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  resolved_at    TEXT,
+  CHECK ((task_id IS NOT NULL AND plan_id IS NULL) OR (task_id IS NULL AND plan_id IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS feedback_by_task ON feedback(task_id, created_at);
+CREATE INDEX IF NOT EXISTS feedback_by_plan ON feedback(plan_id, created_at);
 
 -- One row per controller process generation; proves liveness without an LLM.
 CREATE TABLE IF NOT EXISTS controller_lease (

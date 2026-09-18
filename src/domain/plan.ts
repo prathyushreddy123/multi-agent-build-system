@@ -28,6 +28,8 @@ export interface ExecutionPlan {
   objective: string;
   mode: ExecutionMode;
   reason: string;
+  assumptions?: string[];
+  milestones?: string[];
   tasks: PlannedTask[];
 }
 
@@ -67,6 +69,12 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
   if (typeof plan?.reason !== "string" || !plan.reason.trim()) errors.push("Execution-mode reason is required.");
   if (typeof plan?.mode !== "string" || !["single", "sequential", "parallel", "mixed"].includes(plan.mode)) {
     errors.push(`Unknown plan execution mode: ${String(plan?.mode)}`);
+  }
+  if (plan?.assumptions !== undefined && (!Array.isArray(plan.assumptions) || plan.assumptions.some((item) => typeof item !== "string"))) {
+    errors.push("Plan assumptions must be an array of strings.");
+  }
+  if (plan?.milestones !== undefined && (!Array.isArray(plan.milestones) || plan.milestones.some((item) => typeof item !== "string"))) {
+    errors.push("Plan milestones must be an array of strings.");
   }
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
   if (!Array.isArray(plan?.tasks)) errors.push("Plan tasks must be an array.");
@@ -177,6 +185,16 @@ export function applyExecutionPlan(records: Records, projectId: string, plan: Ex
       });
       created.set(key, task);
     }
-    return validation.topologicalOrder.map((key) => created.get(key) as Task);
+    const tasks = validation.topologicalOrder.map((key) => created.get(key) as Task);
+    records.recordExecutionPlan({
+      projectId,
+      objective: plan.objective,
+      mode: plan.mode,
+      reason: plan.reason,
+      assumptions: plan.assumptions,
+      milestones: plan.milestones,
+      tasks: validation.topologicalOrder.map((key) => ({ taskId: (created.get(key) as Task).id, key })),
+    });
+    return tasks;
   });
 }

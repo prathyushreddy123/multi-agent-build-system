@@ -37,15 +37,21 @@ export function buildContextPacket(input: {
   workspace: Workspace;
   execution: ExecutionSelection;
   previousFindings?: string[];
+  purpose?: "implementation" | "review";
+  additionalArtifacts?: string[];
 }): ContextPacket {
   const packetId = ids.packet();
   const requirements = input.records.listRequirements(input.project.id);
   const dependencyTasks = input.records.dependenciesOf(input.task.id)
     .map((id) => input.records.getTask(id))
     .filter((task): task is Task => task !== null);
-  const artifacts = dependencyTasks.flatMap((task) =>
-    input.records.listAttempts(task.id).map((attempt) => attempt.outputPath).filter((path): path is string => path !== null),
-  );
+  const purpose = input.purpose ?? "implementation";
+  const artifacts = [
+    ...dependencyTasks.flatMap((task) =>
+      input.records.listAttempts(task.id).map((attempt) => attempt.outputPath).filter((path): path is string => path !== null),
+    ),
+    ...(input.additionalArtifacts ?? []),
+  ];
   const previousFindings = [
     ...(input.previousFindings ?? []),
     ...dependencyTasks.map((task) => `${task.id}: ${task.resultSummary ?? `state=${task.state}`}`),
@@ -60,12 +66,20 @@ export function buildContextPacket(input: {
       project_id: input.project.id,
       task_id: input.task.id,
       attempt_id: input.attemptId,
-      role: roleOf(input.task.role),
+      role: purpose === "review" ? "reviewer" : roleOf(input.task.role),
       contract_version: CONTRACT_VERSION,
     },
     task: {
-      objective: input.task.objective,
-      acceptance_criteria: input.task.acceptanceCriteria,
+      objective: purpose === "review"
+        ? `Independently review revision ${input.task.resultRevision ?? input.workspace.baseRevision} for task: ${input.task.objective}`
+        : input.task.objective,
+      acceptance_criteria: purpose === "review"
+        ? [
+            "Inspect the actual diff, surrounding code, registered gate evidence, and authoritative requirements.",
+            "Report every actionable finding in follow_up.unresolved with a [critical], [major], or [minor] prefix.",
+            "Return outcome=completed when the review was performed, even when changes are requested; use blocked only when review evidence is unavailable.",
+          ]
+        : input.task.acceptanceCriteria,
       dependencies: dependencyTasks.map((task) => task.id),
       profile: {
         task_class: input.task.taskClass,
@@ -90,8 +104,10 @@ export function buildContextPacket(input: {
       allowed_scope: input.task.allowedScope.length > 0
         ? input.task.allowedScope.map((scope) => join(input.workspace.path, scope))
         : [input.workspace.path],
-      allowed_actions: ["read", "edit", "run_checks"],
-      forbidden_actions: ["git_commit (controller-owned)", "push", "merge", "deploy", "delete_shared_data", "change_scope"],
+      allowed_actions: purpose === "review" ? ["read", "run_checks"] : ["read", "edit", "run_checks"],
+      forbidden_actions: purpose === "review"
+        ? ["edit", "git_commit", "push", "merge", "deploy", "delete_shared_data", "change_scope"]
+        : ["git_commit (controller-owned)", "push", "merge", "deploy", "delete_shared_data", "change_scope"],
     },
     execution: {
       harness: input.execution.harness,
@@ -129,8 +145,12 @@ export function buildContextPacket(input: {
   const prompt = [
     "You are a MABS worker. Follow the supplied contract exactly.",
     "Work only in the assigned worktree. Do not push, merge, deploy, or broaden scope.",
-    "Do not run git commit. Linked-worktree Git metadata may be outside your sandbox; after you report completed, the controller creates the required local commit and binds checks to it.",
-    "A task acceptance criterion requiring a local commit is therefore a controller postcondition, not a reason to report blocked.",
+    purpose === "review"
+      ? "This is an independent, read-only review. Do not edit tracked files. Inspect evidence directly instead of relying on the implementer's summary."
+      : "Do not run git commit. Linked-worktree Git metadata may be outside your sandbox; after you report completed, the controller creates the required local commit and binds checks to it.",
+    purpose === "review"
+      ? "Put actionable findings in follow_up.unresolved and prefix each with [critical], [major], or [minor]. Leave unresolved empty only when the revision is acceptable."
+      : "A task acceptance criterion requiring a local commit is therefore a controller postcondition, not a reason to report blocked.",
     "Treat project requirements and acceptance criteria as authoritative.",
     "Worker input:",
     JSON.stringify(workerInput, null, 2),

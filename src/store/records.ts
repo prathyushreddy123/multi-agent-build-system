@@ -3,12 +3,23 @@ import type { Row } from "./db.ts";
 import { ids } from "../core/ids.ts";
 import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
+import { evaluate } from "../domain/policy.ts";
 import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/policy.ts";
 import type { FailureClass } from "../core/failure.ts";
 import { TASK_CLASSES } from "../routing/router.ts";
 import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
 
 export type ProjectStatus = "active" | "paused" | "archived";
+
+export interface ReviewPolicy {
+  mode: "required" | "substantive" | "none";
+  skipTaskClasses: TaskClass[];
+}
+
+export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
+  mode: "substantive",
+  skipTaskClasses: ["mechanical", "planning", "research"],
+};
 
 export interface GateSpec {
   name: string;
@@ -27,6 +38,7 @@ export interface Project {
   status: ProjectStatus;
   routingProfile: string;
   approvalPolicy: ProjectApprovalPolicy;
+  reviewPolicy: ReviewPolicy;
   checkCommands: GateSpec[];
   configVersion: string;
   goal: string | null;
@@ -138,6 +150,49 @@ export interface Approval {
   consumedAt: string | null;
 }
 
+export interface ReviewResult {
+  id: string;
+  taskId: string;
+  attemptId: string;
+  revision: string;
+  verdict: "approved" | "request_changes" | "blocked";
+  summary: string;
+  findings: string[];
+  requirementsChecked: string[];
+  evidencePath: string | null;
+  createdAt: string;
+}
+
+export interface ExecutionPlanRecord {
+  id: string;
+  projectId: string;
+  objective: string;
+  mode: string;
+  reason: string;
+  assumptions: string[];
+  milestones: string[];
+  version: number;
+  state: "active" | "superseded" | "completed";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Feedback {
+  id: string;
+  projectId: string;
+  taskId: string | null;
+  planId: string | null;
+  kind: "comment" | "question" | "request_change" | "priority";
+  body: string;
+  state: "pending" | "applied" | "answered" | "rejected";
+  response: string | null;
+  linkedTaskId: string | null;
+  submittedForVersion: number;
+  createdBy: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
 export interface ProviderCapacity {
   provider: string;
   state: "available" | "cooldown" | "unavailable";
@@ -169,6 +224,7 @@ function toProject(row: Row): Project {
     status: row.status as ProjectStatus,
     routingProfile: row.routing_profile as string,
     approvalPolicy: fromJson<ProjectApprovalPolicy>(row.approval_policy, { overrides: {}, standing: [] }),
+    reviewPolicy: fromJson<ReviewPolicy>(row.review_policy, DEFAULT_REVIEW_POLICY),
     checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
     configVersion: row.config_version as string,
     goal: (row.goal as string) ?? null,
@@ -264,6 +320,55 @@ function toApproval(row: Row): Approval {
     decidedAt: (row.decided_at as string) ?? null,
     decidedBy: (row.decided_by as string) ?? null,
     consumedAt: (row.consumed_at as string) ?? null,
+  };
+}
+
+function toReview(row: Row): ReviewResult {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    attemptId: row.attempt_id as string,
+    revision: row.revision as string,
+    verdict: row.verdict as ReviewResult["verdict"],
+    summary: row.summary as string,
+    findings: fromJson<string[]>(row.findings, []),
+    requirementsChecked: fromJson<string[]>(row.requirements_checked, []),
+    evidencePath: (row.evidence_path as string) ?? null,
+    createdAt: row.created_at as string,
+  };
+}
+
+function toPlan(row: Row): ExecutionPlanRecord {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    objective: row.objective as string,
+    mode: row.mode as string,
+    reason: row.reason as string,
+    assumptions: fromJson<string[]>(row.assumptions, []),
+    milestones: fromJson<string[]>(row.milestones, []),
+    version: Number(row.version),
+    state: row.state as ExecutionPlanRecord["state"],
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toFeedback(row: Row): Feedback {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    taskId: (row.task_id as string) ?? null,
+    planId: (row.plan_id as string) ?? null,
+    kind: row.kind as Feedback["kind"],
+    body: row.body as string,
+    state: row.state as Feedback["state"],
+    response: (row.response as string) ?? null,
+    linkedTaskId: (row.linked_task_id as string) ?? null,
+    submittedForVersion: Number(row.submitted_for_version),
+    createdBy: row.created_by as string,
+    createdAt: row.created_at as string,
+    resolvedAt: (row.resolved_at as string) ?? null,
   };
 }
 
@@ -369,16 +474,20 @@ export class Records {
     goal?: string;
     checkCommands?: GateSpec[];
     approvalPolicy?: ProjectApprovalPolicy;
+    reviewPolicy?: ReviewPolicy;
     routingProfile?: string;
   }): Project {
+    const reviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
+    if (!["required", "substantive", "none"].includes(reviewPolicy.mode)) throw new Error(`Invalid review mode: ${reviewPolicy.mode}`);
+    if (reviewPolicy.skipTaskClasses.some((taskClass) => !TASK_CLASSES.includes(taskClass))) throw new Error("Review policy contains an unknown task class");
     const id = ids.project();
     const at = nowIso();
     const configVersion = ids.config();
     return this.store.tx(() => {
       this.store.run(
         `INSERT INTO projects(id, name, repo_path, base_branch, status, routing_profile, approval_policy,
-           check_commands, config_version, goal, created_at, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+           review_policy, check_commands, config_version, goal, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.name,
         input.repoPath,
@@ -386,6 +495,7 @@ export class Records {
         "active",
         input.routingProfile ?? "default",
         toJson(input.approvalPolicy ?? { overrides: {}, standing: [] }),
+        toJson(reviewPolicy),
         toJson(input.checkCommands ?? []),
         configVersion,
         input.goal ?? null,
@@ -421,6 +531,20 @@ export class Records {
     });
   }
 
+  setProjectBaseBranch(id: string, baseBranch: string): string {
+    if (!baseBranch.trim()) throw new Error("Base branch is required");
+    const configVersion = ids.config();
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE projects SET base_branch = ?, config_version = ?, updated_at = ? WHERE id = ?",
+        baseBranch, configVersion, nowIso(), id,
+      );
+      this.invalidateProjectApprovals(id, `Target branch changed to ${baseBranch}.`);
+      this.recordEvent({ kind: "project.base_branch_updated", projectId: id, data: { baseBranch, configVersion } });
+    });
+    return configVersion;
+  }
+
   updateProjectChecks(id: string, checks: GateSpec[]): string {
     const configVersion = ids.config();
     this.store.tx(() => {
@@ -431,6 +555,7 @@ export class Records {
         nowIso(),
         id,
       );
+      this.invalidateProjectApprovals(id, "Quality configuration changed.");
       this.recordEvent({ kind: "project.checks_updated", projectId: id, data: { count: checks.length, configVersion } });
     });
     return configVersion;
@@ -446,7 +571,24 @@ export class Records {
         nowIso(),
         id,
       );
+      this.invalidateProjectApprovals(id, "Approval policy changed.");
       this.recordEvent({ kind: "project.policy_updated", projectId: id, data: { configVersion } });
+    });
+    return configVersion;
+  }
+
+  setProjectReviewPolicy(id: string, policy: ReviewPolicy): string {
+    if (!["required", "substantive", "none"].includes(policy.mode)) throw new Error(`Invalid review mode: ${policy.mode}`);
+    const invalid = policy.skipTaskClasses.filter((taskClass) => !TASK_CLASSES.includes(taskClass));
+    if (invalid.length > 0) throw new Error(`Unknown review task classes: ${invalid.join(", ")}`);
+    const configVersion = ids.config();
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE projects SET review_policy = ?, config_version = ?, updated_at = ? WHERE id = ?",
+        toJson(policy), configVersion, nowIso(), id,
+      );
+      this.invalidateProjectApprovals(id, "Review policy changed.");
+      this.recordEvent({ kind: "project.review_policy_updated", projectId: id, data: { configVersion, policy } });
     });
     return configVersion;
   }
@@ -857,10 +999,70 @@ export class Records {
   }
 
   waiveGate(gateId: string, approvalId: string): void {
-    this.store.run("UPDATE gate_results SET waiver_id = ? WHERE id = ?", approvalId, gateId);
+    this.store.tx(() => {
+      const gateRow = this.store.get("SELECT * FROM gate_results WHERE id = ?", gateId);
+      if (!gateRow) throw new Error(`Unknown gate ${gateId}`);
+      const gate = toGate(gateRow);
+      const task = this.getTask(gate.taskId);
+      const project = task ? this.getProject(task.projectId) : null;
+      const approval = this.getApproval(approvalId);
+      if (!task || !project || !approval || approval.state !== "approved" || approval.taskId !== task.id ||
+          approval.action !== "waive_required_gate" || approval.target !== gate.id ||
+          approval.revision !== gate.revision || approval.configVersion !== project.configVersion) {
+        throw new Error("Gate waiver requires a matching approved action, target, revision, and configuration");
+      }
+      this.store.run("UPDATE gate_results SET waiver_id = ? WHERE id = ?", approvalId, gateId);
+      this.markApprovalConsumed(approvalId);
+      this.recordEvent({
+        kind: "gate.waived",
+        projectId: task.projectId,
+        taskId: task.id,
+        data: { gateId, approvalId, revision: gate.revision },
+      });
+    });
   }
 
   // --- approvals ----------------------------------------------------------
+
+  prepareApproval(input: { taskId: string; action: Action; target: string; reason: string }): {
+    required: boolean;
+    policyReason: string;
+    approval: Approval | null;
+  } {
+    const task = this.getTask(input.taskId);
+    if (!task) throw new Error(`Unknown task ${input.taskId}`);
+    const project = this.getProject(task.projectId);
+    if (!project) throw new Error(`Unknown project ${task.projectId}`);
+    if (!task.resultRevision) throw new Error(`Task ${task.id} has no result revision to approve`);
+    const gates = this.gatesForRevision(task.id, task.resultRevision);
+    const missingGates = project.checkCommands.filter((spec) => spec.required && !gates.some((gate) => gate.name === spec.name));
+    const failedGates = gates.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null);
+    if (input.action === "waive_required_gate") {
+      if (!failedGates.some((gate) => gate.id === input.target)) {
+        throw new Error(`Cannot prepare gate waiver: ${input.target} is not a failing required gate for ${task.resultRevision}`);
+      }
+    } else if (missingGates.length > 0 || failedGates.length > 0) {
+      throw new Error(`Cannot prepare ${input.action}: required quality gates are missing or failing for ${task.resultRevision}`);
+    }
+    const reviewRequired = input.action !== "waive_required_gate" && project.reviewPolicy.mode !== "none" && !project.reviewPolicy.skipTaskClasses.includes(task.taskClass);
+    const approvedReview = this.reviewsForTask(task.id).some((review) => review.revision === task.resultRevision && review.verdict === "approved");
+    if (reviewRequired && !approvedReview) {
+      throw new Error(`Cannot prepare ${input.action}: independent review has not approved ${task.resultRevision}`);
+    }
+    const policy = evaluate({ action: input.action, policy: project.approvalPolicy, inScope: task.inScopeActions.includes(input.action) });
+    if (!policy.requiresApproval) return { required: false, policyReason: policy.reason, approval: null };
+    const approval = this.requestApproval({
+      projectId: project.id,
+      taskId: task.id,
+      binding: { action: input.action, target: input.target, revision: task.resultRevision, configVersion: project.configVersion },
+      reason: input.reason,
+      evidence: {
+        gates,
+        review: this.reviewsForTask(task.id).findLast((review) => review.revision === task.resultRevision) ?? null,
+      },
+    });
+    return { required: true, policyReason: policy.reason, approval };
+  }
 
   requestApproval(input: {
     projectId: string;
@@ -909,11 +1111,31 @@ export class Records {
   }
 
   decideApproval(id: string, state: "approved" | "rejected", decidedBy: string, reason?: string): Approval {
-    return this.store.tx(() => {
+    let staleReason: string | null = null;
+    const result = this.store.tx(() => {
       const approval = this.getApproval(id);
       if (!approval) throw new Error(`Unknown approval ${id}`);
       if (approval.state !== "pending") {
         throw new Error(`Approval ${id} is ${approval.state}; only a pending approval can be decided`);
+      }
+      if (state === "approved") {
+        const project = this.getProject(approval.projectId);
+        const task = approval.taskId ? this.getTask(approval.taskId) : null;
+        const drift: string[] = [];
+        if (!project || project.configVersion !== approval.configVersion) drift.push("project configuration changed");
+        if (task?.resultRevision && task.resultRevision !== approval.revision) drift.push("task revision changed");
+        if (approval.action === "merge" && project && approval.target !== project.baseBranch) drift.push("target branch changed");
+        if (drift.length > 0) {
+          staleReason = drift.join("; ");
+          this.store.run("UPDATE approvals SET state = 'invalidated', decided_at = ?, decided_by = ? WHERE id = ?", nowIso(), decidedBy, id);
+          this.recordEvent({
+            kind: "approval.invalidated",
+            projectId: approval.projectId,
+            taskId: approval.taskId,
+            data: { approvalId: id, reason: staleReason },
+          });
+          return this.getApproval(id) as Approval;
+        }
       }
       this.store.run(
         "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = COALESCE(?, reason) WHERE id = ?",
@@ -931,6 +1153,8 @@ export class Records {
       });
       return this.getApproval(id) as Approval;
     });
+    if (staleReason) throw new Error(`Approval ${id} is stale and was invalidated: ${staleReason}`);
+    return result;
   }
 
   markApprovalConsumed(id: string): void {
@@ -947,6 +1171,25 @@ export class Records {
         taskId: approval.taskId,
         data: { approvalId: id },
       });
+    });
+  }
+
+  invalidateProjectApprovals(projectId: string, reason: string): number {
+    return this.store.tx(() => {
+      const open = this.store.all(
+        "SELECT * FROM approvals WHERE project_id = ? AND state IN ('pending','approved')",
+        projectId,
+      ).map(toApproval);
+      for (const approval of open) {
+        this.store.run("UPDATE approvals SET state = 'invalidated', decided_at = ? WHERE id = ?", nowIso(), approval.id);
+        this.recordEvent({
+          kind: "approval.invalidated",
+          projectId,
+          taskId: approval.taskId,
+          data: { approvalId: approval.id, reason },
+        });
+      }
+      return open.length;
     });
   }
 
@@ -983,6 +1226,247 @@ export class Records {
       binding.configVersion,
     );
     return row ? toApproval(row) : null;
+  }
+
+  // --- plans, review, and feedback ----------------------------------------
+
+  recordExecutionPlan(input: {
+    projectId: string;
+    objective: string;
+    mode: string;
+    reason: string;
+    assumptions?: string[];
+    milestones?: string[];
+    tasks: { taskId: string; key: string }[];
+  }): ExecutionPlanRecord {
+    const id = ids.plan();
+    const at = nowIso();
+    return this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO execution_plans(id, project_id, objective, mode, reason, assumptions, milestones, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?)`,
+        id, input.projectId, input.objective, input.mode, input.reason,
+        toJson(input.assumptions ?? []), toJson(input.milestones ?? []), at, at,
+      );
+      for (const item of input.tasks) {
+        this.store.run("INSERT INTO execution_plan_tasks(plan_id, task_id, task_key) VALUES(?,?,?)", id, item.taskId, item.key);
+      }
+      this.recordEvent({ kind: "plan.recorded", projectId: input.projectId, data: { planId: id, taskIds: input.tasks.map((item) => item.taskId) } });
+      return this.getExecutionPlan(id)?.plan as ExecutionPlanRecord;
+    });
+  }
+
+  listExecutionPlans(projectId?: string): ExecutionPlanRecord[] {
+    const rows = projectId
+      ? this.store.all("SELECT * FROM execution_plans WHERE project_id = ? ORDER BY created_at DESC", projectId)
+      : this.store.all("SELECT * FROM execution_plans ORDER BY created_at DESC LIMIT 200");
+    return rows.map(toPlan);
+  }
+
+  getExecutionPlan(id: string): { plan: ExecutionPlanRecord; items: { key: string; task: Task; dependencies: string[]; routing: Row[] }[] } | null {
+    const row = this.store.get("SELECT * FROM execution_plans WHERE id = ?", id);
+    if (!row) return null;
+    const items = this.store.all(
+      "SELECT task_id, task_key FROM execution_plan_tasks WHERE plan_id = ? ORDER BY rowid",
+      id,
+    ).flatMap((item) => {
+      const task = this.getTask(item.task_id as string);
+      return task ? [{
+        key: item.task_key as string,
+        task,
+        dependencies: this.dependenciesOf(task.id),
+        routing: this.routingForTask(task.id),
+      }] : [];
+    });
+    return { plan: toPlan(row), items };
+  }
+
+  recordReview(input: {
+    taskId: string;
+    attemptId: string;
+    revision: string;
+    verdict: ReviewResult["verdict"];
+    summary: string;
+    findings: string[];
+    requirementsChecked: string[];
+    evidencePath?: string | null;
+  }): ReviewResult {
+    const id = ids.review();
+    this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO review_results(id, task_id, attempt_id, revision, verdict, summary, findings,
+           requirements_checked, evidence_path, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        id, input.taskId, input.attemptId, input.revision, input.verdict, input.summary,
+        toJson(input.findings), toJson(input.requirementsChecked), input.evidencePath ?? null, nowIso(),
+      );
+      const task = this.getTask(input.taskId);
+      this.recordEvent({
+        kind: "review.result",
+        projectId: task?.projectId,
+        taskId: input.taskId,
+        attemptId: input.attemptId,
+        data: { reviewId: id, revision: input.revision, verdict: input.verdict, findings: input.findings.length },
+      });
+    });
+    return toReview(this.store.get("SELECT * FROM review_results WHERE id = ?", id) as Row);
+  }
+
+  reviewsForTask(taskId: string): ReviewResult[] {
+    return this.store.all("SELECT * FROM review_results WHERE task_id = ? ORDER BY created_at", taskId).map(toReview);
+  }
+
+  submitFeedback(input: {
+    projectId: string;
+    taskId?: string | null;
+    planId?: string | null;
+    kind: Feedback["kind"];
+    body: string;
+    expectedVersion: number;
+    createdBy: string;
+  }): Feedback {
+    if (!input.body.trim()) throw new Error("Feedback body is required");
+    if (!(["comment", "question", "request_change", "priority"] as string[]).includes(input.kind)) throw new Error(`Unknown feedback kind: ${input.kind}`);
+    if (Boolean(input.taskId) === Boolean(input.planId)) throw new Error("Feedback must target exactly one task or plan");
+    return this.store.tx(() => {
+      const task = input.taskId ? this.getTask(input.taskId) : null;
+      const planDetail = input.planId ? this.getExecutionPlan(input.planId) : null;
+      const actualVersion = task?.recordVersion ?? planDetail?.plan.version;
+      if (actualVersion === undefined) throw new Error("Feedback target does not exist");
+      if ((task?.projectId ?? planDetail?.plan.projectId) !== input.projectId) throw new Error("Feedback target belongs to another project");
+      if (actualVersion !== input.expectedVersion) {
+        throw new Error(`Feedback target changed since version ${input.expectedVersion}; current version is ${actualVersion}`);
+      }
+      let state: Feedback["state"] = input.kind === "question" ? "pending" : "applied";
+      let linkedTaskId: string | null = null;
+      let response: string | null = null;
+      if (input.kind === "question") {
+        const targetContext = task
+          ? `Task ${task.id} (${task.title}): ${task.objective}`
+          : `Plan ${planDetail?.plan.id}: ${planDetail?.plan.objective}`;
+        const responseTask = this.createTask({
+          projectId: input.projectId,
+          title: `Answer feedback question`,
+          objective: `Answer this project-scoped question using repository evidence and authoritative requirements.\n\nTarget: ${targetContext}\n\nQuestion: ${input.body}`,
+          acceptanceCriteria: ["Provide a concise supported answer and identify any uncertainty in the result summary."],
+          role: "researcher",
+          taskClass: "research",
+          complexity: "low",
+          ambiguity: "medium",
+          changeRisk: "low",
+          allowedScope: [".mabs/result.json"],
+          executionMode: "single",
+          executionReason: "One on-demand response task; no permanent orchestrator loop.",
+        });
+        linkedTaskId = responseTask.id;
+        response = `Response task ${responseTask.id} queued.`;
+      } else if (input.kind === "request_change") {
+        if (!task) throw new Error("Change requests must target a task");
+        const followUp = this.createTask({
+          projectId: task.projectId,
+          title: `Requested change: ${task.title}`,
+          objective: input.body,
+          acceptanceCriteria: [`The requested change is implemented: ${input.body}`],
+          role: "implementer",
+          taskClass: task.taskClass,
+          complexity: task.complexity,
+          ambiguity: task.ambiguity,
+          changeRisk: task.changeRisk,
+          language: task.language,
+          domain: task.domain,
+          contextSize: task.contextSize,
+          requiredTools: task.requiredTools,
+          allowedScope: task.allowedScope,
+          dependsOn: [task.id],
+          executionMode: "sequential",
+          executionReason: `User-requested follow-up to ${task.id}.`,
+        });
+        linkedTaskId = followUp.id;
+        response = `Created follow-up task ${followUp.id}; it will run after ${task.id} completes.`;
+      } else if (input.kind === "priority") {
+        if (!task) throw new Error("Priority feedback must target a task");
+        const priority = Number(input.body);
+        if (!Number.isSafeInteger(priority) || priority < 0) throw new Error("Priority must be a non-negative integer");
+        this.updateTaskFields(task.id, { priority });
+        response = `Priority updated to ${priority}.`;
+      } else if (input.kind === "comment") {
+        response = "Comment recorded.";
+      }
+      const id = ids.feedback();
+      this.store.run(
+        `INSERT INTO feedback(id, project_id, task_id, plan_id, kind, body, state, response, linked_task_id,
+           submitted_for_version, created_by, created_at, resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id, input.projectId, input.taskId ?? null, input.planId ?? null, input.kind, input.body, state,
+        response, linkedTaskId, input.expectedVersion, input.createdBy, nowIso(), state === "pending" ? null : nowIso(),
+      );
+      this.recordEvent({
+        kind: `feedback.${input.kind}`,
+        projectId: input.projectId,
+        taskId: input.taskId ?? null,
+        data: { feedbackId: id, planId: input.planId ?? null, state, linkedTaskId },
+      });
+      return this.getFeedback(id) as Feedback;
+    });
+  }
+
+  getFeedback(id: string): Feedback | null {
+    const row = this.store.get("SELECT * FROM feedback WHERE id = ?", id);
+    return row ? toFeedback(row) : null;
+  }
+
+  listFeedback(filter: { projectId?: string; taskId?: string; planId?: string; state?: Feedback["state"] } = {}): Feedback[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    for (const [column, value] of [["project_id", filter.projectId], ["task_id", filter.taskId], ["plan_id", filter.planId], ["state", filter.state]] as const) {
+      if (value) { clauses.push(`${column} = ?`); params.push(value); }
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    return this.store.all(`SELECT * FROM feedback ${where} ORDER BY created_at DESC LIMIT 200`, ...params).map(toFeedback);
+  }
+
+  completeFeedbackForTask(taskId: string, response: string): number {
+    const pending = this.store.all(
+      "SELECT * FROM feedback WHERE linked_task_id = ? AND kind = 'question' AND state = 'pending'",
+      taskId,
+    ).map(toFeedback);
+    return this.store.tx(() => {
+      for (const feedback of pending) {
+        this.store.run(
+          "UPDATE feedback SET state = 'answered', response = ?, resolved_at = ? WHERE id = ?",
+          response, nowIso(), feedback.id,
+        );
+        this.recordEvent({
+          kind: "feedback.answered",
+          projectId: feedback.projectId,
+          taskId: feedback.taskId,
+          data: { feedbackId: feedback.id, answeredBy: "linked-response-task", linkedTaskId: taskId },
+        });
+      }
+      return pending.length;
+    });
+  }
+
+  answerFeedback(id: string, response: string, answeredBy: string): Feedback {
+    if (!response.trim()) throw new Error("A response is required");
+    return this.store.tx(() => {
+      const feedback = this.getFeedback(id);
+      if (!feedback) throw new Error(`Unknown feedback ${id}`);
+      if (feedback.kind !== "question" || feedback.state !== "pending") throw new Error(`Feedback ${id} is not a pending question`);
+      const linked = feedback.linkedTaskId ? this.getTask(feedback.linkedTaskId) : null;
+      if (linked && (linked.state === "QUEUED" || linked.state === "READY")) {
+        this.transition(linked.id, "CANCELLED", { blocked_reason: "Question was answered before the response task started." });
+      }
+      this.store.run(
+        "UPDATE feedback SET state = 'answered', response = ?, resolved_at = ? WHERE id = ?",
+        response, nowIso(), id,
+      );
+      this.recordEvent({
+        kind: "feedback.answered",
+        projectId: feedback.projectId,
+        taskId: feedback.taskId,
+        data: { feedbackId: id, answeredBy },
+      });
+      return this.getFeedback(id) as Feedback;
+    });
   }
 
   // --- provider capacity, fairness, routing, and context ------------------
@@ -1140,6 +1624,17 @@ export class Records {
 
   getPacket(id: string): Row | undefined {
     return this.store.get("SELECT * FROM context_packets WHERE id = ?", id);
+  }
+
+  packetsForTask(taskId: string): Row[] {
+    return this.store.all("SELECT * FROM context_packets WHERE task_id = ? ORDER BY created_at", taskId).map((row) => ({
+      ...row,
+      requirement_ids: fromJson<string[]>(row.requirement_ids, []),
+      omitted: fromJson<string[]>(row.omitted, []),
+      files: fromJson<string[]>(row.files, []),
+      artifacts: fromJson<string[]>(row.artifacts, []),
+      warnings: fromJson<string[]>(row.warnings, []),
+    }));
   }
 
   taskLatency(taskId: string): {
@@ -1310,6 +1805,8 @@ export class Records {
     invalidPlans: number;
     routingOverrides: number;
     repeatedReplans: number;
+    reviewChangesRequested: number;
+    pendingFeedback: number;
     orchestratorState: "idle" | "active";
     lastDecisionDurationMs: number | null;
   } {
@@ -1324,6 +1821,8 @@ export class Records {
       invalidPlans: countEvents("plan.invalid"),
       routingOverrides: countEvents("routing.override"),
       repeatedReplans: countEvents("plan.replanned"),
+      reviewChangesRequested: Number(this.store.get("SELECT COUNT(*) AS n FROM review_results WHERE verdict = 'request_changes'")?.n ?? 0),
+      pendingFeedback: Number(this.store.get("SELECT COUNT(*) AS n FROM feedback WHERE state = 'pending'")?.n ?? 0),
       orchestratorState: "idle",
       lastDecisionDurationMs: typeof decisionData.durationMs === "number" ? decisionData.durationMs : null,
     };

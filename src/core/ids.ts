@@ -30,6 +30,9 @@ export const ids = {
   launch: () => newId("lnc"),
   config: () => newId("cfg"),
   packet: () => newId("pkt"),
+  plan: () => newId("pln"),
+  review: () => newId("rev"),
+  feedback: () => newId("fbk"),
 };
 
 /** RFC 4122 v4 UUID, required by harnesses that accept an explicit session id. */

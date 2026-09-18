@@ -13,6 +13,12 @@ import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
 import { integrateDependencyRevisions } from "../src/workspace/git.ts";
 
+class Phase2Records extends Records {
+  override createProject(input: Parameters<Records["createProject"]>[0]) {
+    return super.createProject({ reviewPolicy: { mode: "none", skipTaskClasses: [] }, ...input });
+  }
+}
+
 class Phase2Adapter implements WorkerAdapter {
   readonly authMode = "test-subscription";
   starts: string[] = [];
@@ -82,7 +88,7 @@ function setup(t: TestContext) {
   const previousWorktrees = process.env.MABS_WORKTREE_ROOT;
   process.env.MABS_STATE_DIR = join(root, "state");
   process.env.MABS_WORKTREE_ROOT = join(root, "worktrees");
-  const records = new Records(new Store(":memory:"));
+  const records = new Phase2Records(new Store(":memory:"));
   t.after(() => {
     records.store.close();
     if (previousState === undefined) delete process.env.MABS_STATE_DIR; else process.env.MABS_STATE_DIR = previousState;

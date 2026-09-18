@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "6";
+export const SCHEMA_VERSION = "7";
 
 export type Row = Record<string, unknown>;
 
@@ -34,6 +34,7 @@ export class Store {
       const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!columns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
     };
+    ensureColumn("projects", "review_policy", "TEXT NOT NULL DEFAULT '{\"mode\":\"substantive\",\"skipTaskClasses\":[\"mechanical\",\"planning\",\"research\"]}'");
     ensureColumn("tasks", "record_version", "INTEGER NOT NULL DEFAULT 1");
     ensureColumn("tasks", "task_class", "TEXT NOT NULL DEFAULT 'small_implementation'");
     ensureColumn("tasks", "complexity", "TEXT NOT NULL DEFAULT 'medium'");

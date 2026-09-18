@@ -4,7 +4,7 @@ Updated: 18 September 2026
 
 ## Phase publication policy
 
-At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 2 is complete and this document is part of its publication checkpoint.
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 3 is complete and this document is part of its publication checkpoint.
 
 ## Continuation point recovered
 
@@ -89,13 +89,41 @@ Deliberately deferred:
 - Independent review, feedback loops, approval action executors, bounded replanning through an LLM orchestrator, and delivery workflows remain Phase 3+ work.
 - Resource-pressure admission controls and cost-equivalent telemetry remain later optimizations; Phase 2 capacity control is slot/provider based.
 
+## Phase 3 — independent review and workbench feedback
+
+Implemented:
+
+- [x] Project-level `required`, `substantive`, and `none` review policies; new CLI projects default to substantive review while mechanical, planning, and research tasks can be explicitly skipped.
+- [x] Revision-bound independent review attempts run only after required gates pass, use a fresh context, prefer an eligible provider different from the implementer, and are detected if they modify tracked worktree content.
+- [x] Durable review verdicts, requirement coverage, severity-prefixed findings, and bounded review-to-repair-to-recheck-to-rereview loops.
+- [x] Failed or missing required gates prevent review and completion; their commands, exit status, revision, and retained evidence logs are visible.
+- [x] Persisted execution plans with assumptions, milestones, dependency items, execution rationale, routing history, and plan/task feedback.
+- [x] Durable comments, questions/answers, priority changes, and requested-change follow-up tasks with optimistic target-version checks; unanswered questions queue on-demand research response tasks and never create a permanent model loop.
+- [x] Context diagnostics for mandatory requirement coverage, stale revisions, missing manifests, omitted records, and missing evidence; raw worker transcripts, completion envelopes, outputs, gate logs, review diffs, and manifests are safely linked.
+- [x] Expanded localhost workbench views for projects, plans, active workers, tasks, routing, attempts, reported usage, quality evidence, reviews, feedback, approvals, health, and troubleshooting timelines.
+- [x] Workbench controls for feedback, answering questions, retry, cancellation, and approval preparation/decisions; all mutations require the localhost capability token.
+- [x] Approval preparation refuses unchecked or unreviewed revisions, and exact target/revision/configuration drift durably invalidates pending or approved decisions.
+- [x] Gate-waiver application requires and consumes an exact approved waiver binding. Push, merge, release, and deployment executors remain absent.
+- [x] Pi commands expose feedback and approval flows through the same SQLite/controller records.
+
+Exit evidence:
+
+- [x] Real Codex implementation and Claude Sonnet 5 independent review completed against revision `9b2e8b57a34c516d85fe534557f6eb59eb5694fa`; the required npm gate passed before review, the review checked `REQ-ADD`, and the task reached `DONE` with zero repairs.
+- [x] A prepared deployment approval was invalidated by changing the fixture target branch; a later approval attempt failed closed. No external action was executed.
+- [x] Durable evidence: `~/.local/state/mabs/acceptance/phase3-2026-09-18T14-29-29Z`.
+
+Deliberately deferred:
+
+- The Phase 4 curator, configuration evaluation/activation history, and revert workflow.
+- Push, pull-request, merge, release, deployment, or destructive-action executors. Approvals are durable authorization records, not execution authority by themselves.
+
 ## Verification
 
 ```text
-npm test          27 passing
+npm test          32 passing
 npm run typecheck passing
 mabs verify --quick 3/3 passing
 Pi RPC extension   passing
 ```
 
-The test suite includes strict contracts, lifecycle rules, approval binding, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, and allowed-scope enforcement.
+The test suite includes strict contracts, lifecycle rules, approval binding and invalidation, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, allowed-scope enforcement, independent review/repair loops, context/evidence diagnostics, feedback, plan persistence, workbench controls, and gate-before-review enforcement.

@@ -84,6 +84,7 @@ test("controller restart collects one isolated launch without duplication and ch
   const project = records.createProject({
     name: "fixture",
     repoPath: repo,
+    reviewPolicy: { mode: "none", skipTaskClasses: [] },
     checkCommands: [{
       name: "value-check",
       command: [process.execPath, "-e", "const fs=require('fs');process.exit(fs.readFileSync('value.txt','utf8').trim()==='implemented'?0:1)"],

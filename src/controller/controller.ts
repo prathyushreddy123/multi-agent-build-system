@@ -1,4 +1,4 @@
-import { accessSync, constants, copyFileSync, existsSync, rmSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { cpus, freemem, loadavg } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -8,12 +8,13 @@ import { buildContextPacket, type ExecutionSelection } from "../context/packet.t
 import { consumesRepairBudget, isProviderUnavailable, type FailureClass } from "../core/failure.ts";
 import { ids } from "../core/ids.ts";
 import { scopesOverlap } from "../domain/plan.ts";
+import type { WorkerOutput } from "../domain/contract.ts";
 import { artifactDir } from "../core/paths.ts";
 import { runGates } from "../gates/runner.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, Project, Records, Task } from "../store/records.ts";
-import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceRevision } from "../workspace/git.ts";
+import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
 
 export interface ControllerOptions {
   workerLimit?: number;
@@ -221,6 +222,24 @@ export class Controller {
     return selection;
   }
 
+  private selectReviewRoute(task: Task, excludedAdapter?: string): RouteSelection {
+    const reviewTask: Task = { ...task, role: "reviewer", taskClass: "review", requiredTools: [] };
+    const excluded = excludedAdapter ? new Set([excludedAdapter]) : new Set<string>();
+    const independent = this.selectTaskRoute(reviewTask, excluded);
+    if (independent.chosen || !excludedAdapter) return independent;
+    const sameProvider = this.selectTaskRoute(reviewTask);
+    if (sameProvider.chosen) {
+      sameProvider.reason += ` No second eligible provider was available; using a fresh, separate review context on ${sameProvider.chosen.adapter}.`;
+    }
+    return sameProvider;
+  }
+
+  private shouldReview(task: Task, project: Project): boolean {
+    if (task.role === "reviewer" || project.reviewPolicy.mode === "none") return false;
+    if (project.reviewPolicy.skipTaskClasses.includes(task.taskClass)) return false;
+    return project.reviewPolicy.mode === "required" || project.reviewPolicy.mode === "substantive";
+  }
+
   private handleOf(attempt: Attempt): AdapterHandle {
     return {
       attemptId: attempt.id,
@@ -274,7 +293,11 @@ export class Controller {
 
     // A restart can expose a narrow crash window between a task transition and
     // attempt creation. Fail closed instead of silently dispatching a duplicate.
-    for (const task of [...this.records.listTasks({ state: "RUNNING" }), ...this.records.listTasks({ state: "CHECKING" })]) {
+    for (const task of [
+      ...this.records.listTasks({ state: "RUNNING" }),
+      ...this.records.listTasks({ state: "CHECKING" }),
+      ...this.records.listTasks({ state: "REVIEWING" }),
+    ]) {
       if (this.records.listAttempts(task.id).some((attempt) => attempt.state === "running")) continue;
       this.blockTask(task, "INFRA", `Controller recovered ${task.state} without a live attempt; inspect the preserved worktree before retrying.`);
     }
@@ -308,8 +331,15 @@ export class Controller {
         reason,
         exitStatus: collected.launch?.exitCode ?? null,
         usage,
+        outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
-      await this.handleFailure(task, failure, reason, attempt.adapter);
+      if (attempt.kind === "review") await this.handleReviewFailure(task, failure, reason, attempt.adapter);
+      else await this.handleFailure(task, failure, reason, attempt.adapter);
+      return;
+    }
+
+    if (attempt.kind === "review") {
+      await this.collectReview(task, attempt, output, resultArtifact, usage, collected.launch?.exitCode ?? 0);
       return;
     }
 
@@ -321,6 +351,7 @@ export class Controller {
         reason: output.reason,
         exitStatus: collected.launch?.exitCode ?? 0,
         usage,
+        outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
       this.records.transition(task.id, "BLOCKED", {
         blocked_reason: output.reason,
@@ -340,6 +371,7 @@ export class Controller {
         reason: output.reason,
         exitStatus: collected.launch?.exitCode ?? 0,
         usage,
+        outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
       await this.handleFailure(task, failure, output.reason, attempt.adapter);
       return;
@@ -364,8 +396,9 @@ export class Controller {
       exitStatus: collected.launch?.exitCode ?? 0,
       resultRevision: finalized.revision,
       usage,
-      outputPath: this.handleOf(attempt).completionPath,
+      outputPath: existsSync(resultArtifact) ? resultArtifact : this.handleOf(attempt).completionPath,
     });
+    this.records.invalidateApprovals(task.id, "Task revision changed after implementation or repair.", finalized.revision);
     const checking = this.records.transition(task.id, "CHECKING", {
       result_revision: finalized.revision,
       result_summary: output.summary,
@@ -383,7 +416,12 @@ export class Controller {
       specs: project.checkCommands,
     });
     if (gates.passed) {
-      this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: "not configured", gates: gates.results.length });
+      if (this.shouldReview(checking, project)) {
+        await this.beginReview(this.records.getTask(task.id) as Task, project, attempt);
+      } else {
+        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: "skipped by project policy", gates: gates.results.length });
+        this.records.completeFeedbackForTask(task.id, done.resultSummary ?? "Response task completed without a summary.");
+      }
       return;
     }
     const finding = gates.failedRequired.map((gate) => `${gate.name}: ${gate.status} (${gate.evidencePath ?? "no evidence"})`).join("; ");
@@ -399,6 +437,131 @@ export class Controller {
         claimed_at: null,
       });
     }
+  }
+
+  private async beginReview(task: Task, project: Project, implementationAttempt: Attempt): Promise<void> {
+    const reviewing = this.records.transition(task.id, "REVIEWING", {}, {
+      revision: task.resultRevision,
+      implementationAttemptId: implementationAttempt.id,
+    });
+    const selection = this.selectReviewRoute(reviewing, implementationAttempt.adapter);
+    if (!selection.chosen) {
+      this.blockTask(reviewing, this.providerBlockClass(selection), `Independent review could not be routed. ${selection.reason}`);
+      return;
+    }
+    await this.launchAttempt(reviewing, project, "review", [], ids.launch(), selection);
+  }
+
+  private async collectReview(
+    task: Task,
+    attempt: Attempt,
+    output: WorkerOutput,
+    resultArtifact: string,
+    usage: Record<string, unknown> | null,
+    exitStatus: number,
+  ): Promise<void> {
+    const revision = task.resultRevision;
+    if (!task.worktreePath || !revision) {
+      this.records.finishAttempt({ attemptId: attempt.id, state: "failed", failureClass: "CONFIG", reason: "Review task has no checked revision.", usage });
+      this.blockTask(task, "CONFIG", "Independent review has no checked revision to inspect.");
+      return;
+    }
+    const currentRevision = await workspaceRevision(task.worktreePath);
+    const reviewEdits = await workspaceChangedFiles(task.worktreePath, revision);
+    if (currentRevision !== revision || reviewEdits.length > 0) {
+      const reason = `Read-only reviewer modified or moved the checked workspace: ${reviewEdits.join(", ") || `${revision} -> ${currentRevision}`}`;
+      this.records.finishAttempt({ attemptId: attempt.id, state: "failed", failureClass: "CONTRACT", reason, usage, outputPath: existsSync(resultArtifact) ? resultArtifact : undefined });
+      this.blockTask(task, "CONTRACT", reason);
+      return;
+    }
+
+    const required = this.records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
+    const missingCoverage = required.filter((requirement) => !output.addressed_requirements.includes(requirement));
+    const findings = [
+      ...output.follow_up.unresolved,
+      ...output.follow_up.decisions_requested.map((decision) => `[major] Decision required: ${decision}`),
+      ...missingCoverage.map((requirement) => `[major] Review did not verify mandatory requirement ${requirement}.`),
+    ].map((finding) => /^\[(critical|major|minor)\]/i.test(finding) ? finding : `[major] ${finding}`);
+    if (output.outcome === "failed" && findings.length === 0) findings.push(`[major] ${output.reason || output.summary}`);
+    const verdict = output.outcome === "blocked" ? "blocked" : findings.length > 0 ? "request_changes" : "approved";
+    this.records.recordReview({
+      taskId: task.id,
+      attemptId: attempt.id,
+      revision,
+      verdict,
+      summary: output.summary,
+      findings,
+      requirementsChecked: output.addressed_requirements,
+      evidencePath: existsSync(resultArtifact) ? resultArtifact : null,
+    });
+    this.records.finishAttempt({
+      attemptId: attempt.id,
+      state: "succeeded",
+      outcome: output.outcome,
+      reason: output.reason,
+      exitStatus,
+      resultRevision: revision,
+      usage,
+      outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
+    });
+
+    if (verdict === "blocked") {
+      this.records.transition(task.id, "BLOCKED", {
+        blocked_reason: `Independent review blocked: ${output.reason}`,
+        claimed_by: null,
+        claimed_at: null,
+      });
+      return;
+    }
+    if (verdict === "approved") {
+      const done = this.records.transition(task.id, "DONE", {
+        claimed_by: null,
+        claimed_at: null,
+        blocked_reason: null,
+        failure_class: null,
+      }, { reviewId: this.records.reviewsForTask(task.id).at(-1)?.id, revision });
+      this.records.completeFeedbackForTask(task.id, done.resultSummary ?? output.summary);
+      return;
+    }
+
+    const current = this.records.getTask(task.id) as Task;
+    if (current.repairsUsed >= current.repairLimit) {
+      this.records.transition(task.id, "FAILED", {
+        failure_class: "CODE",
+        blocked_reason: `Independent review found changes after the repair limit was exhausted: ${findings.join("; ")}`,
+        claimed_by: null,
+        claimed_at: null,
+      });
+      return;
+    }
+    const project = this.records.getProject(task.projectId);
+    if (!project) throw new Error(`Unknown project ${task.projectId}`);
+    this.records.transition(task.id, "RUNNING", {
+      repairs_used: current.repairsUsed + 1,
+      claimed_by: null,
+      claimed_at: null,
+    }, { reason: "independent review requested changes", findings });
+    await this.launchAttempt(this.records.getTask(task.id) as Task, project, "repair", findings);
+  }
+
+  private async handleReviewFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
+    const current = this.records.getTask(task.id) ?? task;
+    if (isProviderUnavailable(failure)) {
+      this.records.noteProviderFailure(failedAdapter, failure, reason, this.options.quotaCooldownMs);
+      const project = this.records.getProject(current.projectId);
+      if (!project) throw new Error(`Unknown project ${current.projectId}`);
+      const selection = this.selectReviewRoute(current, failedAdapter);
+      if (selection.chosen) {
+        this.records.transition(current.id, "REVIEWING", {}, {
+          reason: "review provider unavailable; rerouting without spending repair budget",
+          failedAdapter,
+          fallback: selection.chosen.adapter,
+        });
+        await this.launchAttempt(this.records.getTask(current.id) as Task, project, "review", [reason], ids.launch(), selection);
+        return;
+      }
+    }
+    this.blockTask(current, failure, `Independent review failed: ${reason}`);
   }
 
   private async handleFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
@@ -479,7 +642,7 @@ export class Controller {
     let available = this.options.workerLimit - this.records.listRunningAttempts().length;
     if (available <= 0) return;
     const activeProjectIds = new Set(
-      this.records.listTasks({ state: "RUNNING" }).map((task) => task.projectId),
+      this.records.listTasks().filter((task) => task.state === "RUNNING" || task.state === "REVIEWING").map((task) => task.projectId),
     );
     const ready = this.records.listTasks({ state: "READY" });
     const perProject = new Map<string, Task[]>();
@@ -542,7 +705,8 @@ export class Controller {
   }
 
   private executionResourcesAvailable(task: Task): boolean {
-    const running = this.records.listTasks({ projectId: task.projectId, state: "RUNNING" });
+    const running = this.records.listTasks({ projectId: task.projectId })
+      .filter((candidate) => candidate.state === "RUNNING" || candidate.state === "REVIEWING");
     if (running.length === 0) return true;
     if (running.length >= this.options.perProjectWorkerLimit) return false;
     if (task.executionMode === "single" || task.executionMode === "sequential") return false;
@@ -671,14 +835,32 @@ export class Controller {
     const dir = artifactDir(task.id, attemptId);
     const completionPath = join(dir, "completion.json");
     const evidencePath = join(dir, "worker.log");
+    const reviewArtifacts: string[] = [];
+    if (kind === "review") {
+      if (!task.resultRevision) throw new Error(`Task ${task.id} has no result revision to review`);
+      const diffPath = join(dir, "review-diff.patch");
+      writeFileSync(diffPath, await workspaceDiff(task.worktreePath, task.baseRevision, task.resultRevision), { mode: 0o600 });
+      reviewArtifacts.push(
+        diffPath,
+        ...this.records.gatesForRevision(task.id, task.resultRevision)
+          .map((gate) => gate.evidencePath)
+          .filter((path): path is string => path !== null),
+      );
+    }
     const packet = buildContextPacket({
       records: this.records,
       project,
       task,
       attemptId,
-      workspace: { path: task.worktreePath, branch: task.branch, baseRevision: task.baseRevision },
+      workspace: {
+        path: task.worktreePath,
+        branch: task.branch,
+        baseRevision: kind === "review" ? (task.resultRevision as string) : task.baseRevision,
+      },
       execution,
       previousFindings,
+      purpose: kind === "review" ? "review" : "implementation",
+      additionalArtifacts: reviewArtifacts,
     });
     const attempt = this.records.startAttempt({
       id: attemptId,
@@ -690,7 +872,7 @@ export class Controller {
       effort: execution.effort,
       authMode: execution.authMode,
       worktreePath: task.worktreePath,
-      baseRevision: task.baseRevision,
+      baseRevision: kind === "review" ? task.resultRevision : task.baseRevision,
       packetId: packet.id,
       outputPath: completionPath,
     });

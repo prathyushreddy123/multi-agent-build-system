@@ -11,12 +11,12 @@ export interface Workspace {
   baseRevision: string;
 }
 
-async function git(cwd: string, args: string[], timeoutMs = 120_000): Promise<string> {
+async function git(cwd: string, args: string[], timeoutMs = 120_000, preserveLeadingWhitespace = false): Promise<string> {
   const result = await exec("git", args, { cwd, timeoutMs });
   if (result.code !== 0) {
     throw new Error(`git ${args.join(" ")} failed (${result.code}): ${(result.stderr || result.stdout).trim()}`);
   }
-  return result.stdout.trim();
+  return preserveLeadingWhitespace ? result.stdout.trimEnd() : result.stdout.trim();
 }
 
 function branchName(task: Task): string {
@@ -68,9 +68,14 @@ export async function integrateDependencyRevisions(path: string, revisions: stri
   return workspaceRevision(path);
 }
 
+export async function workspaceDiff(path: string, baseRevision: string, revision = "HEAD"): Promise<string> {
+  return await git(path, ["diff", "--no-ext-diff", "--stat", baseRevision, revision]) + "\n\n" +
+    await git(path, ["diff", "--no-ext-diff", baseRevision, revision], 120_000);
+}
+
 export async function workspaceChangedFiles(path: string, baseRevision: string): Promise<string[]> {
   const committed = await git(path, ["diff", "--name-only", `${baseRevision}...HEAD`]);
-  const status = await git(path, ["status", "--porcelain"]);
+  const status = await git(path, ["status", "--porcelain"], 120_000, true);
   const uncommitted = status
     .split("\n")
     .filter(Boolean)
