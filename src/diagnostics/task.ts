@@ -40,6 +40,14 @@ export function taskDiagnostics(records: Records, taskId: string) {
       mandatoryRequirements: mandatory,
       suppliedRequirements: supplied,
       missingMandatory,
+      configVersion: packet.config_version,
+      currentConfigVersion: records.getProject(task.projectId)?.configVersion ?? null,
+      staleConfig: Boolean(packet.config_version && packet.config_version !== records.getProject(task.projectId)?.configVersion),
+      provider: packet.provider,
+      checkpointId: packet.checkpoint_id,
+      tokenEstimate: packet.token_estimate,
+      budgetTokens: packet.budget_tokens,
+      relevantFiles: packet.file_details,
       omitted: packet.omitted,
       warnings: packet.warnings,
       manifestPath,
@@ -57,6 +65,22 @@ export function taskDiagnostics(records: Records, taskId: string) {
     } catch { /* malformed output remains visible through attempt failure and raw evidence */ }
   }
 
+  const checkpoints = records.checkpointsForTask(taskId);
+  const findingCounts = new Map<string, number>();
+  for (const checkpoint of checkpoints) for (const finding of checkpoint.findings) {
+    const normalized = finding.toLowerCase().replace(/\s+/g, " ").trim();
+    if (normalized) findingCounts.set(normalized, (findingCounts.get(normalized) ?? 0) + 1);
+  }
+  const repeatedFindings = [...findingCounts.entries()].filter(([, count]) => count > 1).map(([finding, count]) => ({ finding, count }));
+  const questionCounts = new Map<string, number>();
+  for (const feedback of records.listFeedback({ projectId: task.projectId })) {
+    if (feedback.kind !== "question") continue;
+    const normalized = feedback.body.toLowerCase().replace(/\s+/g, " ").trim();
+    questionCounts.set(normalized, (questionCounts.get(normalized) ?? 0) + 1);
+  }
+  const repeatedQuestions = [...questionCounts.entries()].filter(([, count]) => count > 1).map(([question, count]) => ({ question, count }));
+  const contextEvents = records.listEvents(taskId).filter((event) => event.kind === "context.compressed" || event.kind === "context.refetched");
+
   const evidence = [
     ...attempts.flatMap((attempt) => [
       fileInfo("worker", `${attempt.id} result`, attempt.outputPath),
@@ -71,6 +95,11 @@ export function taskDiagnostics(records: Records, taskId: string) {
   const warnings = [
     ...context.flatMap((packet) => packet.missingMandatory.map((id) => `Context packet ${String(packet.id)} omitted mandatory requirement ${id}.`)),
     ...context.filter((packet) => packet.staleRevision).map((packet) => `Context packet ${String(packet.id)} references stale base revision ${String(packet.baseRevision)}.`),
+    ...context.filter((packet) => packet.staleConfig).map((packet) => `Context packet ${String(packet.id)} references stale configuration ${String(packet.configVersion)}.`),
+    ...context.filter((packet) => Number(packet.tokenEstimate) > Number(packet.budgetTokens) && packet.budgetTokens !== null)
+      .map((packet) => `Context packet ${String(packet.id)} exceeds its configured context budget because mandatory records were retained.`),
+    ...repeatedFindings.map((item) => `A rejected or unresolved finding recurred ${item.count} times: ${item.finding}`),
+    ...repeatedQuestions.map((item) => `A project question recurred ${item.count} times: ${item.question}`),
     ...context.filter((packet) => !packet.manifestAvailable).map((packet) => `Context manifest is unavailable for packet ${String(packet.id)}.`),
     ...mandatory.filter((id) => !addressed.has(id)).map((id) => `No retained worker result reports addressing mandatory requirement ${id}.`),
     ...evidence.filter((item) => !item.exists).map((item) => `Evidence file is unavailable: ${item.path}`),
@@ -84,6 +113,12 @@ export function taskDiagnostics(records: Records, taskId: string) {
       mandatory,
       addressed: [...addressed].sort(),
       missing: mandatory.filter((id) => !addressed.has(id)),
+    },
+    checkpoints,
+    continuity: {
+      compressionAndRefetchEvents: contextEvents,
+      repeatedFindings,
+      repeatedQuestions,
     },
     evidence,
     warnings: [...new Set(warnings)],

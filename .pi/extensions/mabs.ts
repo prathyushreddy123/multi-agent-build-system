@@ -75,6 +75,11 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => ctx.ui.notify(await run(["curator", ...words(args)]), "info"),
   });
 
+  pi.registerCommand("mabs-optimize", {
+    description: "Record and compare fixed-suite optimization experiments or inspect routing outcomes",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["optimization", ...words(args)]), "info"),
+  });
+
   pi.registerCommand("mabs-provider", {
     description: "Inspect or reset provider capacity, e.g. /mabs-provider list",
     handler: async (args, ctx) => ctx.ui.notify(await run(["provider", ...words(args)]), "info"),

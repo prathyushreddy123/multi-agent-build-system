@@ -7,7 +7,7 @@ import type { FailureClass } from "../core/failure.ts";
  * silently become success: it is a CONTRACT failure with the raw transcript
  * preserved as evidence.
  */
-export const CONTRACT_VERSION = "1.0.0";
+export const CONTRACT_VERSION = "1.1.0";
 
 export type WorkerRole = "implementer" | "reviewer" | "researcher" | "troubleshooter" | "curator";
 
@@ -57,9 +57,30 @@ export interface WorkerInput {
     packet_id: string;
     requirements: { id: string; text: string }[];
     files: string[];
+    file_context: {
+      path: string;
+      reason: string;
+      excerpt: string;
+      excerpt_truncated: boolean;
+      estimated_tokens: number;
+    }[];
     previous_findings: string[];
     artifacts: string[];
+    checkpoint: {
+      id: string;
+      kind: string;
+      summary: string;
+      result_revision: string | null;
+      changed_files: string[];
+      findings: string[];
+      unresolved: string[];
+      next_action: string | null;
+      evidence: string[];
+    } | null;
     config_version: string;
+    derived_token_estimate: number;
+    context_budget_tokens: number;
+    omissions: { path: string; reason: string }[];
   };
 }
 

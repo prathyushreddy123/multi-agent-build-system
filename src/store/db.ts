@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "8";
+export const SCHEMA_VERSION = "9";
 
 export type Row = Record<string, unknown>;
 
@@ -37,7 +37,7 @@ export class Store {
     ensureColumn("projects", "review_policy", "TEXT NOT NULL DEFAULT '{\"mode\":\"substantive\",\"skipTaskClasses\":[\"mechanical\",\"planning\",\"research\"]}'");
     ensureColumn("projects", "routing_overrides", "TEXT NOT NULL DEFAULT '{}'");
     ensureColumn("projects", "prompt_profile", "TEXT NOT NULL DEFAULT '{\"implementationAddendum\":null,\"reviewAddendum\":null,\"researchAddendum\":null}'");
-    ensureColumn("projects", "controller_settings", "TEXT NOT NULL DEFAULT '{\"defaultRepairLimit\":2}'");
+    ensureColumn("projects", "controller_settings", "TEXT NOT NULL DEFAULT '{\"defaultRepairLimit\":2,\"contextBudgetTokens\":12000}'");
     ensureColumn("config_versions", "project_id", "TEXT REFERENCES projects(id) ON DELETE CASCADE");
     ensureColumn("config_versions", "parent_id", "TEXT REFERENCES config_versions(id)");
     ensureColumn("config_versions", "kind", "TEXT NOT NULL DEFAULT 'snapshot'");
@@ -56,6 +56,10 @@ export class Store {
     ensureColumn("tasks", "required_tools", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("tasks", "allowed_scope", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("tasks", "execution_reason", "TEXT");
+    ensureColumn("context_packets", "config_version", "TEXT");
+    ensureColumn("context_packets", "provider", "TEXT");
+    ensureColumn("context_packets", "checkpoint_id", "TEXT");
+    ensureColumn("context_packets", "budget_tokens", "INTEGER");
     ensureColumn("controller_health", "oldest_claim_age_s", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "slot_utilization", "REAL NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "uptime_s", "INTEGER NOT NULL DEFAULT 0");

@@ -4,7 +4,7 @@ Updated: 18 September 2026
 
 ## Phase publication policy
 
-At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 4 is complete and this document is part of its publication checkpoint.
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 5 is complete and this document is part of its publication checkpoint.
 
 ## Continuation point recovered
 
@@ -145,13 +145,40 @@ Deliberately deferred:
 - Phase 5 measured optimization experiments. Policy replay validates configuration safety and compares historical observations, but does not claim that a candidate improves product-task outcomes without a targeted experiment.
 - Push, pull-request, merge, release, deployment, or destructive-action executors remain absent.
 
+## Phase 5 — measured context and routing optimization
+
+Implemented:
+
+- [x] Deterministic, rules-first relevant-file retrieval (`src/context/retrieval.ts`) using explicit references, dependency-changed files, declared scope, repository manifests, and bounded keyword matching; secret/credential paths are never read, and generic programming/path-fragment vocabulary is excluded from matching.
+- [x] Per-project `controllerSettings.contextBudgetTokens` (default 12,000, validated 1,000–100,000). Context packets carry a clearly labelled derived token estimate, preserve mandatory requirements and checkpoint context, and deterministically drop and record optional omissions once the budget is exhausted.
+- [x] Durable `task_checkpoints` recorded at every controller decision point; a rerouted attempt builds its next context packet fresh from the latest checkpoint and retained records rather than another provider's history, and records a `context.refetched` event.
+- [x] Context-health diagnostics extended with stale configuration references, budget-exceeded packets, repeated unresolved findings, repeated questions, and compression/refetch events; diagnostics report observable warnings only.
+- [x] Optimization experiment registry (`src/optimization/experiments.ts`) requiring exactly one baseline and one candidate measurement per fixed-suite case before computing a result; completed experiments are immutable and only report improvement or limitation resolution without an accepted-work, requirement-violation, or intervention regression.
+- [x] Outcome-aware routing telemetry (`src/optimization/routing.ts`) aggregating accepted work, repairs, review findings, duration, and reported usage by task class/role/route; routing changes still require the existing curator proposal/evaluation/approval path.
+- [x] CLI `optimization create|record|list|show|complete|routing`, Pi `/mabs-optimize`, and workbench views for context packets, relevant files, checkpoints, continuity, experiments, and routing outcomes.
+- [x] Worker contract v1.1.0 carries `file_context`, `checkpoint`, `derived_token_estimate`, `context_budget_tokens`, and `omissions`.
+
+Exit evidence:
+
+- [x] A real fixture task ran end to end against the real Codex and Claude subscription CLIs. Codex failed with a real `QUOTA` classification; the controller rerouted to Claude at the attempt boundary without spending repair budget (`repairsUsed` stayed `0`).
+- [x] Both context packets had non-empty, correctly scoped relevant-file manifests; the deliberately unrelated fixture file was excluded from both.
+- [x] Three checkpoints were recorded across the run; continuity diagnostics reported no repeated findings or questions.
+- [x] An optimization experiment compared the historical empty-manifest baseline against the real candidate run and completed with result `limitation_resolved` and `safeguardsPassed: true`.
+- [x] The localhost workbench served the real checkpoints, context packets, relevant files, experiment, and routing outcomes for this run.
+- [x] Durable evidence: `~/.local/state/mabs/acceptance/phase5-2026-09-18T15-52-03Z`.
+
+Deliberately deferred:
+
+- Embeddings, vector databases, local-model serving, LiteLLM, remote workers, and dedicated tracing infrastructure remain out of scope until a measured need justifies them.
+- Push, pull-request, merge, release, deployment, or destructive-action executors remain absent.
+
 ## Verification
 
 ```text
-npm test          35 passing
+npm test          40 passing
 npm run typecheck passing
 mabs verify --quick 3/3 passing
 Pi RPC extension   passing
 ```
 
-The test suite includes strict contracts, lifecycle rules, approval binding and invalidation, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, allowed-scope enforcement, independent review/repair loops, context/evidence diagnostics, feedback, plan persistence, workbench controls, gate-before-review enforcement, schema migration, curator safety validation, proposal isolation, evaluation gating, duplicate suppression, stale activation rejection, applied config behavior, and approved revert history.
+The test suite includes strict contracts, lifecycle rules, approval binding and invalidation, environment scrubbing, durable records, dependency isolation, gate evidence, controller restart/no-duplicate behavior, execution-plan safety, routing, fairness, concurrency limits, provider cooldown/fallback, deterministic mechanical work, allowed-scope enforcement, independent review/repair loops, context/evidence diagnostics, feedback, plan persistence, workbench controls, gate-before-review enforcement, schema migration, curator safety validation, proposal isolation, evaluation gating, duplicate suppression, stale activation rejection, applied config behavior, approved revert history, deterministic relevant-file retrieval, checkpoint/continuity diagnostics, optimization-experiment safeguards, and routing-outcome aggregation.

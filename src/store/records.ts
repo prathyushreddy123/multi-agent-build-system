@@ -2,7 +2,7 @@ import { Store, nowIso, toJson, fromJson } from "./db.ts";
 import type { ConfigActivation, CuratorEvaluation, CuratorProposal, EvaluationCase, EvaluationMetrics, ProposalStatus } from "../curator/types.ts";
 import type { Row } from "./db.ts";
 import { ids } from "../core/ids.ts";
-import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, validateProjectConfig } from "../domain/config.ts";
+import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, validateProjectConfig } from "../domain/config.ts";
 import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
 import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
@@ -199,6 +199,22 @@ export interface Feedback {
   resolvedAt: string | null;
 }
 
+export interface TaskCheckpoint {
+  id: string;
+  taskId: string;
+  attemptId: string | null;
+  kind: string;
+  summary: string;
+  baseRevision: string | null;
+  resultRevision: string | null;
+  changedFiles: string[];
+  findings: string[];
+  unresolved: string[];
+  nextAction: string | null;
+  evidence: string[];
+  createdAt: string;
+}
+
 export interface ProviderCapacity {
   provider: string;
   state: "available" | "cooldown" | "unavailable";
@@ -233,7 +249,10 @@ function toProject(row: Row): Project {
     reviewPolicy: fromJson<ReviewPolicy>(row.review_policy, DEFAULT_REVIEW_POLICY),
     routingOverrides: fromJson<RoutingOverrides>(row.routing_overrides, {}),
     promptProfile: fromJson<PromptProfile>(row.prompt_profile, DEFAULT_PROMPT_PROFILE),
-    controllerSettings: fromJson<ProjectControllerSettings>(row.controller_settings, DEFAULT_CONTROLLER_SETTINGS),
+    controllerSettings: {
+      ...DEFAULT_CONTROLLER_SETTINGS,
+      ...fromJson<Partial<ProjectControllerSettings>>(row.controller_settings, {}),
+    },
     checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
     configVersion: row.config_version as string,
     goal: (row.goal as string) ?? null,
@@ -417,6 +436,24 @@ function toEvaluation(row: Row): CuratorEvaluation {
     evidencePath: (row.evidence_path as string) ?? null,
     startedAt: row.started_at as string,
     endedAt: row.ended_at as string,
+  };
+}
+
+function toCheckpoint(row: Row): TaskCheckpoint {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    attemptId: (row.attempt_id as string) ?? null,
+    kind: row.kind as string,
+    summary: row.summary as string,
+    baseRevision: (row.base_revision as string) ?? null,
+    resultRevision: (row.result_revision as string) ?? null,
+    changedFiles: fromJson<string[]>(row.changed_files, []),
+    findings: fromJson<string[]>(row.findings, []),
+    unresolved: fromJson<string[]>(row.unresolved, []),
+    nextAction: (row.next_action as string) ?? null,
+    evidence: fromJson<string[]>(row.evidence, []),
+    createdAt: row.created_at as string,
   };
 }
 
@@ -1348,14 +1385,17 @@ export class Records {
 
   getConfigVersion(id: string): (Row & { payload: ProjectConfigSnapshot }) | null {
     const row = this.store.get("SELECT * FROM config_versions WHERE id = ?", id);
-    return row ? { ...row, payload: fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot) } : null;
+    return row ? { ...row, payload: normalizeProjectConfig(fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot)) } : null;
   }
 
   listConfigVersions(projectId: string): (Row & { payload: ProjectConfigSnapshot })[] {
     return this.store.all(
       "SELECT * FROM config_versions WHERE project_id = ? ORDER BY created_at DESC",
       projectId,
-    ).map((row) => ({ ...row, payload: fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot) }));
+    ).map((row) => ({
+      ...row,
+      payload: normalizeProjectConfig(fromJson<ProjectConfigSnapshot>(row.payload, {} as ProjectConfigSnapshot)),
+    }));
   }
 
   ensureProjectConfigVersion(projectId: string, payload: ProjectConfigSnapshot): string {
@@ -2068,6 +2108,63 @@ export class Records {
     }));
   }
 
+  recordCheckpoint(input: {
+    taskId: string;
+    attemptId?: string | null;
+    kind: string;
+    summary: string;
+    baseRevision?: string | null;
+    resultRevision?: string | null;
+    changedFiles?: string[];
+    findings?: string[];
+    unresolved?: string[];
+    nextAction?: string | null;
+    evidence?: string[];
+  }): TaskCheckpoint {
+    const id = ids.checkpoint();
+    const task = this.getTask(input.taskId);
+    if (!task) throw new Error(`Unknown task ${input.taskId}`);
+    this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO task_checkpoints(id, task_id, attempt_id, kind, summary, base_revision, result_revision,
+           changed_files, findings, unresolved, next_action, evidence, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id, input.taskId, input.attemptId ?? null, input.kind, input.summary,
+        input.baseRevision ?? null, input.resultRevision ?? null, toJson(input.changedFiles ?? []),
+        toJson(input.findings ?? []), toJson(input.unresolved ?? []), input.nextAction ?? null,
+        toJson(input.evidence ?? []), nowIso(),
+      );
+      this.recordEvent({
+        kind: "task.checkpoint",
+        projectId: task.projectId,
+        taskId: task.id,
+        attemptId: input.attemptId ?? null,
+        data: { checkpointId: id, kind: input.kind, resultRevision: input.resultRevision ?? null, nextAction: input.nextAction ?? null },
+      });
+    });
+    return toCheckpoint(this.store.get("SELECT * FROM task_checkpoints WHERE id = ?", id) as Row);
+  }
+
+  checkpointsForTask(taskId: string): TaskCheckpoint[] {
+    return this.store.all("SELECT * FROM task_checkpoints WHERE task_id = ? ORDER BY created_at", taskId).map(toCheckpoint);
+  }
+
+  latestCheckpoint(taskId: string): TaskCheckpoint | null {
+    const row = this.store.get("SELECT * FROM task_checkpoints WHERE task_id = ? ORDER BY created_at DESC LIMIT 1", taskId);
+    return row ? toCheckpoint(row) : null;
+  }
+
+  changedFilesForTask(taskId: string): string[] {
+    const events = this.store.all(
+      "SELECT data FROM events WHERE task_id = ? AND kind = 'task.state' ORDER BY rowid DESC",
+      taskId,
+    );
+    for (const event of events) {
+      const data = fromJson<{ changedFiles?: string[] }>(event.data, {});
+      if (Array.isArray(data.changedFiles)) return data.changedFiles;
+    }
+    return [];
+  }
+
   recordPacket(input: {
     id: string;
     taskId: string;
@@ -2077,14 +2174,28 @@ export class Records {
     files: string[];
     artifacts: string[];
     baseRevision: string | null;
+    configVersion?: string | null;
+    provider?: string | null;
+    checkpointId?: string | null;
     tokenEstimate: number | null;
+    budgetTokens?: number | null;
     manifestPath: string | null;
     warnings: string[];
+    fileDetails?: {
+      path: string;
+      reason: string;
+      included: boolean;
+      omissionReason?: string | null;
+      sizeBytes?: number | null;
+      estimatedTokens?: number | null;
+      excerptTruncated?: boolean;
+    }[];
   }): void {
-    this.store.run(
+    this.store.tx(() => {
+      this.store.run(
       `INSERT INTO context_packets(id, task_id, attempt_id, requirement_ids, omitted, files, artifacts,
-         base_revision, token_estimate, manifest_path, warnings, created_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+         base_revision, config_version, provider, checkpoint_id, token_estimate, budget_tokens, manifest_path, warnings, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       input.id,
       input.taskId,
       input.attemptId ?? null,
@@ -2093,11 +2204,24 @@ export class Records {
       toJson(input.files),
       toJson(input.artifacts),
       input.baseRevision,
+      input.configVersion ?? null,
+      input.provider ?? null,
+      input.checkpointId ?? null,
       input.tokenEstimate,
+      input.budgetTokens ?? null,
       input.manifestPath,
       toJson(input.warnings),
       nowIso(),
-    );
+      );
+      for (const file of input.fileDetails ?? []) {
+        this.store.run(
+          `INSERT INTO context_packet_files(packet_id, path, reason, included, omission_reason, size_bytes,
+             estimated_tokens, excerpt_truncated) VALUES(?,?,?,?,?,?,?,?)`,
+          input.id, file.path, file.reason, file.included ? 1 : 0, file.omissionReason ?? null,
+          file.sizeBytes ?? null, file.estimatedTokens ?? null, file.excerptTruncated ? 1 : 0,
+        );
+      }
+    });
   }
 
   getPacket(id: string): Row | undefined {
@@ -2112,6 +2236,10 @@ export class Records {
       files: fromJson<string[]>(row.files, []),
       artifacts: fromJson<string[]>(row.artifacts, []),
       warnings: fromJson<string[]>(row.warnings, []),
+      file_details: this.store.all(
+        "SELECT * FROM context_packet_files WHERE packet_id = ? ORDER BY included DESC, path",
+        row.id,
+      ).map((file) => ({ ...file, included: Boolean(file.included), excerpt_truncated: Boolean(file.excerpt_truncated) })),
     }));
   }
 

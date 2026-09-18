@@ -12,6 +12,7 @@ export interface PromptProfile {
 
 export interface ProjectControllerSettings {
   defaultRepairLimit: number;
+  contextBudgetTokens: number;
 }
 
 export interface RoutingOverride {
@@ -38,7 +39,22 @@ export const DEFAULT_PROMPT_PROFILE: PromptProfile = {
   researchAddendum: null,
 };
 
-export const DEFAULT_CONTROLLER_SETTINGS: ProjectControllerSettings = { defaultRepairLimit: 2 };
+export const DEFAULT_CONTROLLER_SETTINGS: ProjectControllerSettings = {
+  defaultRepairLimit: 2,
+  contextBudgetTokens: 12_000,
+};
+
+export function normalizeProjectConfig(config: ProjectConfigSnapshot): ProjectConfigSnapshot {
+  return {
+    ...config,
+    routingOverrides: config.routingOverrides ?? {},
+    approvalPolicy: config.approvalPolicy ?? { overrides: {}, standing: [] },
+    reviewPolicy: config.reviewPolicy ?? { mode: "substantive", skipTaskClasses: ["mechanical", "planning", "research"] },
+    checkCommands: config.checkCommands ?? [],
+    promptProfile: { ...DEFAULT_PROMPT_PROFILE, ...(config.promptProfile ?? {}) },
+    controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...(config.controllerSettings ?? {}) },
+  };
+}
 
 export function projectConfigSnapshot(project: Project): ProjectConfigSnapshot {
   return {
@@ -48,7 +64,7 @@ export function projectConfigSnapshot(project: Project): ProjectConfigSnapshot {
     reviewPolicy: project.reviewPolicy,
     checkCommands: project.checkCommands,
     promptProfile: project.promptProfile,
-    controllerSettings: project.controllerSettings,
+    controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...project.controllerSettings },
   };
 }
 
@@ -173,11 +189,15 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
   }
 
   if (config.controllerSettings && typeof config.controllerSettings === "object") {
-    errors.push(...unknownKeys(config.controllerSettings, ["defaultRepairLimit"], "controllerSettings"));
+    errors.push(...unknownKeys(config.controllerSettings, ["defaultRepairLimit", "contextBudgetTokens"], "controllerSettings"));
   }
   const repairLimit = config.controllerSettings?.defaultRepairLimit;
   if (!Number.isSafeInteger(repairLimit) || repairLimit < 0 || repairLimit > 2) {
     errors.push("controllerSettings.defaultRepairLimit must be an integer from 0 through 2.");
+  }
+  const contextBudget = config.controllerSettings?.contextBudgetTokens;
+  if (!Number.isSafeInteger(contextBudget) || contextBudget < 1_000 || contextBudget > 100_000) {
+    errors.push("controllerSettings.contextBudgetTokens must be an integer from 1,000 through 100,000.");
   }
   return [...new Set(errors)];
 }

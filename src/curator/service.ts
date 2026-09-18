@@ -7,6 +7,7 @@ import { artifactDir, worktreeRoot } from "../core/paths.ts";
 import {
   canonicalConfig,
   configFingerprint,
+  normalizeProjectConfig,
   projectConfigSnapshot,
   validateProjectConfig,
   type ProjectConfigSnapshot,
@@ -378,7 +379,7 @@ export function proposalDetail(records: Records, proposalId: string) {
 }
 
 export function parseConfigFile(raw: string): ProjectConfigSnapshot {
-  const config = JSON.parse(raw) as ProjectConfigSnapshot;
+  const config = normalizeProjectConfig(JSON.parse(raw) as ProjectConfigSnapshot);
   const errors = validateProjectConfig(config);
   if (errors.length > 0) throw new Error(`Invalid configuration:\n${errors.join("\n")}`);
   // Canonicalization here guarantees proposal fingerprints are independent of key order.

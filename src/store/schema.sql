@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS projects (
   review_policy   TEXT NOT NULL DEFAULT '{"mode":"substantive","skipTaskClasses":["mechanical","planning","research"]}',
   routing_overrides TEXT NOT NULL DEFAULT '{}',
   prompt_profile TEXT NOT NULL DEFAULT '{"implementationAddendum":null,"reviewAddendum":null,"researchAddendum":null}',
-  controller_settings TEXT NOT NULL DEFAULT '{"defaultRepairLimit":2}',
+  controller_settings TEXT NOT NULL DEFAULT '{"defaultRepairLimit":2,"contextBudgetTokens":12000}',
   check_commands  TEXT NOT NULL DEFAULT '[]',
   config_version  TEXT NOT NULL,
   goal            TEXT,
@@ -190,11 +190,82 @@ CREATE TABLE IF NOT EXISTS context_packets (
   files           TEXT NOT NULL DEFAULT '[]',
   artifacts       TEXT NOT NULL DEFAULT '[]',
   base_revision   TEXT,
+  config_version  TEXT,
+  provider        TEXT,
+  checkpoint_id   TEXT,
   token_estimate  INTEGER,
+  budget_tokens   INTEGER,
   manifest_path   TEXT,
   warnings        TEXT NOT NULL DEFAULT '[]',
   created_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS context_packet_files (
+  packet_id        TEXT NOT NULL REFERENCES context_packets(id) ON DELETE CASCADE,
+  path             TEXT NOT NULL,
+  reason           TEXT NOT NULL,
+  included         INTEGER NOT NULL,
+  omission_reason  TEXT,
+  size_bytes       INTEGER,
+  estimated_tokens INTEGER,
+  excerpt_truncated INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(packet_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+  id              TEXT PRIMARY KEY,
+  task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt_id      TEXT REFERENCES attempts(id) ON DELETE SET NULL,
+  kind            TEXT NOT NULL,
+  summary         TEXT NOT NULL,
+  base_revision   TEXT,
+  result_revision TEXT,
+  changed_files   TEXT NOT NULL DEFAULT '[]',
+  findings        TEXT NOT NULL DEFAULT '[]',
+  unresolved      TEXT NOT NULL DEFAULT '[]',
+  next_action     TEXT,
+  evidence        TEXT NOT NULL DEFAULT '[]',
+  created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS checkpoints_by_task ON task_checkpoints(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS optimization_experiments (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  name             TEXT NOT NULL,
+  hypothesis       TEXT NOT NULL,
+  dimension        TEXT NOT NULL,
+  suite_version    TEXT NOT NULL,
+  baseline_config  TEXT NOT NULL,
+  candidate_config TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'draft',
+  conclusion       TEXT,
+  evidence_path    TEXT,
+  created_at       TEXT NOT NULL,
+  completed_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS optimization_measurements (
+  id                     TEXT PRIMARY KEY,
+  experiment_id          TEXT NOT NULL REFERENCES optimization_experiments(id) ON DELETE CASCADE,
+  variant                 TEXT NOT NULL,
+  case_key                TEXT NOT NULL,
+  accepted                INTEGER NOT NULL,
+  requirement_violations INTEGER NOT NULL DEFAULT 0,
+  repairs                 INTEGER NOT NULL DEFAULT 0,
+  interventions           INTEGER NOT NULL DEFAULT 0,
+  duration_ms             INTEGER,
+  reported_input_tokens   INTEGER,
+  reported_output_tokens  INTEGER,
+  relevant_files          INTEGER NOT NULL DEFAULT 0,
+  warnings                INTEGER NOT NULL DEFAULT 0,
+  evidence_path           TEXT,
+  created_at              TEXT NOT NULL,
+  UNIQUE(experiment_id, variant, case_key)
+);
+
+CREATE INDEX IF NOT EXISTS optimization_by_project ON optimization_experiments(project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS config_versions (
   id         TEXT PRIMARY KEY,

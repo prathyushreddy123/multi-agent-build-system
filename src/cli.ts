@@ -22,6 +22,15 @@ import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
 import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
+import {
+  completeExperiment,
+  createExperiment,
+  experimentDetail,
+  listExperiments,
+  recordMeasurement,
+  type ExperimentVariant,
+} from "./optimization/experiments.ts";
+import { routingOutcomes } from "./optimization/routing.ts";
 import { openRecords } from "./store/records.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
@@ -95,6 +104,10 @@ Commands:
   curator request-revert <project> <configVersion> --reason=...
   curator revert <project> <configVersion> <approval> --reason=...
   curator history <project>
+  optimization create <project|global> <definition.json>
+  optimization list [project] | optimization show|complete <experiment>
+  optimization record <experiment> <baseline|candidate> <case> <measurement.json>
+  optimization routing [project]
   controller once [--adapter=codex]          Reconcile and dispatch one cycle
   controller run [--adapter=codex] [--ui]   Run controller loop
   status                                    Show queue and controller health
@@ -546,6 +559,64 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (area === "optimization" && action === "create") {
+      const projectValue = rest[0];
+      const definitionPath = rest[1];
+      if (!projectValue || !definitionPath) throw new Error("Usage: mabs optimization create <project|global> <definition.json>");
+      const project = projectValue === "global" ? null : resolveProject(records, projectValue);
+      if (projectValue !== "global" && !project) throw new Error(`Unknown project ${projectValue}`);
+      const definition = JSON.parse(readFileSync(resolve(definitionPath), "utf8")) as {
+        name: string; hypothesis: string; dimension: string; suiteVersion: string;
+        baselineConfig?: Record<string, unknown>; candidateConfig?: Record<string, unknown>;
+      };
+      console.log(JSON.stringify(createExperiment(records, {
+        projectId: project?.id ?? null,
+        name: definition.name, hypothesis: definition.hypothesis, dimension: definition.dimension,
+        suiteVersion: definition.suiteVersion, baselineConfig: definition.baselineConfig ?? {},
+        candidateConfig: definition.candidateConfig ?? {},
+      }), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "record") {
+      const [experimentId, variant, caseKey, measurementPath] = rest;
+      if (!experimentId || !variant || !caseKey || !measurementPath || !["baseline", "candidate"].includes(variant)) {
+        throw new Error("Usage: mabs optimization record <experiment> <baseline|candidate> <case> <measurement.json>");
+      }
+      const data = JSON.parse(readFileSync(resolve(measurementPath), "utf8")) as Record<string, unknown>;
+      console.log(JSON.stringify(recordMeasurement(records, {
+        experimentId, variant: variant as ExperimentVariant, caseKey,
+        accepted: Boolean(data.accepted),
+        requirementViolations: Number(data.requirementViolations ?? 0), repairs: Number(data.repairs ?? 0),
+        interventions: Number(data.interventions ?? 0), durationMs: data.durationMs === null || data.durationMs === undefined ? null : Number(data.durationMs),
+        reportedInputTokens: data.reportedInputTokens === null || data.reportedInputTokens === undefined ? null : Number(data.reportedInputTokens),
+        reportedOutputTokens: data.reportedOutputTokens === null || data.reportedOutputTokens === undefined ? null : Number(data.reportedOutputTokens),
+        relevantFiles: Number(data.relevantFiles ?? 0), warnings: Number(data.warnings ?? 0),
+        evidencePath: typeof data.evidencePath === "string" ? data.evidencePath : null,
+      }), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "list") {
+      const project = rest[0] ? resolveProject(records, rest[0]) : null;
+      if (rest[0] && !project) throw new Error(`Unknown project ${rest[0]}`);
+      console.log(JSON.stringify(listExperiments(records, project?.id), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "show") {
+      if (!rest[0]) throw new Error("Usage: mabs optimization show <experiment>");
+      console.log(JSON.stringify(experimentDetail(records, rest[0]), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "complete") {
+      if (!rest[0]) throw new Error("Usage: mabs optimization complete <experiment>");
+      console.log(JSON.stringify(completeExperiment(records, rest[0]), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "routing") {
+      const project = rest[0] ? resolveProject(records, rest[0]) : null;
+      if (rest[0] && !project) throw new Error(`Unknown project ${rest[0]}`);
+      console.log(JSON.stringify(routingOutcomes(records, project?.id), null, 2));
+      return;
+    }
     if (area === "controller" && (action === "once" || action === "run")) {
       const args = parseArgs(rest);
       const adapter = textOption(args, "adapter") ?? process.env.MABS_ADAPTER;

@@ -367,6 +367,12 @@ export class Controller {
         usage,
         outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
+      this.records.recordCheckpoint({
+        taskId: task.id, attemptId: attempt.id, kind: "worker_blocked", summary: output.summary,
+        baseRevision: attempt.baseRevision, findings: output.follow_up.unresolved,
+        unresolved: output.follow_up.decisions_requested, nextAction: output.follow_up.next_step,
+        evidence: output.evidence.artifacts,
+      });
       this.records.transition(task.id, "BLOCKED", {
         blocked_reason: output.reason,
         result_summary: output.summary,
@@ -413,6 +419,13 @@ export class Controller {
       outputPath: existsSync(resultArtifact) ? resultArtifact : this.handleOf(attempt).completionPath,
     });
     this.records.invalidateApprovals(task.id, "Task revision changed after implementation or repair.", finalized.revision);
+    this.records.recordCheckpoint({
+      taskId: task.id, attemptId: attempt.id, kind: attempt.kind === "repair" ? "repair_complete" : "implementation_complete",
+      summary: output.summary, baseRevision: attempt.baseRevision, resultRevision: finalized.revision,
+      changedFiles: finalized.changedFiles, findings: output.follow_up.unresolved,
+      unresolved: output.follow_up.decisions_requested, nextAction: output.follow_up.next_step,
+      evidence: [resultArtifact, ...output.evidence.artifacts],
+    });
     const checking = this.records.transition(task.id, "CHECKING", {
       result_revision: finalized.revision,
       result_summary: output.summary,
@@ -430,6 +443,12 @@ export class Controller {
       specs: project.checkCommands,
     });
     if (gates.passed) {
+      this.records.recordCheckpoint({
+        taskId: task.id, attemptId: attempt.id, kind: "checks_passed", summary: "All required checks passed.",
+        resultRevision: finalized.revision, changedFiles: finalized.changedFiles,
+        nextAction: this.shouldReview(checking, project) ? "Run independent revision-bound review." : "Complete task.",
+        evidence: gates.results.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
+      });
       if (this.shouldReview(checking, project)) {
         await this.beginReview(this.records.getTask(task.id) as Task, project, attempt);
       } else {
@@ -439,6 +458,12 @@ export class Controller {
       return;
     }
     const finding = gates.failedRequired.map((gate) => `${gate.name}: ${gate.status} (${gate.evidencePath ?? "no evidence"})`).join("; ");
+    this.records.recordCheckpoint({
+      taskId: task.id, attemptId: attempt.id, kind: "checks_failed", summary: "One or more required checks failed.",
+      resultRevision: finalized.revision, changedFiles: finalized.changedFiles, findings: [finding],
+      nextAction: "Repair the failed required checks and rerun all required checks.",
+      evidence: gates.failedRequired.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
+    });
     const current = this.records.getTask(task.id) as Task;
     if (current.repairsUsed < current.repairLimit) {
       this.records.transition(task.id, "RUNNING", { repairs_used: current.repairsUsed + 1 }, { reason: "required gate failed" });
@@ -498,7 +523,7 @@ export class Controller {
     ].map((finding) => /^\[(critical|major|minor)\]/i.test(finding) ? finding : `[major] ${finding}`);
     if (output.outcome === "failed" && findings.length === 0) findings.push(`[major] ${output.reason || output.summary}`);
     const verdict = output.outcome === "blocked" ? "blocked" : findings.length > 0 ? "request_changes" : "approved";
-    this.records.recordReview({
+    const review = this.records.recordReview({
       taskId: task.id,
       attemptId: attempt.id,
       revision,
@@ -507,6 +532,13 @@ export class Controller {
       findings,
       requirementsChecked: output.addressed_requirements,
       evidencePath: existsSync(resultArtifact) ? resultArtifact : null,
+    });
+    this.records.recordCheckpoint({
+      taskId: task.id, attemptId: attempt.id, kind: `review_${verdict}`, summary: output.summary,
+      resultRevision: revision, changedFiles: this.records.changedFilesForTask(task.id), findings,
+      unresolved: output.follow_up.decisions_requested,
+      nextAction: verdict === "approved" ? "Complete task." : verdict === "request_changes" ? "Repair review findings and rerun checks." : output.follow_up.next_step,
+      evidence: [review.evidencePath].filter((path): path is string => path !== null),
     });
     this.records.finishAttempt({
       attemptId: attempt.id,
@@ -560,6 +592,15 @@ export class Controller {
 
   private async handleReviewFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
     const current = this.records.getTask(task.id) ?? task;
+    const latestAttempt = this.records.listAttempts(task.id).at(-1);
+    this.records.recordCheckpoint({
+      taskId: task.id, attemptId: latestAttempt?.id, kind: "review_failed",
+      summary: `${failure}: ${reason}`, resultRevision: current.resultRevision,
+      findings: [reason], nextAction: isProviderUnavailable(failure)
+        ? "Run a fresh independent review with another eligible subscription provider."
+        : "Resolve the review blocker before completion.",
+      evidence: latestAttempt?.outputPath ? [latestAttempt.outputPath] : [],
+    });
     if (isProviderUnavailable(failure)) {
       this.records.noteProviderFailure(failedAdapter, failure, reason, this.options.quotaCooldownMs);
       const project = this.records.getProject(current.projectId);
@@ -580,6 +621,15 @@ export class Controller {
 
   private async handleFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
     const current = this.records.getTask(task.id) ?? task;
+    const latestAttempt = this.records.listAttempts(task.id).at(-1);
+    this.records.recordCheckpoint({
+      taskId: task.id, attemptId: latestAttempt?.id, kind: "attempt_failed",
+      summary: `${failure}: ${reason}`, baseRevision: latestAttempt?.baseRevision ?? null,
+      findings: [reason], nextAction: isProviderUnavailable(failure)
+        ? "Retry with an eligible subscription provider when capacity is available."
+        : consumesRepairBudget(failure) ? "Repair the reported failure without repeating the rejected approach." : "Resolve the operational blocker.",
+      evidence: latestAttempt?.outputPath ? [latestAttempt.outputPath] : [],
+    });
     if (isProviderUnavailable(failure)) {
       this.records.noteProviderFailure(failedAdapter, failure, reason, this.options.quotaCooldownMs);
       const project = this.records.getProject(current.projectId);

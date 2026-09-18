@@ -36,6 +36,9 @@ export const ids = {
   proposal: () => newId("prp"),
   evaluation: () => newId("evl"),
   activation: () => newId("act"),
+  checkpoint: () => newId("chk"),
+  experiment: () => newId("exp"),
+  measurement: () => newId("mea"),
 };
 
 /** RFC 4122 v4 UUID, required by harnesses that accept an explicit session id. */

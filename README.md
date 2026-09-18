@@ -4,7 +4,7 @@ A local multi-agent build system with an LLM-assisted orchestrator and a determi
 
 ## Current status
 
-Phases 0–4 are complete. The system now includes durable projects/tasks/attempts/events, isolated Git worktrees, portable context packets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing, persisted execution plans, evidence/context diagnostics, durable user feedback, an approval-gated configuration curator, and a localhost workbench.
+Phases 0–5 are complete. The system now includes durable projects/tasks/attempts/events, isolated Git worktrees, portable context packets with deterministic relevant-file retrieval and bounded context budgets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing with outcome telemetry, persisted execution plans, structured task checkpoints and cross-provider continuity, evidence/context diagnostics, durable user feedback, an approval-gated configuration curator, a measured optimization-experiment registry, and a localhost workbench.
 
 See [`docs/implementation-status.md`](docs/implementation-status.md), the [configuration curator guide](docs/curator.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
 
@@ -65,6 +65,10 @@ node src/cli.ts curator suggest demo --title="Rules-first suggestion"
 node src/cli.ts curator propose demo config.json --title="..." --rationale="..."
 node src/cli.ts curator evaluate <proposal>
 node src/cli.ts curator history demo
+node src/cli.ts optimization create demo experiment.json
+node src/cli.ts optimization record <experiment> baseline case-1 measurement.json
+node src/cli.ts optimization complete <experiment>
+node src/cli.ts optimization routing demo
 node src/cli.ts provider list
 node src/cli.ts provider reset codex
 node src/cli.ts controller once --workers=2 --codex-limit=1 --claude-limit=1
@@ -82,5 +86,7 @@ Routing is task-class based and evidence-informed. Supplying `--adapter=codex|cl
 New CLI-onboarded projects default to substantive independent review after revision-bound quality gates. Review uses a fresh context, prefers a provider different from the implementer when eligible, records structured findings, and can return bounded repairs for re-check and re-review.
 
 The Phase 4 curator writes proposed configuration to an isolated local Git branch, runs deterministic policy replay, and requires an exact `activate_config_change` approval before changing active local configuration. Activation and revert history are durable, and equivalent rejected suggestions require new evidence before reconsideration.
+
+Phase 5 replaces the previously empty context relevant-file manifest with deterministic, rules-first retrieval bounded by a per-project token budget; every included or omitted file is recorded with a reason. Durable checkpoints let a rerouted attempt build a fresh context packet for the new provider instead of relying on another provider's history. Improvement or limitation-resolution claims require a completed optimization experiment comparing a fixed baseline and candidate suite; regressions in accepted work, requirement violations, or interventions are rejected.
 
 Consequential actions such as push, merge, and deploy are not performed by the controller. The workbench and CLI can prepare and decide exact revision/configuration-bound approvals, but no approval is itself an external-action executor. Target, revision, or project-configuration drift invalidates open approvals.
