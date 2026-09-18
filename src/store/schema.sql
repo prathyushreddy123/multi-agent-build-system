@@ -433,5 +433,6 @@ CREATE TABLE IF NOT EXISTS controller_health (
   uptime_s          INTEGER NOT NULL DEFAULT 0,
   provider_status   TEXT NOT NULL DEFAULT '[]',
   backpressure_reason TEXT,
+  stale_heartbeat_workers INTEGER NOT NULL DEFAULT 0,
   state             TEXT NOT NULL DEFAULT 'running'      -- running | stopped | degraded
 );

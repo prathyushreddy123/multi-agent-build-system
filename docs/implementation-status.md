@@ -4,7 +4,7 @@ Updated: 18 September 2026
 
 ## Phase publication policy
 
-At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. Phase 5 is complete and this document is part of its publication checkpoint.
+At the user's direction, completion of each phase is followed by a phase summary, a normal Git commit, and a push to `https://github.com/prathyushreddy123/multi-agent-build-system`. This is standing authorization for non-force pushes of phase-completion commits to this repository only; it does not authorize force-pushes, merges, releases, or deployments. All six plan phases (0–5) and the plan's pre-routine-use acceptance-checklist closeout are complete; this document is part of that publication checkpoint.
 
 ## Continuation point recovered
 
@@ -172,10 +172,22 @@ Deliberately deferred:
 - Embeddings, vector databases, local-model serving, LiteLLM, remote workers, and dedicated tracing infrastructure remain out of scope until a measured need justifies them.
 - Push, pull-request, merge, release, deployment, or destructive-action executors remain absent.
 
+## Closeout — pre-routine-use acceptance checklist
+
+The source plan's phase table defines exactly Phases 0–5; all six are complete. The plan also lists an "Acceptance scenarios before routine use" checklist that is not a numbered phase. Three items on it had not yet been explicitly demonstrated with dedicated evidence and are now closed:
+
+- [x] Stale-heartbeat investigation before declaring failure: `Records.staleHeartbeatAttempts()`, a deduplicated `worker.heartbeat_stale` event, a `controller_health.stale_heartbeat_workers` count (schema v10), and a task-diagnostics warning that never auto-fails a task on heartbeat age alone.
+- [x] Many registered inactive (paused) projects alongside active ones: paused-project tasks are never promoted past `QUEUED` and are never dispatched; confirmed with a synthetic five-paused/two-active test and a real CLI run against five real paused projects and one real active task.
+- [x] Database/lease error visibility: a simulated SQLite/lease failure increments a durable `db_errors` counter, writes `controller_health.state = "degraded"`, and does not dispatch a duplicate attempt or lose task ownership; the counter remains visible after recovery.
+
+See `docs/phases/closeout-summary.md`. Real evidence: `~/.local/state/mabs/acceptance/closeout-2026-09-18T16-06-17Z`.
+
+No further numbered phases are defined in the source plan.
+
 ## Verification
 
 ```text
-npm test          40 passing
+npm test          44 passing
 npm run typecheck passing
 mabs verify --quick 3/3 passing
 Pi RPC extension   passing

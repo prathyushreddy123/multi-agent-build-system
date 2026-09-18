@@ -31,9 +31,9 @@ export default function mabsExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     try {
-      const status = JSON.parse(await run(["status"])) as { taskCounts?: Record<string, number>; pendingApprovals?: number };
+      const status = JSON.parse(await run(["status"])) as { taskCounts?: Record<string, number>; pendingApprovals?: number; staleHeartbeatWorkers?: number };
       const active = (status.taskCounts?.RUNNING ?? 0) + (status.taskCounts?.CHECKING ?? 0);
-      const attention = (status.taskCounts?.BLOCKED ?? 0) + (status.taskCounts?.FAILED ?? 0) + (status.pendingApprovals ?? 0);
+      const attention = (status.taskCounts?.BLOCKED ?? 0) + (status.taskCounts?.FAILED ?? 0) + (status.pendingApprovals ?? 0) + (status.staleHeartbeatWorkers ?? 0);
       ctx.ui.setStatus("mabs", ctx.ui.theme.fg(attention > 0 ? "warning" : "dim", `MABS ${active} active · ${attention} attention`));
     } catch {
       ctx.ui.setStatus("mabs", ctx.ui.theme.fg("warning", "MABS unavailable"));

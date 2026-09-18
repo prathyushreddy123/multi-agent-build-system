@@ -26,6 +26,7 @@ export interface ControllerOptions {
   defaultEffort?: string | null;
   workerTimeoutMs?: number;
   leaseTimeoutMs?: number;
+  heartbeatStaleMs?: number;
   quotaCooldownMs?: number;
   providerLimits?: Record<string, number>;
   minFreeMemoryMb?: number;
@@ -47,6 +48,7 @@ export class Controller {
     defaultEffort: string | null;
     workerTimeoutMs: number;
     leaseTimeoutMs: number;
+    heartbeatStaleMs: number;
     quotaCooldownMs: number;
     providerLimits: Record<string, number>;
     minFreeMemoryMb: number;
@@ -62,6 +64,7 @@ export class Controller {
   private ticking = false;
   private dbErrors = 0;
   private backpressureReason: string | null = null;
+  private reportedStaleHeartbeats = new Set<string>();
   private expectedTickAt = Date.now();
 
   constructor(records: Records, options: ControllerOptions = {}) {
@@ -77,6 +80,7 @@ export class Controller {
       defaultEffort: options.defaultEffort ?? null,
       workerTimeoutMs: options.workerTimeoutMs ?? 45 * 60_000,
       leaseTimeoutMs: options.leaseTimeoutMs ?? 15_000,
+      heartbeatStaleMs: options.heartbeatStaleMs ?? 10 * 60_000,
       quotaCooldownMs: options.quotaCooldownMs ?? 15 * 60_000,
       providerLimits: options.providerLimits ?? {
         claude: Math.max(1, Math.ceil(workerLimit / 2)),
@@ -1002,6 +1006,9 @@ export class Controller {
     const effectiveState = state === "running" && ready.length > 0 && (this.backpressureReason !== null || (providerStatus.length > 0 && providerStatus.every((provider) => provider.state !== "available")))
       ? "degraded"
       : state;
+    const staleHeartbeats = this.records.staleHeartbeatAttempts(this.options.heartbeatStaleMs);
+    const staleIds = new Set(staleHeartbeats.map((item) => item.attemptId));
+    for (const id of this.reportedStaleHeartbeats) if (!staleIds.has(id)) this.reportedStaleHeartbeats.delete(id);
     this.records.writeHealth({
       id: this.options.controllerId,
       pid: process.pid,
@@ -1017,7 +1024,19 @@ export class Controller {
       uptimeS: Math.round((Date.now() - Date.parse(this.startedAt)) / 1000),
       providerStatus,
       backpressureReason: this.backpressureReason,
+      staleHeartbeatWorkers: staleHeartbeats.length,
       state: effectiveState,
     });
+    for (const stale of staleHeartbeats) {
+      if (this.reportedStaleHeartbeats.has(stale.attemptId)) continue;
+      this.reportedStaleHeartbeats.add(stale.attemptId);
+      this.records.recordEvent({
+        kind: "worker.heartbeat_stale",
+        projectId: stale.projectId,
+        taskId: stale.taskId,
+        attemptId: stale.attemptId,
+        data: { ageMs: stale.ageMs, thresholdMs: this.options.heartbeatStaleMs, note: "Investigate before assuming failure; a long tool run may still be active." },
+      });
+    }
   }
 }

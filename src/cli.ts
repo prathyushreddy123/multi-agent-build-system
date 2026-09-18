@@ -513,6 +513,7 @@ async function main(): Promise<void> {
         projects: records.listProjects().length,
         taskCounts,
         pendingApprovals: records.listApprovals("pending").length,
+        staleHeartbeatWorkers: records.staleHeartbeatAttempts(10 * 60_000).length,
         providers: records.listProviderCapacity(),
         operations: records.operationalMetrics(),
         health: records.latestHealth() ?? null,

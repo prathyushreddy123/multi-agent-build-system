@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "9";
+export const SCHEMA_VERSION = "10";
 
 export type Row = Record<string, unknown>;
 
@@ -60,6 +60,7 @@ export class Store {
     ensureColumn("context_packets", "provider", "TEXT");
     ensureColumn("context_packets", "checkpoint_id", "TEXT");
     ensureColumn("context_packets", "budget_tokens", "INTEGER");
+    ensureColumn("controller_health", "stale_heartbeat_workers", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "oldest_claim_age_s", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "slot_utilization", "REAL NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "uptime_s", "INTEGER NOT NULL DEFAULT 0");

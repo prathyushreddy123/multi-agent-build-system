@@ -20,9 +20,13 @@ function fileInfo(kind: EvidenceReference["kind"], label: string, path: string |
   return { kind, label, path, exists: existsSync(path), size };
 }
 
-export function taskDiagnostics(records: Records, taskId: string) {
+const DEFAULT_HEARTBEAT_STALE_MS = 10 * 60_000;
+
+export function taskDiagnostics(records: Records, taskId: string, options: { heartbeatStaleMs?: number } = {}) {
   const task = records.getTask(taskId);
   if (!task) throw new Error(`Unknown task ${taskId}`);
+  const heartbeatStaleMs = options.heartbeatStaleMs ?? DEFAULT_HEARTBEAT_STALE_MS;
+  const staleHeartbeats = records.staleHeartbeatAttempts(heartbeatStaleMs).filter((item) => item.taskId === taskId);
   const mandatory = records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
   const packets = records.packetsForTask(taskId);
   const context = packets.map((packet) => {
@@ -100,6 +104,7 @@ export function taskDiagnostics(records: Records, taskId: string) {
       .map((packet) => `Context packet ${String(packet.id)} exceeds its configured context budget because mandatory records were retained.`),
     ...repeatedFindings.map((item) => `A rejected or unresolved finding recurred ${item.count} times: ${item.finding}`),
     ...repeatedQuestions.map((item) => `A project question recurred ${item.count} times: ${item.question}`),
+    ...staleHeartbeats.map((item) => `Attempt ${item.attemptId} heartbeat is stale (${Math.round(item.ageMs / 1000)}s, threshold ${Math.round(heartbeatStaleMs / 1000)}s); investigate whether the tool run is still active before assuming failure.`),
     ...context.filter((packet) => !packet.manifestAvailable).map((packet) => `Context manifest is unavailable for packet ${String(packet.id)}.`),
     ...mandatory.filter((id) => !addressed.has(id)).map((id) => `No retained worker result reports addressing mandatory requirement ${id}.`),
     ...evidence.filter((item) => !item.exists).map((item) => `Evidence file is unavailable: ${item.path}`),
@@ -115,6 +120,7 @@ export function taskDiagnostics(records: Records, taskId: string) {
       missing: mandatory.filter((id) => !addressed.has(id)),
     },
     checkpoints,
+    staleHeartbeats,
     continuity: {
       compressionAndRefetchEvents: contextEvents,
       repeatedFindings,

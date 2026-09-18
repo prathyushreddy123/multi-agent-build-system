@@ -2368,20 +2368,21 @@ export class Records {
     uptimeS: number;
     providerStatus: Record<string, unknown>[];
     backpressureReason: string | null;
+    staleHeartbeatWorkers?: number;
     state: "running" | "stopped" | "degraded";
   }): void {
     this.store.run(
       `INSERT INTO controller_health(id, pid, started_at, heartbeat_at, loop_delay_ms, db_errors, queue_depth,
          oldest_ready_age_s, oldest_claim_age_s, active_workers, worker_limit, slot_utilization, uptime_s,
-         provider_status, backpressure_reason, state)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         provider_status, backpressure_reason, stale_heartbeat_workers, state)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, loop_delay_ms = excluded.loop_delay_ms,
          db_errors = excluded.db_errors, queue_depth = excluded.queue_depth,
          oldest_ready_age_s = excluded.oldest_ready_age_s, oldest_claim_age_s = excluded.oldest_claim_age_s,
          active_workers = excluded.active_workers, worker_limit = excluded.worker_limit,
          slot_utilization = excluded.slot_utilization, uptime_s = excluded.uptime_s,
          provider_status = excluded.provider_status, backpressure_reason = excluded.backpressure_reason,
-         state = excluded.state`,
+         stale_heartbeat_workers = excluded.stale_heartbeat_workers, state = excluded.state`,
       input.id,
       input.pid,
       input.startedAt,
@@ -2397,8 +2398,20 @@ export class Records {
       input.uptimeS,
       toJson(input.providerStatus),
       input.backpressureReason,
+      input.staleHeartbeatWorkers ?? 0,
       input.state,
     );
+  }
+
+  staleHeartbeatAttempts(thresholdMs: number): { attemptId: string; taskId: string; projectId: string; ageMs: number }[] {
+    const now = Date.now();
+    return this.listRunningAttempts().flatMap((attempt) => {
+      const reference = attempt.heartbeatAt ?? attempt.startedAt;
+      const ageMs = reference ? now - Date.parse(reference) : Number.POSITIVE_INFINITY;
+      if (ageMs < thresholdMs) return [];
+      const task = this.getTask(attempt.taskId);
+      return task ? [{ attemptId: attempt.id, taskId: attempt.taskId, projectId: task.projectId, ageMs: Math.round(ageMs) }] : [];
+    });
   }
 
   latestHealth(): Row | undefined {
