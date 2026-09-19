@@ -33,7 +33,9 @@ const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   REVIEWING: ["RUNNING", "AWAITING_APPROVAL", "DONE", "BLOCKED", "FAILED", "CANCELLED"],
   // An approval decision returns the task to the state that prepared the action.
   AWAITING_APPROVAL: ["RUNNING", "CHECKING", "REVIEWING", "READY", "BLOCKED", "DONE", "FAILED", "CANCELLED"],
-  BLOCKED: ["READY", "QUEUED", "RUNNING", "FAILED", "CANCELLED"],
+  // REVIEWING is reachable from BLOCKED so a review deferred for provider
+  // capacity can resume without repeating the implementation.
+  BLOCKED: ["READY", "QUEUED", "RUNNING", "REVIEWING", "FAILED", "CANCELLED"],
   DONE: [],
   FAILED: ["QUEUED", "READY", "CANCELLED"],
   CANCELLED: ["QUEUED"],

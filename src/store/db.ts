@@ -65,6 +65,8 @@ export class Store {
     ensureColumn("context_packets", "inspected_revision", "TEXT");
     ensureColumn("review_results", "blocking_findings", "TEXT");
     ensureColumn("review_results", "advisory_findings", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("review_results", "policy_version", "TEXT");
+    ensureColumn("review_results", "context_fingerprint", "TEXT");
     ensureColumn("controller_health", "stale_heartbeat_workers", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "oldest_claim_age_s", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn("controller_health", "slot_utilization", "REAL NOT NULL DEFAULT 0");

@@ -11,11 +11,15 @@ import { scopesOverlap } from "../domain/plan.ts";
 import type { WorkerOutput } from "../domain/contract.ts";
 import { artifactDir } from "../core/paths.ts";
 import { runGates } from "../gates/runner.ts";
-import { classifyFindings, reviewRequiredFor } from "../review/policy.ts";
+import { classifyFindings, describeReviewPolicy, evaluateReviewPolicy } from "../review/policy.ts";
+import type { ReviewDecision } from "../review/policy.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, Project, Records, Task } from "../store/records.ts";
 import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
+
+/** Marks a task whose only outstanding work is a review the controller can retry. */
+export const REVIEW_PENDING_PREFIX = "Review pending:";
 
 export interface ControllerOptions {
   workerLimit?: number;
@@ -117,6 +121,7 @@ export class Controller {
         throw new Error(`Controller lease is held by ${String(lease?.controller_id ?? "another process")} (pid ${String(lease?.pid ?? "unknown")})`);
       }
       await this.reconcileAttempts();
+      await this.resumePendingReviews();
       this.promoteTasks();
       await this.dispatchReadyTasks();
       this.writeHealth(loopDelayMs, "running");
@@ -253,8 +258,26 @@ export class Controller {
     return sameProvider;
   }
 
-  private shouldReview(task: Task, project: Project): boolean {
-    return reviewRequiredFor(project.reviewPolicy, task);
+  /**
+   * Risk is judged from what the controller observed changing, never from the
+   * worker's own description of its change.
+   */
+  private reviewDecision(task: Task, project: Project, change: { changedFiles: string[]; diffText: string }): ReviewDecision {
+    return evaluateReviewPolicy(project.reviewPolicy, {
+      subject: task,
+      changedFiles: change.changedFiles,
+      diffText: change.diffText,
+      manualRequest: this.records.hasOpenManualReviewRequest(task.id),
+    });
+  }
+
+  private priorReviewFindings(task: Task): string[] {
+    const prior = this.records.reviewsForTask(task.id).at(-1);
+    if (!prior) return [];
+    return [
+      `Previous review of ${prior.revision} returned ${prior.verdict}: ${prior.summary}`,
+      ...prior.findings.map((finding) => `Previous finding: ${finding}`),
+    ];
   }
 
   private handleOf(attempt: Attempt): AdapterHandle {
@@ -456,6 +479,23 @@ export class Controller {
           data: { revision: finalized.revision, note: "No required quality checks are registered for this project." },
         });
       }
+      // The reviewer decision needs the real change, so it is computed from the
+      // controller's own diff of the revision it just created.
+      const diffText = (await workspaceDiff(task.worktreePath, task.baseRevision ?? attempt.baseRevision ?? finalized.revision, finalized.revision)).slice(0, 400_000);
+      const decision = this.reviewDecision(checking, project, { changedFiles: finalized.changedFiles, diffText });
+      this.records.recordEvent({
+        kind: "review.decision",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        data: {
+          review: decision.review,
+          reason: decision.reason,
+          matchedRules: decision.matchedRules,
+          policy: describeReviewPolicy(project.reviewPolicy),
+          changedFiles: finalized.changedFiles.length,
+        },
+      });
       this.records.recordCheckpoint({
         taskId: task.id, attemptId: attempt.id,
         kind: notConfigured ? "quality_not_configured" : "checks_passed",
@@ -466,13 +506,13 @@ export class Controller {
         findings: notConfigured
           ? ["[major] Quality coverage is not configured; register build, lint, typecheck, or test checks before treating this revision as ready."]
           : [],
-        nextAction: this.shouldReview(checking, project) ? "Run independent revision-bound review." : "Complete task.",
+        nextAction: decision.review ? `Run independent revision-bound review. ${decision.reason}` : `Complete task. ${decision.reason}`,
         evidence: gates.results.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
       });
-      if (this.shouldReview(checking, project)) {
-        await this.beginReview(this.records.getTask(task.id) as Task, project, attempt);
+      if (decision.review) {
+        await this.beginReview(this.records.getTask(task.id) as Task, project, attempt, decision);
       } else {
-        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: "skipped by project policy", gates: gates.results.length, quality: gates.status });
+        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: decision.reason, gates: gates.results.length, quality: gates.status });
         this.records.completeFeedbackForTask(task.id, done.resultSummary ?? "Response task completed without a summary.");
       }
       return;
@@ -498,17 +538,65 @@ export class Controller {
     }
   }
 
-  private async beginReview(task: Task, project: Project, implementationAttempt: Attempt): Promise<void> {
+  private async beginReview(task: Task, project: Project, implementationAttempt: Attempt, decision: ReviewDecision): Promise<void> {
     const reviewing = this.records.transition(task.id, "REVIEWING", {}, {
       revision: task.resultRevision,
       implementationAttemptId: implementationAttempt.id,
+      policy: decision.reason,
+      scope: decision.scope,
     });
-    const selection = this.selectReviewRoute(reviewing, implementationAttempt.adapter);
+    const excluded = decision.reviewerRoute === "independent_provider" ? implementationAttempt.adapter : undefined;
+    const selection = this.selectReviewRoute(reviewing, excluded);
     if (!selection.chosen) {
-      this.blockTask(reviewing, this.providerBlockClass(selection), `Independent review could not be routed. ${selection.reason}`);
+      this.deferReview(reviewing, decision, selection);
       return;
     }
-    await this.launchAttempt(reviewing, project, "review", [], ids.launch(), selection);
+    await this.launchAttempt(reviewing, project, "review", this.priorReviewFindings(reviewing), ids.launch(), selection);
+  }
+
+  /**
+   * Required review coverage that cannot run right now is recorded as pending
+   * or blocked, with the missing work named. It is never silently skipped.
+   */
+  private deferReview(task: Task, decision: ReviewDecision, selection: RouteSelection): void {
+    const pending = decision.capacityAction === "pending";
+    const reason = `${pending ? REVIEW_PENDING_PREFIX : "Independent review is blocked:"} ${selection.reason}`;
+    this.records.recordCheckpoint({
+      taskId: task.id, kind: pending ? "review_pending" : "review_blocked",
+      summary: "Required independent review has not been performed for this revision.",
+      resultRevision: task.resultRevision, findings: [`[major] ${reason}`],
+      nextAction: pending
+        ? "The controller retries this review when an eligible subscription provider has capacity."
+        : "Resolve provider availability, then retry the task to run the outstanding review.",
+    });
+    this.records.recordEvent({
+      kind: pending ? "review.pending" : "review.blocked",
+      projectId: task.projectId,
+      taskId: task.id,
+      data: { capacityAction: decision.capacityAction, reason: selection.reason, revision: task.resultRevision },
+    });
+    this.blockTask(task, this.providerBlockClass(selection), reason);
+  }
+
+  /** Resume reviews deferred for capacity once an eligible provider is free. */
+  private async resumePendingReviews(): Promise<void> {
+    if (this.records.listRunningAttempts().length >= this.options.workerLimit) return;
+    for (const task of this.records.listTasks({ state: "BLOCKED" })) {
+      if (!task.blockedReason?.startsWith(REVIEW_PENDING_PREFIX)) continue;
+      if (!task.resultRevision || !task.worktreePath) continue;
+      const project = this.records.getProject(task.projectId);
+      if (!project || project.status !== "active") continue;
+      const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
+      const excluded = project.reviewPolicy.reviewerRoute === "independent_provider" ? implementer?.adapter : undefined;
+      const selection = this.selectReviewRoute(task, excluded);
+      if (!selection.chosen) continue;
+      const reviewing = this.records.transition(task.id, "REVIEWING", { blocked_reason: null, failure_class: null }, {
+        reason: "review capacity became available; resuming the outstanding review",
+        revision: task.resultRevision,
+      });
+      await this.launchAttempt(reviewing, project, "review", this.priorReviewFindings(reviewing), ids.launch(), selection);
+      if (this.records.listRunningAttempts().length >= this.options.workerLimit) return;
+    }
   }
 
   private async collectReview(
@@ -534,6 +622,8 @@ export class Controller {
       return;
     }
 
+    const project = this.records.getProject(task.projectId);
+    if (!project) throw new Error(`Unknown project ${task.projectId}`);
     const required = this.records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
     const missingCoverage = required.filter((requirement) => !output.addressed_requirements.includes(requirement));
     const reported = [
@@ -545,7 +635,7 @@ export class Controller {
     // Minor suggestions are retained as advice; only blocking severities send
     // the task back for repair. An unfinished review is never disguised as
     // approval: a blocked outcome stays blocked.
-    const classified = classifyFindings(reported);
+    const classified = classifyFindings(reported, project.reviewPolicy.blockingSeverities);
     const findings = classified.all;
     const verdict = output.outcome === "blocked" ? "blocked" : classified.blocking.length > 0 ? "request_changes" : "approved";
     const review = this.records.recordReview({
@@ -559,6 +649,8 @@ export class Controller {
       advisoryFindings: classified.advisory,
       requirementsChecked: output.addressed_requirements,
       evidencePath: existsSync(resultArtifact) ? resultArtifact : null,
+      policyVersion: project.reviewPolicy.version,
+      contextFingerprint: this.records.reviewContextFingerprint(task.id),
     });
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: attempt.id, kind: `review_${verdict}`, summary: output.summary,
@@ -605,14 +697,12 @@ export class Controller {
     if (current.repairsUsed >= current.repairLimit) {
       this.records.transition(task.id, "FAILED", {
         failure_class: "CODE",
-        blocked_reason: `Independent review found changes after the repair limit was exhausted: ${classified.blocking.join("; ")}`,
+        blocked_reason: `Independent review found blocking changes after the repair limit was exhausted: ${classified.blocking.join("; ")}`,
         claimed_by: null,
         claimed_at: null,
       });
       return;
     }
-    const project = this.records.getProject(task.projectId);
-    if (!project) throw new Error(`Unknown project ${task.projectId}`);
     this.records.transition(task.id, "RUNNING", {
       repairs_used: current.repairsUsed + 1,
       claimed_by: null,
@@ -938,8 +1028,31 @@ export class Controller {
       if (!task.resultRevision) throw new Error(`Task ${task.id} has no result revision to review`);
       const diffPath = join(dir, "review-diff.patch");
       writeFileSync(diffPath, await workspaceDiff(task.worktreePath, task.baseRevision, task.resultRevision), { mode: 0o600 });
+      reviewArtifacts.push(diffPath);
+      // A re-review after a repair gets the repair delta as well, but only
+      // while the reviewed context still matches. After meaningful drift the
+      // full change is reviewed again instead of just the increment.
+      const prior = this.records.reviewsForTask(task.id).findLast((review) => review.revision !== task.resultRevision);
+      if (prior && project.reviewPolicy.scope === "change") {
+        const fingerprint = this.records.reviewContextFingerprint(task.id);
+        if (prior.contextFingerprint === null || prior.contextFingerprint === fingerprint) {
+          const deltaPath = join(dir, "review-delta.patch");
+          writeFileSync(deltaPath, await workspaceDiff(task.worktreePath, prior.revision, task.resultRevision), { mode: 0o600 });
+          reviewArtifacts.push(deltaPath);
+        } else {
+          this.records.recordEvent({
+            kind: "review.scope_broadened",
+            projectId: project.id,
+            taskId: task.id,
+            data: {
+              priorRevision: prior.revision,
+              revision: task.resultRevision,
+              reason: "Requirements, policy, configuration, or dependency revisions changed since the prior review.",
+            },
+          });
+        }
+      }
       reviewArtifacts.push(
-        diffPath,
         ...this.records.gatesForRevision(task.id, task.resultRevision)
           .map((gate) => gate.evidencePath)
           .filter((path): path is string => path !== null),

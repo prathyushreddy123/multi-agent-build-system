@@ -140,12 +140,14 @@ test("required review never inherits skip classes at any entry point", (t) => {
     repoPath: repo,
     reviewPolicy: { mode: "required", skipTaskClasses: ["mechanical", "planning", "research"] },
   });
-  assert.deepEqual(project.reviewPolicy, { mode: "required", skipTaskClasses: [] });
+  assert.equal(project.reviewPolicy.mode, "required");
+  assert.deepEqual(project.reviewPolicy.skipTaskClasses, []);
   assert.ok(records.recentEvents(20).some((event) => event.kind === "project.review_policy_normalized"));
 
   // Policy update.
   records.setProjectReviewPolicy(project.id, { mode: "required", skipTaskClasses: ["research"] });
-  assert.deepEqual(records.getProject(project.id)?.reviewPolicy, { mode: "required", skipTaskClasses: [] });
+  assert.equal(records.getProject(project.id)?.reviewPolicy.mode, "required");
+  assert.deepEqual(records.getProject(project.id)?.reviewPolicy.skipTaskClasses, []);
 
   // A required-mode project reviews every class, including the ones a
   // substantive project would skip.
@@ -155,8 +157,9 @@ test("required review never inherits skip classes at any entry point", (t) => {
   assert.equal(reviewRequiredFor(policy, { taskClass: "research", role: "reviewer" }), false);
 
   // Substantive projects keep their configured skips.
-  assert.deepEqual(normalizeReviewPolicy({ mode: "substantive", skipTaskClasses: ["research", "nonsense"] }),
-    { mode: "substantive", skipTaskClasses: ["research"] });
+  const substantive = normalizeReviewPolicy({ mode: "substantive", skipTaskClasses: ["research", "nonsense"] });
+  assert.equal(substantive.mode, "substantive");
+  assert.deepEqual(substantive.skipTaskClasses, ["research"]);
 
   // Explicitly authored configuration is rejected rather than silently repaired.
   const errors = validateProjectConfig({

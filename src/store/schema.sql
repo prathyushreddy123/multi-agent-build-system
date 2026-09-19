@@ -387,6 +387,8 @@ CREATE TABLE IF NOT EXISTS review_results (
   advisory_findings    TEXT NOT NULL DEFAULT '[]',
   requirements_checked TEXT NOT NULL DEFAULT '[]',
   evidence_path        TEXT,
+  policy_version       TEXT,
+  context_fingerprint  TEXT,
   created_at           TEXT NOT NULL
 );
 

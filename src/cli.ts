@@ -21,7 +21,17 @@ import type { Action } from "./domain/policy.ts";
 import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
 import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
-import { DEFAULT_SKIP_TASK_CLASSES, REVIEW_MODES, normalizeReviewPolicy, type ReviewMode } from "./review/policy.ts";
+import {
+  DEFAULT_SKIP_TASK_CLASSES,
+  REVIEW_MODES,
+  REVIEW_PRESETS,
+  describeReviewPolicy,
+  evaluateReviewPolicy,
+  normalizeReviewPolicy,
+  reviewPreset,
+  type ReviewMode,
+  type ReviewPreset,
+} from "./review/policy.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
 import {
   completeExperiment,
@@ -83,7 +93,10 @@ Commands:
                                                Register a project and discover existing checks
   project list                              List registered projects
   project status <id|name> <active|paused|archived>
-  project review <id|name> <required|substantive|none>
+  project review <id|name> [required|substantive|none]   Show or set the resolved review policy
+  project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
+  review decide <task>                         Explain the review decision for a task
+  review request <task>                        Record an explicit manual review request
   project base <id|name> <branch>              Change target and invalidate open approvals
   requirement add <project> <id> <text>
   task add <project> <title> --objective=... [--class=small_implementation]
@@ -200,14 +213,66 @@ async function main(): Promise<void> {
       return;
     }
     if (area === "project" && action === "review") {
-      const [projectValue, mode] = rest;
+      const args = parseArgs(rest);
+      const [projectValue, mode] = args.positionals;
       const project = projectValue ? resolveProject(records, projectValue) : null;
-      if (!project || !mode || !REVIEW_MODES.includes(mode as ReviewMode)) {
-        throw new Error("Usage: mabs project review <id|name> <required|substantive|none>");
+      if (!project) throw new Error("Usage: mabs project review <id|name> [required|substantive|none]");
+      if (!mode) {
+        console.log(JSON.stringify({
+          projectId: project.id,
+          resolved: describeReviewPolicy(project.reviewPolicy),
+          policy: project.reviewPolicy,
+        }, null, 2));
+        return;
+      }
+      if (!REVIEW_MODES.includes(mode as ReviewMode)) {
+        throw new Error("Usage: mabs project review <id|name> [required|substantive|none]");
       }
       const policy = normalizeReviewPolicy({ mode: mode as ReviewMode, skipTaskClasses: [...DEFAULT_SKIP_TASK_CLASSES] });
-      const configVersion = records.setProjectReviewPolicy(project.id, policy);
-      console.log(JSON.stringify({ projectId: project.id, policy, configVersion }, null, 2));
+      const configVersion = records.setProjectReviewPolicy(project.id, policy, {
+        reason: textOption(args, "reason"),
+        acknowledgeWeakening: args.options.has("acknowledge-weakening"),
+        changedBy: textOption(args, "by", "local-cli"),
+      });
+      console.log(JSON.stringify({ projectId: project.id, resolved: describeReviewPolicy(policy), policy, configVersion }, null, 2));
+      return;
+    }
+    if (area === "project" && action === "preset") {
+      const args = parseArgs(rest);
+      const [projectValue, preset] = args.positionals;
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (!project || !preset || !REVIEW_PRESETS.includes(preset as ReviewPreset) || preset === "custom") {
+        throw new Error("Usage: mabs project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]");
+      }
+      const policy = reviewPreset(preset as Exclude<ReviewPreset, "custom">);
+      const configVersion = records.setProjectReviewPreset(project.id, preset as Exclude<ReviewPreset, "custom">, {
+        reason: textOption(args, "reason"),
+        acknowledgeWeakening: args.options.has("acknowledge-weakening"),
+        changedBy: textOption(args, "by", "local-cli"),
+      });
+      console.log(JSON.stringify({ projectId: project.id, resolved: describeReviewPolicy(policy), policy, configVersion }, null, 2));
+      return;
+    }
+    if (area === "review" && (action === "decide" || action === "request")) {
+      const args = parseArgs(rest);
+      const taskId = args.positionals[0];
+      const task = taskId ? records.getTask(taskId) : null;
+      const project = task ? records.getProject(task.projectId) : null;
+      if (!task || !project) throw new Error(`Usage: mabs review ${action} <task>`);
+      const decision = evaluateReviewPolicy(project.reviewPolicy, {
+        subject: task,
+        changedFiles: records.changedFilesForTask(task.id),
+        manualRequest: action === "request",
+      });
+      if (action === "request") {
+        records.recordEvent({
+          kind: "review.requested",
+          projectId: project.id,
+          taskId: task.id,
+          data: { requestedBy: textOption(args, "by", "local-cli"), revision: task.resultRevision, policy: describeReviewPolicy(project.reviewPolicy) },
+        });
+      }
+      console.log(JSON.stringify({ taskId: task.id, resolved: describeReviewPolicy(project.reviewPolicy), decision }, null, 2));
       return;
     }
     if (area === "requirement" && action === "add") {

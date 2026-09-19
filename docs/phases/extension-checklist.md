@@ -48,9 +48,12 @@ against a database written by baseline code.
 
 ## E2 — Configurable review without repeated work
 
-- [ ] Versioned review-policy evaluator shared by dispatch, verdicts, approval preparation, CLI, and workbench.
-- [ ] Presets: experiment, personal, client. Explicit migration from required/substantive/none.
-- [ ] Risk detection, repair-delta reuse, capacity handling, resolved-policy display.
+- [x] Versioned review-policy evaluator shared by dispatch, verdicts, approval preparation, CLI, and workbench.
+- [x] Presets: experiment, personal, client. Explicit migration from required/substantive/none.
+- [x] Risk detection, repair-delta reuse, capacity handling, resolved-policy display.
+
+Evidence: `docs/phases/extension-e2-summary.md`. `npm test` 57 pass / 0 fail; typecheck clean.
+Schema 11 gains policy/evidence fields additively; a stored v1 policy row reads back migrated.
 
 ## E3 — Conversation to an accepted product plan
 

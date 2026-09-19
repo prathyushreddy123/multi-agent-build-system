@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Store, nowIso, toJson, fromJson } from "./db.ts";
 import type { ConfigActivation, CuratorEvaluation, CuratorProposal, EvaluationCase, EvaluationMetrics, ProposalStatus } from "../curator/types.ts";
 import type { Row } from "./db.ts";
@@ -11,12 +13,16 @@ import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/p
 import {
   DEFAULT_REVIEW_POLICY,
   REVIEW_MODES,
+  REVIEW_TRIGGERS,
   classifyFindings,
+  describeReviewPolicy,
+  evaluateReviewPolicy,
   normalizeReviewPolicy,
   reviewPolicyNormalizationNotes,
-  reviewRequiredFor,
+  reviewPreset,
+  weakensReview,
 } from "../review/policy.ts";
-import type { ReviewPolicy } from "../review/policy.ts";
+import type { ReviewMode, ReviewPolicy, ReviewPreset, ReviewTrigger } from "../review/policy.ts";
 import { QUALITY_COVERAGE_GATE } from "../gates/runner.ts";
 import type { FailureClass } from "../core/failure.ts";
 import { TASK_CLASSES } from "../routing/router.ts";
@@ -174,6 +180,9 @@ export interface ReviewResult {
   advisoryFindings: string[];
   requirementsChecked: string[];
   evidencePath: string | null;
+  /** Policy in force when the review ran, and the context it accepted. */
+  policyVersion: string | null;
+  contextFingerprint: string | null;
   createdAt: string;
 }
 
@@ -254,7 +263,8 @@ function toProject(row: Row): Project {
     status: row.status as ProjectStatus,
     routingProfile: row.routing_profile as string,
     approvalPolicy: fromJson<ProjectApprovalPolicy>(row.approval_policy, { overrides: {}, standing: [] }),
-    reviewPolicy: fromJson<ReviewPolicy>(row.review_policy, DEFAULT_REVIEW_POLICY),
+    // Stored v1 policies are migrated on read, so every consumer sees one shape.
+    reviewPolicy: normalizeReviewPolicy(fromJson<unknown>(row.review_policy, DEFAULT_REVIEW_POLICY)),
     routingOverrides: fromJson<RoutingOverrides>(row.routing_overrides, {}),
     promptProfile: fromJson<PromptProfile>(row.prompt_profile, DEFAULT_PROMPT_PROFILE),
     controllerSettings: {
@@ -372,6 +382,8 @@ function toReview(row: Row): ReviewResult {
     advisoryFindings: fromJson<string[]>(row.advisory_findings, []),
     requirementsChecked: fromJson<string[]>(row.requirements_checked, []),
     evidencePath: (row.evidence_path as string) ?? null,
+    policyVersion: (row.policy_version as string) ?? null,
+    contextFingerprint: (row.context_fingerprint as string) ?? null,
     createdAt: row.created_at as string,
   };
 }
@@ -512,6 +524,24 @@ const TASK_MUTABLE_COLUMNS = new Set([
   "result_summary",
 ]);
 
+/** Reject obviously invalid policy input instead of normalizing nonsense into a default. */
+function assertReviewPolicyInput(input: unknown): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Review policy must be an object");
+  const candidate = input as Partial<ReviewPolicy> & { mode?: unknown };
+  if (candidate.mode !== undefined && !REVIEW_MODES.includes(candidate.mode as ReviewMode)) {
+    throw new Error(`Invalid review mode: ${String(candidate.mode)}`);
+  }
+  if (candidate.trigger !== undefined && !REVIEW_TRIGGERS.includes(candidate.trigger as ReviewTrigger)) {
+    throw new Error(`Invalid review trigger: ${String(candidate.trigger)}`);
+  }
+  const skips = candidate.skipTaskClasses;
+  if (skips !== undefined) {
+    if (!Array.isArray(skips)) throw new Error("Review policy skipTaskClasses must be an array");
+    const invalid = skips.filter((taskClass) => !TASK_CLASSES.includes(taskClass as TaskClass));
+    if (invalid.length > 0) throw new Error(`Unknown review task classes: ${invalid.join(", ")}`);
+  }
+}
+
 function assertTaskFields(fields: Record<string, unknown>): void {
   const invalid = Object.keys(fields).filter((key) => !TASK_MUTABLE_COLUMNS.has(key));
   if (invalid.length > 0) throw new Error(`Invalid task field(s): ${invalid.join(", ")}`);
@@ -553,6 +583,18 @@ export class Records {
 
   // --- events -------------------------------------------------------------
 
+  /**
+   * A person asked for a review of this task and no review has run since.
+   * This is how manual review stays available under an off or risk trigger.
+   */
+  hasOpenManualReviewRequest(taskId: string): boolean {
+    const events = this.store.all(
+      "SELECT kind FROM events WHERE task_id = ? AND kind IN ('review.requested','review.result') ORDER BY rowid DESC LIMIT 1",
+      taskId,
+    );
+    return events[0]?.kind === "review.requested";
+  }
+
   recordEvent(input: EventInput): string {
     const id = ids.event();
     this.store.run(
@@ -585,15 +627,14 @@ export class Records {
     goal?: string;
     checkCommands?: GateSpec[];
     approvalPolicy?: ProjectApprovalPolicy;
-    reviewPolicy?: ReviewPolicy;
+    reviewPolicy?: Partial<ReviewPolicy>;
     routingOverrides?: RoutingOverrides;
     promptProfile?: PromptProfile;
     controllerSettings?: ProjectControllerSettings;
     routingProfile?: string;
   }): Project {
     const requestedReviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
-    if (!REVIEW_MODES.includes(requestedReviewPolicy.mode)) throw new Error(`Invalid review mode: ${requestedReviewPolicy.mode}`);
-    if (requestedReviewPolicy.skipTaskClasses.some((taskClass) => !TASK_CLASSES.includes(taskClass))) throw new Error("Review policy contains an unknown task class");
+    assertReviewPolicyInput(requestedReviewPolicy);
     const reviewPolicy = normalizeReviewPolicy(requestedReviewPolicy);
     const normalizationNotes = reviewPolicyNormalizationNotes(requestedReviewPolicy, reviewPolicy);
     const id = ids.project();
@@ -742,13 +783,29 @@ export class Records {
     return configVersion;
   }
 
-  setProjectReviewPolicy(id: string, requested: ReviewPolicy): string {
-    if (!REVIEW_MODES.includes(requested.mode)) throw new Error(`Invalid review mode: ${requested.mode}`);
-    const invalid = requested.skipTaskClasses.filter((taskClass) => !TASK_CLASSES.includes(taskClass));
-    if (invalid.length > 0) throw new Error(`Unknown review task classes: ${invalid.join(", ")}`);
+  /**
+   * Review policy is a user decision: it is versioned, logged, and a change
+   * that weakens review has to be acknowledged explicitly rather than applied
+   * because something else in the configuration moved.
+   */
+  setProjectReviewPolicy(id: string, requested: Partial<ReviewPolicy>, options: {
+    reason?: string;
+    acknowledgeWeakening?: boolean;
+    changedBy?: string;
+  } = {}): string {
+    assertReviewPolicyInput(requested);
+    const current = this.getProject(id);
+    if (!current) throw new Error(`Unknown project ${id}`);
     const policy = normalizeReviewPolicy(requested);
     const notes = reviewPolicyNormalizationNotes(requested, policy);
-    const parentId = this.getProject(id)?.configVersion ?? null;
+    const weakened = weakensReview(current.reviewPolicy, policy);
+    if (weakened.length > 0 && !options.acknowledgeWeakening) {
+      throw new Error(
+        `Refusing to weaken review for ${current.name} without an explicit decision: ${weakened.join("; ")}. ` +
+        "Re-run with an acknowledged weakening and a reason.",
+      );
+    }
+    const parentId = current.configVersion;
     const configVersion = ids.config();
     this.store.tx(() => {
       this.store.run(
@@ -757,9 +814,27 @@ export class Records {
       );
       this.invalidateProjectApprovals(id, "Review policy changed.");
       this.recordCurrentProjectConfig(id, configVersion, "review-policy-change", parentId);
-      this.recordEvent({ kind: "project.review_policy_updated", projectId: id, data: { configVersion, policy, notes } });
+      this.recordEvent({
+        kind: "project.review_policy_updated",
+        projectId: id,
+        data: {
+          configVersion, policy, notes, weakened,
+          from: describeReviewPolicy(current.reviewPolicy),
+          to: describeReviewPolicy(policy),
+          reason: options.reason ?? null,
+          changedBy: options.changedBy ?? "local-cli",
+        },
+      });
     });
     return configVersion;
+  }
+
+  setProjectReviewPreset(id: string, preset: Exclude<ReviewPreset, "custom">, options: {
+    reason?: string;
+    acknowledgeWeakening?: boolean;
+    changedBy?: string;
+  } = {}): string {
+    return this.setProjectReviewPolicy(id, reviewPreset(preset), options);
   }
 
   // --- requirements -------------------------------------------------------
@@ -1195,6 +1270,27 @@ export class Records {
   // --- approvals ----------------------------------------------------------
 
   /**
+   * Everything an accepted review depended on. Acceptance may be reused only
+   * while this value is unchanged: a new requirement, a policy change, a
+   * configuration change, or a moved dependency all invalidate it.
+   */
+  reviewContextFingerprint(taskId: string): string {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Unknown task ${taskId}`);
+    const project = this.getProject(task.projectId);
+    if (!project) throw new Error(`Unknown project ${task.projectId}`);
+    const payload = {
+      configVersion: project.configVersion,
+      reviewPolicy: normalizeReviewPolicy(project.reviewPolicy),
+      checkCommands: project.checkCommands.map((spec) => [spec.name, spec.command.join(" "), spec.required]),
+      requirements: this.listRequirements(project.id).map((requirement) => [requirement.id, requirement.text, requirement.mandatory]),
+      dependencies: this.dependenciesOf(taskId).map((id) => [id, this.getTask(id)?.resultRevision ?? null]),
+      acceptanceCriteria: task.acceptanceCriteria,
+    };
+    return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+  }
+
+  /**
    * Whether this revision has configured quality evidence, and whether an
    * explicit waiver stands in for it. "Not configured" is reported as its own
    * state so readiness can never be inferred from an empty gate list.
@@ -1256,15 +1352,52 @@ export class Records {
     } else if (missingGates.length > 0 || failedGates.length > 0) {
       throw new Error(`Cannot prepare ${input.action}: required quality gates are missing or failing for ${task.resultRevision}`);
     } else if (coverage.coverage === "not_configured" && coverage.waiver === null) {
-      throw new Error(
-        `Cannot prepare ${input.action}: this project has no configured required quality checks, so ${task.resultRevision} ` +
-        `has no quality evidence. Register checks, or record an explicit waiver approval for ${coverageWaiverTarget}.`,
-      );
+      // Experiments may proceed without configured checks, but only visibly.
+      if (project.reviewPolicy.qualityExpectation !== "advisory") {
+        throw new Error(
+          `Cannot prepare ${input.action}: this project has no configured required quality checks, so ${task.resultRevision} ` +
+          `has no quality evidence. Register checks, or record an explicit waiver approval for ${coverageWaiverTarget}.`,
+        );
+      }
+      this.recordEvent({
+        kind: "quality.coverage_disclosed",
+        projectId: project.id,
+        taskId: task.id,
+        data: {
+          action: input.action,
+          revision: task.resultRevision,
+          preset: project.reviewPolicy.preset,
+          note: "Experiment preset: accepted with no configured quality checks. This is not a production-readiness claim.",
+        },
+      });
     }
-    const reviewRequired = input.action !== "waive_required_gate" && reviewRequiredFor(project.reviewPolicy, task);
-    const approvedReview = this.reviewsForTask(task.id).some((review) => review.revision === task.resultRevision && review.verdict === "approved");
+    if (input.action !== "waive_required_gate" && project.reviewPolicy.qualityExpectation === "acceptance_and_gates") {
+      const mandatory = this.listRequirements(project.id).filter((requirement) => requirement.mandatory);
+      if (mandatory.length === 0) {
+        throw new Error(
+          `Cannot prepare ${input.action}: the ${project.reviewPolicy.preset} preset expects acceptance evidence, but this project ` +
+          "records no mandatory requirements to accept against.",
+        );
+      }
+    }
+    const decision = evaluateReviewPolicy(project.reviewPolicy, {
+      subject: task,
+      changedFiles: this.changedFilesForTask(task.id),
+    });
+    const reviews = this.reviewsForTask(task.id);
+    // A review that actually ran is authoritative even if the policy would not
+    // have demanded one: a recorded request_changes cannot be approved past.
+    const reviewRequired = input.action !== "waive_required_gate" && (decision.review || reviews.length > 0);
+    const approvedReview = reviews.findLast((review) => review.revision === task.resultRevision && review.verdict === "approved") ?? null;
     if (reviewRequired && !approvedReview) {
       throw new Error(`Cannot prepare ${input.action}: independent review has not approved ${task.resultRevision}`);
+    }
+    const fingerprint = this.reviewContextFingerprint(task.id);
+    if (approvedReview?.contextFingerprint && approvedReview.contextFingerprint !== fingerprint) {
+      throw new Error(
+        `Cannot prepare ${input.action}: the accepted review of ${task.resultRevision} was made against different requirements, ` +
+        "policy, configuration, or dependency revisions. A fresh review is required before acceptance can be reused.",
+      );
     }
     const policy = evaluate({ action: input.action, policy: project.approvalPolicy, inScope: task.inScopeActions.includes(input.action) });
     if (!policy.requiresApproval) return { required: false, policyReason: policy.reason, approval: null };
@@ -1276,7 +1409,9 @@ export class Records {
       evidence: {
         gates,
         qualityCoverage: { ...coverage, waiver: coverage.waiver?.id ?? null },
-        review: this.reviewsForTask(task.id).findLast((review) => review.revision === task.resultRevision) ?? null,
+        reviewPolicy: { resolved: describeReviewPolicy(project.reviewPolicy), decision },
+        reviewContextFingerprint: fingerprint,
+        review: reviews.findLast((review) => review.revision === task.resultRevision) ?? null,
       },
     });
     return { required: true, policyReason: policy.reason, approval };
@@ -1875,6 +2010,8 @@ export class Records {
     advisoryFindings?: string[];
     requirementsChecked: string[];
     evidencePath?: string | null;
+    policyVersion?: string | null;
+    contextFingerprint?: string | null;
   }): ReviewResult {
     const id = ids.review();
     const classified = classifyFindings(input.findings);
@@ -1883,11 +2020,15 @@ export class Records {
     this.store.tx(() => {
       this.store.run(
         `INSERT INTO review_results(id, task_id, attempt_id, revision, verdict, summary, findings,
-           blocking_findings, advisory_findings, requirements_checked, evidence_path, created_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+           blocking_findings, advisory_findings, requirements_checked, evidence_path,
+           policy_version, context_fingerprint, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id, input.taskId, input.attemptId, input.revision, input.verdict, input.summary,
         toJson(classified.all), toJson(blocking), toJson(advisory),
-        toJson(input.requirementsChecked), input.evidencePath ?? null, nowIso(),
+        toJson(input.requirementsChecked), input.evidencePath ?? null,
+        input.policyVersion ?? null,
+        input.contextFingerprint ?? this.reviewContextFingerprint(input.taskId),
+        nowIso(),
       );
       const task = this.getTask(input.taskId);
       this.recordEvent({
