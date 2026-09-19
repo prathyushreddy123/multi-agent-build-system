@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS attempts (
   usage_json      TEXT,
   output_path     TEXT,
   packet_id       TEXT,
+  prompt_version  TEXT,
+  skill_versions  TEXT NOT NULL DEFAULT '[]',
   started_at      TEXT NOT NULL,
   heartbeat_at    TEXT,
   ended_at        TEXT
@@ -552,6 +554,9 @@ CREATE TABLE IF NOT EXISTS bootstrap_runs (
   target_path TEXT NOT NULL,
   state       TEXT NOT NULL DEFAULT 'pending',  -- pending | running | failed | completed
   profile     TEXT,
+  profile_resolution TEXT,
+  environment_plan TEXT NOT NULL DEFAULT '[]',
+  artifacts   TEXT NOT NULL DEFAULT '[]',
   steps       TEXT NOT NULL DEFAULT '[]',
   project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
   plan_id     TEXT,

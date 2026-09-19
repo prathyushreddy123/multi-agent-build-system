@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
 import { Controller } from "./controller/controller.ts";
 import {
   analyzeProject,
@@ -43,6 +44,7 @@ import {
   type ReviewPreset,
 } from "./review/policy.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
+import { resolveApplicationProfiles } from "./profiles/index.ts";
 import {
   completeExperiment,
   createExperiment,
@@ -122,6 +124,9 @@ Commands:
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
+  brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript] [--package-manager=...]
+  bootstrap resume <id>                         Resume without duplicate projects or destructive cleanup
+  profile inspect <repo>                        Show components, checks, setup, and artifacts
   product show <brief>                          Brief, pending decisions, work, outputs, next actions
   plan validate <file>
   plan apply <project> <file>
@@ -366,6 +371,20 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(records.retryTask(id, version), null, 2));
       return;
     }
+    if (area === "bootstrap" && action === "resume") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      if (!id) throw new Error("Usage: mabs bootstrap resume <id>");
+      console.log(JSON.stringify(resumeBootstrap(records, id, textOption(args, "by", "local-cli")), null, 2));
+      return;
+    }
+    if (area === "profile" && action === "inspect") {
+      const args = parseArgs(rest);
+      const repo = args.positionals[0];
+      if (!repo) throw new Error("Usage: mabs profile inspect <repo>");
+      console.log(JSON.stringify(resolveApplicationProfiles(resolve(repo)), null, 2));
+      return;
+    }
     if (area === "brief" || (area === "product" && action === "show")) {
       const args = parseArgs(rest);
       const payload = (() => {
@@ -458,6 +477,24 @@ async function main(): Promise<void> {
         if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
         console.log(JSON.stringify(submitAcceptedPlan(records, {
           brief: value, projectId: project?.id, actor,
+        }), null, 2));
+        return;
+      }
+      if (action === "bootstrap") {
+        const [value, targetPath] = args.positionals;
+        const brief = value ? resolveBrief(records, value) : null;
+        if (!brief || !targetPath) {
+          throw new Error("Usage: mabs brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript] [--package-manager=...]");
+        }
+        console.log(JSON.stringify(bootstrapProject(records, {
+          briefId: brief.id,
+          targetPath,
+          profile: textOption(args, "profile", "auto") as Parameters<typeof bootstrapProject>[1]["profile"],
+          packageManager: textOption(args, "package-manager") as Parameters<typeof bootstrapProject>[1]["packageManager"],
+          language: textOption(args, "language"),
+          runtime: textOption(args, "runtime"),
+          projectName: textOption(args, "name"),
+          actor,
         }), null, 2));
         return;
       }

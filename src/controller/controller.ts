@@ -13,6 +13,7 @@ import { artifactDir } from "../core/paths.ts";
 import { runGates } from "../gates/runner.ts";
 import { classifyFindings, describeReviewPolicy, evaluateReviewPolicy } from "../review/policy.ts";
 import type { ReviewDecision } from "../review/policy.ts";
+import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, Project, Records, Task } from "../store/records.ts";
@@ -1086,6 +1087,8 @@ export class Controller {
       baseRevision: kind === "review" ? task.resultRevision : task.baseRevision,
       packetId: packet.id,
       outputPath: completionPath,
+      promptVersion: WORKER_PROMPT_VERSION,
+      skillVersions: guidanceForAttempt(task, kind),
     });
     this.records.updateTaskFields(task.id, { claimed_by: launchId, claimed_at: new Date().toISOString() });
     this.records.recordRouting({

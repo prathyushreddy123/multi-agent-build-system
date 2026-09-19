@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "12";
+export const SCHEMA_VERSION = "13";
 
 export type Row = Record<string, unknown>;
 
@@ -56,6 +56,12 @@ export class Store {
     ensureColumn("tasks", "required_tools", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("tasks", "allowed_scope", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("tasks", "execution_reason", "TEXT");
+    // v13: reusable guidance provenance and resumable bootstrap profile evidence.
+    ensureColumn("attempts", "prompt_version", "TEXT");
+    ensureColumn("attempts", "skill_versions", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("bootstrap_runs", "profile_resolution", "TEXT");
+    ensureColumn("bootstrap_runs", "environment_plan", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("bootstrap_runs", "artifacts", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("context_packets", "config_version", "TEXT");
     ensureColumn("context_packets", "provider", "TEXT");
     ensureColumn("context_packets", "checkpoint_id", "TEXT");

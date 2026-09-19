@@ -7,6 +7,8 @@ metadata:
 
 # MABS product discovery
 
+Read [the shared MABS boundaries](../_shared/MABS_BOUNDARIES.md) first.
+
 Use MABS intake tools for durable decisions; do not substitute chat history or hand-written plan JSON for the records.
 
 ## Recognize the boundary

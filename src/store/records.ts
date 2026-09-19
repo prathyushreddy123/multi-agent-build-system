@@ -123,6 +123,8 @@ export interface Attempt {
   usage: Record<string, unknown> | null;
   outputPath: string | null;
   packetId: string | null;
+  promptVersion: string | null;
+  skillVersions: string[];
   startedAt: string;
   heartbeatAt: string | null;
   endedAt: string | null;
@@ -344,6 +346,8 @@ function toAttempt(row: Row): Attempt {
     usage: fromJson<Record<string, unknown> | null>(row.usage_json, null),
     outputPath: (row.output_path as string) ?? null,
     packetId: (row.packet_id as string) ?? null,
+    promptVersion: (row.prompt_version as string) ?? null,
+    skillVersions: fromJson<string[]>(row.skill_versions, []),
     startedAt: row.started_at as string,
     heartbeatAt: (row.heartbeat_at as string) ?? null,
     endedAt: (row.ended_at as string) ?? null,
@@ -1099,6 +1103,8 @@ export class Records {
     baseRevision?: string | null;
     packetId?: string | null;
     outputPath?: string | null;
+    promptVersion?: string | null;
+    skillVersions?: string[];
   }): Attempt {
     const id = input.id ?? ids.attempt();
     const at = nowIso();
@@ -1107,8 +1113,8 @@ export class Records {
       const attemptNumber = Number(previous?.n ?? 0) + 1;
       this.store.run(
         `INSERT INTO attempts(id, task_id, launch_id, attempt_number, kind, adapter, model, effort, auth_mode,
-           state, worktree_path, base_revision, packet_id, output_path, started_at, heartbeat_at)
-         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?)`,
+           state, worktree_path, base_revision, packet_id, output_path, prompt_version, skill_versions, started_at, heartbeat_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?)`,
         id,
         input.taskId,
         input.launchId,
@@ -1122,6 +1128,8 @@ export class Records {
         input.baseRevision ?? null,
         input.packetId ?? null,
         input.outputPath ?? null,
+        input.promptVersion ?? null,
+        toJson(input.skillVersions ?? []),
         at,
         at,
       );
@@ -1129,7 +1137,10 @@ export class Records {
         kind: "attempt.started",
         taskId: input.taskId,
         attemptId: id,
-        data: { adapter: input.adapter, model: input.model ?? null, kind: input.kind, launchId: input.launchId },
+        data: {
+          adapter: input.adapter, model: input.model ?? null, kind: input.kind, launchId: input.launchId,
+          promptVersion: input.promptVersion ?? null, skillVersions: input.skillVersions ?? [],
+        },
       });
       return this.getAttempt(id) as Attempt;
     });

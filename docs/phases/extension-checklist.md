@@ -71,9 +71,15 @@ the safe bootstrap service in E4 rather than exposed here as a nonfunctional stu
 
 ## E4 — Bootstrap, language profiles, reusable guidance
 
-- [ ] Resumable bootstrap with recorded steps and existing-directory refusal.
-- [ ] Python and JS/TS profiles with detection, environment, checks, artifacts, composition.
-- [ ] Post-scaffold check rediscovery; versioned skills/prompts.
+- [x] Accepted-path bootstrap records nine resumable steps and refuses unrelated non-empty directories.
+- [x] Resume preserves files and reuses project/task linkage without destructive cleanup or duplicates.
+- [x] Python and JS/TS profiles cover detection, isolated environment instructions, checks, artifacts, and mixed-component composition.
+- [x] Post-scaffold check rediscovery is shared with project onboarding; missing tooling remains an explicit setup requirement.
+- [x] Versioned product, automation, Python, JS/TS, and risk-review skills load on demand; shared boundaries are stored once.
+- [x] Role prompts/schemas are separate from packet assembly; attempts record prompt and selected guidance versions.
+- [x] Schema 12 -> 13 migration, installed Pi load check, and all E4 scenarios pass.
+
+Evidence: `docs/phases/extension-e4-summary.md`. Full gate: 72 tests, typecheck clean.
 
 ## E5 — AI engineering study assistant pilot
 

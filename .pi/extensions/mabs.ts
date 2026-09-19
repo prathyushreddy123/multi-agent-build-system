@@ -74,6 +74,11 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => ctx.ui.notify(await run(["brief", ...words(args)]), "info"),
   });
 
+  pi.registerCommand("mabs-bootstrap", {
+    description: "Bootstrap an accepted brief safely: /mabs-bootstrap <brief> <target> [--profile=python]",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["brief", "bootstrap", ...words(args)]), "info"),
+  });
+
   pi.registerCommand("mabs-status", {
     description: "Show MABS projects, queue, approvals, and controller health",
     handler: async (_args, ctx) => ctx.ui.notify(await run(["status"]), "info"),
@@ -367,6 +372,39 @@ export default function mabsExtension(pi: ExtensionAPI) {
         `--fingerprint=${params.fingerprint}`,
         `--by=${params.acceptedBy}`,
         ...(params.note ? [`--note=${params.note}`] : []),
+      ], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  pi.registerTool({
+    name: "mabs_bootstrap_project",
+    label: "Bootstrap MABS Project",
+    description: "Safely scaffold an accepted product in a user-selected local directory. Refuses unrelated non-empty directories, records every step, and resumes by bootstrap ID without duplicate projects.",
+    promptSnippet: "Bootstrap an accepted product into a user-selected local directory",
+    promptGuidelines: [
+      "Use mabs_bootstrap_project only after exact plan acceptance and after the user selects the target directory.",
+      "Never use mabs_bootstrap_project to overwrite a non-empty unrelated directory or to infer a release/deployment destination.",
+      "If mabs_bootstrap_project reports missing prerequisites, show the recorded setup commands instead of claiming quality checks passed.",
+    ],
+    parameters: Type.Object({
+      brief: Type.String(),
+      targetPath: Type.String({ description: "Local product directory explicitly selected by the user" }),
+      profile: Type.Optional(Type.String({ description: "auto, python, or javascript-typescript" })),
+      packageManager: Type.Optional(Type.String({ description: "python, uv, poetry, pipenv, npm, pnpm, yarn, or bun" })),
+      language: Type.Optional(Type.String()),
+      runtime: Type.Optional(Type.String()),
+      projectName: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const output = await run([
+        "brief", "bootstrap", params.brief, params.targetPath,
+        ...(params.profile ? [`--profile=${params.profile}`] : []),
+        ...(params.packageManager ? [`--package-manager=${params.packageManager}`] : []),
+        ...(params.language ? [`--language=${params.language}`] : []),
+        ...(params.runtime ? [`--runtime=${params.runtime}`] : []),
+        ...(params.projectName ? [`--name=${params.projectName}`] : []),
+        "--by=pi-conversation",
       ], signal);
       return { content: [{ type: "text", text: output }], details: { output } };
     },

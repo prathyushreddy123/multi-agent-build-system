@@ -1,5 +1,6 @@
 import type { ExecutionPlan } from "../domain/plan.ts";
 import type { ReviewPreset } from "../review/policy.ts";
+import type { ArtifactPlan, EnvironmentPlan, ProfileResolution } from "../profiles/types.ts";
 
 /**
  * Product intake lifecycle. Deliberately separate from task execution states:
@@ -139,6 +140,9 @@ export interface BootstrapRun {
   targetPath: string;
   state: "pending" | "running" | "failed" | "completed";
   profile: string | null;
+  profileResolution: ProfileResolution | null;
+  environmentPlan: EnvironmentPlan[];
+  artifacts: ArtifactPlan[];
   steps: BootstrapStep[];
   projectId: string | null;
   planId: string | null;

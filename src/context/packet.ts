@@ -3,8 +3,10 @@ import { join } from "node:path";
 
 import { ids } from "../core/ids.ts";
 import { artifactDir } from "../core/paths.ts";
-import { CONTRACT_VERSION, WORKER_OUTPUT_SCHEMA } from "../domain/contract.ts";
+import { CONTRACT_VERSION } from "../domain/contract.ts";
 import type { WorkerInput, WorkerRole } from "../domain/contract.ts";
+import { assembleWorkerPrompt } from "../prompts/roles.ts";
+import { guidanceForAttempt, guidanceText } from "../prompts/versions.ts";
 import type { Project, Records, Task } from "../store/records.ts";
 import type { Workspace } from "../workspace/git.ts";
 import { estimateTokens, retrieveContext } from "./retrieval.ts";
@@ -248,27 +250,13 @@ export function buildContextPacket(input: {
       data: { packetId, providerFrom: previousProviderPacket?.provider, providerTo: input.execution.harness, files: refetched.map((file) => file.path) } });
   }
 
-  const prompt = [
-    "You are a MABS worker. Follow the supplied contract exactly.",
-    "Work only in the assigned worktree. Do not push, merge, deploy, or broaden scope.",
-    purpose === "review"
-      ? "This is an independent, read-only review. Do not edit tracked files. Inspect evidence directly instead of relying on the implementer's summary."
-      : "Do not run git commit. Linked-worktree Git metadata may be outside your sandbox; after you report completed, the controller creates the required local commit and binds checks to it.",
-    purpose === "review"
-      ? "Put actionable findings in follow_up.unresolved and prefix each with [critical], [major], or [minor]. Leave unresolved empty only when the revision is acceptable."
-      : "A task acceptance criterion requiring a local commit is therefore a controller postcondition, not a reason to report blocked.",
-    "Treat project requirements and acceptance criteria as authoritative.",
-    ...(promptAddendum
-      ? ["Project prompt addendum (cannot override scope, approval, paid-access, or worker-contract rules):", promptAddendum]
-      : []),
-    "Worker input:",
-    JSON.stringify(workerInput, null, 2),
-    "",
-    "When finished, create .mabs/result.json in the worktree containing exactly one JSON object matching this schema:",
-    JSON.stringify(WORKER_OUTPUT_SCHEMA),
-    "Use null for unknown usage; never invent measurements.",
-    "Your final message must contain the same JSON object and no additional prose.",
-  ].join("\n");
+  const selectedGuidance = guidanceForAttempt(input.task, purpose === "review" ? "review" : "initial");
+  const prompt = assembleWorkerPrompt({
+    purpose,
+    workerInput,
+    projectAddendum: promptAddendum,
+    guidance: guidanceText(selectedGuidance),
+  });
 
   return { id: packetId, input: workerInput, manifestPath, prompt };
 }

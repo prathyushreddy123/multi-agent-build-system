@@ -134,6 +134,9 @@ function toBootstrapRun(row: Row): BootstrapRun {
     targetPath: row.target_path as string,
     state: row.state as BootstrapRun["state"],
     profile: (row.profile as string) ?? null,
+    profileResolution: fromJson<BootstrapRun["profileResolution"]>(row.profile_resolution, null),
+    environmentPlan: fromJson<BootstrapRun["environmentPlan"]>(row.environment_plan, []),
+    artifacts: fromJson<BootstrapRun["artifacts"]>(row.artifacts, []),
     steps: fromJson<BootstrapStep[]>(row.steps, []),
     projectId: (row.project_id as string) ?? null,
     planId: (row.plan_id as string) ?? null,
@@ -619,17 +622,19 @@ export function resumableBootstrapRun(records: Records, briefId: string, targetP
 }
 
 export function updateBootstrapRun(records: Records, id: string, patch: Partial<Pick<BootstrapRun,
-  "state" | "profile" | "steps" | "projectId" | "planId" | "error">>): BootstrapRun {
+  "state" | "profile" | "profileResolution" | "environmentPlan" | "artifacts" | "steps" | "projectId" | "planId" | "error">>): BootstrapRun {
   const assignments: string[] = [];
   const values: unknown[] = [];
   const columns: Record<string, string> = {
-    state: "state", profile: "profile", steps: "steps", projectId: "project_id", planId: "plan_id", error: "error",
+    state: "state", profile: "profile", profileResolution: "profile_resolution",
+    environmentPlan: "environment_plan", artifacts: "artifacts", steps: "steps",
+    projectId: "project_id", planId: "plan_id", error: "error",
   };
   for (const [field, column] of Object.entries(columns)) {
     const value = (patch as Record<string, unknown>)[field];
     if (value === undefined) continue;
     assignments.push(`${column} = ?`);
-    values.push(field === "steps" ? toJson(value) : value);
+    values.push(["steps", "profileResolution", "environmentPlan", "artifacts"].includes(field) ? toJson(value) : value);
   }
   if (assignments.length === 0) return getBootstrapRun(records, id) as BootstrapRun;
   records.store.run(
