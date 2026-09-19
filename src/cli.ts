@@ -22,6 +22,16 @@ import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
 import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
 import {
+  acceptPlan,
+  answerClarification,
+  askClarifications,
+  briefDetail,
+  productSummary,
+  proposePlan,
+  submitAcceptedPlan,
+} from "./intake/service.ts";
+import { createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
+import {
   DEFAULT_SKIP_TASK_CLASSES,
   REVIEW_MODES,
   REVIEW_PRESETS,
@@ -104,6 +114,15 @@ Commands:
   task show <id>
   task retry <id> --version=<recordVersion>
   task cancel <id> --version=<recordVersion>
+  brief create --payload='{"title":...}'        Start a product brief before any repository exists
+  brief list | brief show <brief>
+  brief update <brief> --version=N --summary=... --payload='{...}'
+  brief ask <brief> --payload='{"questions":[...]}'
+  brief answer <clarification> --answer=... | --assumption=...
+  brief propose <brief> --payload='{"summary":...,"plan":{...}}'
+  brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
+  brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
+  product show <brief>                          Brief, pending decisions, work, outputs, next actions
   plan validate <file>
   plan apply <project> <file>
   plan list [--project=id] | plan show <id>
@@ -346,6 +365,103 @@ async function main(): Promise<void> {
       }
       console.log(JSON.stringify(records.retryTask(id, version), null, 2));
       return;
+    }
+    if (area === "brief" || (area === "product" && action === "show")) {
+      const args = parseArgs(rest);
+      const payload = (() => {
+        const raw = textOption(args, "payload");
+        if (!raw) return {} as Record<string, unknown>;
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("--payload must be a JSON object");
+        return parsed as Record<string, unknown>;
+      })();
+      const actor = textOption(args, "by", "local-cli") as string;
+
+      if (area === "product") {
+        const value = args.positionals[0];
+        if (!value) throw new Error("Usage: mabs product show <brief>");
+        console.log(JSON.stringify(productSummary(records, value), null, 2));
+        return;
+      }
+      if (action === "create") {
+        console.log(JSON.stringify(createBrief(records, {
+          ...(payload as Record<string, never>), createdBy: actor,
+        } as Parameters<typeof createBrief>[1]), null, 2));
+        return;
+      }
+      if (action === "list") {
+        console.log(JSON.stringify(listBriefs(records), null, 2));
+        return;
+      }
+      if (action === "show") {
+        const value = args.positionals[0];
+        if (!value) throw new Error("Usage: mabs brief show <brief>");
+        console.log(JSON.stringify(briefDetail(records, value), null, 2));
+        return;
+      }
+      if (action === "update") {
+        const value = args.positionals[0];
+        const expectedVersion = Number(textOption(args, "version"));
+        const summary = textOption(args, "summary");
+        const brief = value ? resolveBrief(records, value) : null;
+        if (!brief || !summary || !Number.isSafeInteger(expectedVersion)) {
+          throw new Error("Usage: mabs brief update <brief> --version=N --summary=... --payload='{...}'");
+        }
+        console.log(JSON.stringify(updateBrief(records, {
+          briefId: brief.id, expectedVersion, summary, actor, patch: payload as never,
+        }), null, 2));
+        return;
+      }
+      if (action === "ask") {
+        const value = args.positionals[0];
+        if (!value) throw new Error("Usage: mabs brief ask <brief> --payload='{\"questions\":[...]}'");
+        console.log(JSON.stringify(askClarifications(records, {
+          brief: value, questions: (payload.questions ?? []) as never, actor,
+        }), null, 2));
+        return;
+      }
+      if (action === "answer") {
+        const id = args.positionals[0];
+        if (!id) throw new Error("Usage: mabs brief answer <clarification> --answer=... | --assumption=...");
+        console.log(JSON.stringify(answerClarification(records, {
+          id, answer: textOption(args, "answer"), assumption: textOption(args, "assumption"), actor,
+        }), null, 2));
+        return;
+      }
+      if (action === "propose") {
+        const value = args.positionals[0];
+        if (!value) throw new Error("Usage: mabs brief propose <brief> --payload='{...}'");
+        const result = proposePlan(records, {
+          brief: value, actor, ...(payload as Record<string, never>),
+        } as Parameters<typeof proposePlan>[1]);
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.valid) process.exitCode = 1;
+        return;
+      }
+      if (action === "accept") {
+        const [value, proposalId] = args.positionals;
+        const fingerprint = textOption(args, "fingerprint");
+        const acceptedBy = textOption(args, "by");
+        if (!value || !proposalId || !fingerprint || !acceptedBy) {
+          throw new Error("Usage: mabs brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]");
+        }
+        console.log(JSON.stringify(acceptPlan(records, {
+          brief: value, proposalId, fingerprint, acceptedBy, note: textOption(args, "note"),
+        }), null, 2));
+        return;
+      }
+      if (action === "submit") {
+        const value = args.positionals[0];
+        if (!value) throw new Error("Usage: mabs brief submit <brief> [--project=id]");
+        const projectValue = textOption(args, "project");
+        const project = projectValue ? resolveProject(records, projectValue) : null;
+        if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
+        console.log(JSON.stringify(submitAcceptedPlan(records, {
+          brief: value, projectId: project?.id, actor,
+        }), null, 2));
+        return;
+      }
+      throw new Error(`Unknown brief command: ${String(action)}. Run mabs help.`);
     }
     if (area === "plan" && action === "list") {
       const args = parseArgs(rest);

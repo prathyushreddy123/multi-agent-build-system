@@ -57,9 +57,17 @@ Schema 11 gains policy/evidence fields additively; a stored v1 policy row reads 
 
 ## E3 — Conversation to an accepted product plan
 
-- [ ] Durable intake records and brief lifecycle.
-- [ ] Pi tools: create/update brief, propose/accept plan, bootstrap, submit plan, get product.
-- [ ] `/mabs-new` entry point plus product-discovery skill; existing commands preserved.
+- [x] Durable, versioned intake records and brief lifecycle before a repository exists.
+- [x] Pi/CLI intake tools: create/update brief, material clarifications, propose/accept plan, submit plan, get product.
+- [x] Exact proposal consent, stale-plan invalidation, preservation of completed work, and idempotent submission.
+- [x] `/mabs-new` entry point plus versioned on-demand product-discovery skill; existing commands preserved.
+- [x] Schema 11 -> 12 migration and automated E3 scenarios pass (64 total tests; typecheck clean).
+- [x] Installed Pi loads the extension commands and product-discovery skill in offline RPC mode without errors.
+- [x] Recorded a bounded provider-backed Pi conversation that created, presented, explicitly accepted, and submitted a validated plan without hand-written JSON.
+
+Evidence: `docs/phases/extension-e3-summary.md` and `docs/phases/evidence/e3-live-pi-transcript.md`.
+`mabs_bootstrap_project` is completed with
+the safe bootstrap service in E4 rather than exposed here as a nonfunctional stub.
 
 ## E4 — Bootstrap, language profiles, reusable guidance
 

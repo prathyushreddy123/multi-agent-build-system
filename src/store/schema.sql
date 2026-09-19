@@ -442,3 +442,122 @@ CREATE TABLE IF NOT EXISTS controller_health (
   stale_heartbeat_workers INTEGER NOT NULL DEFAULT 0,
   state             TEXT NOT NULL DEFAULT 'running'      -- running | stopped | degraded
 );
+
+-- Product intake (schema v12). A brief exists before any repository does, so
+-- these records intentionally do not require a project_id.
+CREATE TABLE IF NOT EXISTS product_briefs (
+  id                       TEXT PRIMARY KEY,
+  title                    TEXT NOT NULL,
+  state                    TEXT NOT NULL DEFAULT 'DRAFT',
+  purpose                  TEXT,
+  audience                 TEXT,
+  objective                TEXT,
+  constraints              TEXT NOT NULL DEFAULT '[]',
+  unknowns                 TEXT NOT NULL DEFAULT '[]',
+  assumptions              TEXT NOT NULL DEFAULT '[]',
+  proposed_stack           TEXT NOT NULL DEFAULT '{}',
+  acceptance_criteria      TEXT NOT NULL DEFAULT '[]',
+  quality_settings         TEXT NOT NULL DEFAULT '{}',
+  operational_preferences  TEXT NOT NULL DEFAULT '{}',
+  target_path              TEXT,
+  project_id               TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  version                  INTEGER NOT NULL DEFAULT 1,
+  created_by               TEXT NOT NULL DEFAULT 'local',
+  created_at               TEXT NOT NULL,
+  updated_at               TEXT NOT NULL
+);
+
+-- Every brief update keeps its predecessor and says where the change came from.
+CREATE TABLE IF NOT EXISTS brief_revisions (
+  brief_id   TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  source     TEXT NOT NULL,
+  summary    TEXT NOT NULL,
+  changed    TEXT NOT NULL DEFAULT '[]',
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (brief_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_events (
+  id       TEXT PRIMARY KEY,
+  brief_id TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  at       TEXT NOT NULL,
+  kind     TEXT NOT NULL,
+  actor    TEXT NOT NULL,
+  body     TEXT NOT NULL DEFAULT '',
+  data     TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS conversation_by_brief ON conversation_events(brief_id, at);
+
+CREATE TABLE IF NOT EXISTS clarification_items (
+  id             TEXT PRIMARY KEY,
+  brief_id       TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  field          TEXT,
+  question       TEXT NOT NULL,
+  why_it_matters TEXT NOT NULL DEFAULT '',
+  state          TEXT NOT NULL DEFAULT 'open',   -- open | answered | assumed | withdrawn
+  answer         TEXT,
+  assumption     TEXT,
+  asked_at       TEXT NOT NULL,
+  resolved_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS clarifications_by_brief ON clarification_items(brief_id, state);
+
+CREATE TABLE IF NOT EXISTS proposal_versions (
+  id            TEXT PRIMARY KEY,
+  brief_id      TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  version       INTEGER NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'draft',   -- draft | presented | accepted | superseded | invalidated
+  summary       TEXT NOT NULL,
+  rationale     TEXT NOT NULL,
+  scope         TEXT NOT NULL DEFAULT '',
+  out_of_scope  TEXT NOT NULL DEFAULT '[]',
+  requirements  TEXT NOT NULL DEFAULT '[]',
+  milestones    TEXT NOT NULL DEFAULT '[]',
+  plan          TEXT NOT NULL,
+  validation    TEXT NOT NULL DEFAULT '{}',
+  fingerprint   TEXT NOT NULL,
+  brief_version INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL,
+  presented_at  TEXT,
+  UNIQUE(brief_id, version)
+);
+
+-- Consent is a recorded user decision bound to one exact proposal version.
+CREATE TABLE IF NOT EXISTS acceptance_bindings (
+  id                   TEXT PRIMARY KEY,
+  brief_id             TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  proposal_id          TEXT NOT NULL REFERENCES proposal_versions(id) ON DELETE CASCADE,
+  proposal_version     INTEGER NOT NULL,
+  proposal_fingerprint TEXT NOT NULL,
+  brief_version        INTEGER NOT NULL,
+  decision             TEXT NOT NULL DEFAULT 'accepted',
+  note                 TEXT,
+  accepted_by          TEXT NOT NULL,
+  state                TEXT NOT NULL DEFAULT 'active',  -- active | invalidated
+  invalidated_reason   TEXT,
+  created_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS acceptance_by_brief ON acceptance_bindings(brief_id, state);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_acceptance_per_brief
+  ON acceptance_bindings(brief_id) WHERE state = 'active';
+
+CREATE TABLE IF NOT EXISTS bootstrap_runs (
+  id          TEXT PRIMARY KEY,
+  brief_id    TEXT NOT NULL REFERENCES product_briefs(id) ON DELETE CASCADE,
+  target_path TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'pending',  -- pending | running | failed | completed
+  profile     TEXT,
+  steps       TEXT NOT NULL DEFAULT '[]',
+  project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  plan_id     TEXT,
+  error       TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS bootstrap_by_brief ON bootstrap_runs(brief_id, created_at);

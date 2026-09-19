@@ -7,7 +7,7 @@ import { mkdirSync } from "node:fs";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "11";
+export const SCHEMA_VERSION = "12";
 
 export type Row = Record<string, unknown>;
 
