@@ -26,6 +26,10 @@ export interface RetrievalResult {
   warnings: string[];
   estimatedTokens: number;
   budgetTokens: number;
+  /** The checkout excerpts were actually read from. */
+  sourceWorkspace: string;
+  /** The revision that checkout was on while it was read. */
+  inspectedRevision: string | null;
 }
 
 const MANIFESTS = new Set([
@@ -74,19 +78,36 @@ function trackedFiles(repoPath: string): string[] {
   return output.split("\0").filter(Boolean).slice(0, 5_000);
 }
 
+/** The revision a checkout is on right now, so a packet can be labeled honestly. */
+export function headRevision(workspacePath: string): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8", maxBuffer: 64_000 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function isText(path: string): boolean {
   const extension = extname(path);
   return TEXT_EXTENSIONS.has(extension) || extension === "";
 }
 
-/** Rules-first retrieval. It never reads untracked files or known credential paths. */
+/**
+ * Rules-first retrieval. It never reads untracked files or known credential
+ * paths, and it reads from exactly one explicitly supplied workspace: the
+ * checkout the worker will operate on, not the project's base clone.
+ */
 export function retrieveContext(input: {
   project: Project;
   task: Task;
+  /** Checkout to read from. Callers pass the task worktree during execution. */
+  sourceWorkspace: string;
   requirementTexts: string[];
   dependencyFiles?: string[];
   budgetTokens?: number;
 }): RetrievalResult {
+  const sourceWorkspace = input.sourceWorkspace;
+  const inspectedRevision = headRevision(sourceWorkspace);
   const budgetTokens = input.budgetTokens ?? input.project.controllerSettings.contextBudgetTokens ?? 12_000;
   const sourceText = [input.task.title, input.task.objective, ...input.task.acceptanceCriteria, ...input.requirementTexts].join("\n");
   const explicit = mentionedPaths(sourceText);
@@ -98,12 +119,12 @@ export function retrieveContext(input: {
   const warnings: string[] = [];
   let tracked: string[];
   try {
-    tracked = trackedFiles(input.project.repoPath);
+    tracked = trackedFiles(sourceWorkspace);
   } catch (error) {
     return {
       files: [], omitted: [],
       warnings: [`Could not enumerate tracked repository files: ${error instanceof Error ? error.message : String(error)}`],
-      estimatedTokens: 0, budgetTokens,
+      estimatedTokens: 0, budgetTokens, sourceWorkspace, inspectedRevision,
     };
   }
 
@@ -116,7 +137,7 @@ export function retrieveContext(input: {
     }
     if (!isText(path)) continue;
     let metadata;
-    try { metadata = statSync(join(input.project.repoPath, path)); } catch { continue; }
+    try { metadata = statSync(join(sourceWorkspace, path)); } catch { continue; }
     if (!metadata.isFile() || metadata.size > 512_000) {
       if (explicit.has(path)) omitted.push({ path, reason: "file is unavailable or exceeds the 512KB retrieval limit" });
       continue;
@@ -136,7 +157,7 @@ export function retrieveContext(input: {
 
     let content: string;
     try {
-      const bytes = readFileSync(join(input.project.repoPath, path));
+      const bytes = readFileSync(join(sourceWorkspace, path));
       if (bytes.includes(0)) continue;
       content = bytes.subarray(0, 64_000).toString("utf8");
     } catch { continue; }
@@ -153,7 +174,7 @@ export function retrieveContext(input: {
     const estimatedTokens = estimateTokens(`${path}\n${reasons.join("; ")}\n${excerpt}`);
     candidates.push({
       path,
-      absolutePath: join(input.task.worktreePath ?? input.project.repoPath, path),
+      absolutePath: join(sourceWorkspace, path),
       reason: reasons.join("; "),
       score,
       sizeBytes: metadata.size,
@@ -190,5 +211,5 @@ export function retrieveContext(input: {
       warnings.push(`Explicitly referenced path was not found among tracked retrievable files: ${path}`);
     }
   }
-  return { files: selected, omitted, warnings, estimatedTokens: used, budgetTokens };
+  return { files: selected, omitted, warnings, estimatedTokens: used, budgetTokens, sourceWorkspace, inspectedRevision };
 }

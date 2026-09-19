@@ -89,11 +89,29 @@ export function buildContextPacket(input: {
   const retrieval = retrieveContext({
     project: input.project,
     task: input.task,
+    sourceWorkspace: input.workspace.path,
     requirementTexts: requirements.map((requirement) => requirement.text),
     dependencyFiles: dependencyTasks.flatMap((task) => input.records.changedFilesForTask(task.id)),
     budgetTokens: Math.max(0, contextBudget - fixedContextEstimate),
   });
   warnings.push(...retrieval.warnings);
+  // A packet must never claim one revision while its excerpts came from
+  // another. Reviews fail closed; implementation packets are relabeled with the
+  // revision actually inspected and record the drift.
+  const inspectedRevision = retrieval.inspectedRevision;
+  const revisionMatches = inspectedRevision !== null && inspectedRevision === input.workspace.baseRevision;
+  if (!revisionMatches) {
+    if (purpose === "review") {
+      throw new Error(
+        `Review packet would misreport its revision: ${input.workspace.path} is at ${inspectedRevision ?? "an unreadable revision"}, ` +
+        `not the revision under review ${input.workspace.baseRevision}.`,
+      );
+    }
+    warnings.push(
+      `Context excerpts were read from ${input.workspace.path} at ${inspectedRevision ?? "an unreadable revision"}, ` +
+      `which differs from the attempt base revision ${input.workspace.baseRevision}.`,
+    );
+  }
   if (fixedContextEstimate > contextBudget) {
     warnings.push("Mandatory requirements and retained checkpoint context exceed the configured context budget; mandatory records were preserved.");
   }
@@ -138,6 +156,7 @@ export function buildContextPacket(input: {
     workspace: {
       worktree_path: input.workspace.path,
       base_revision: input.workspace.baseRevision,
+      head_revision: inspectedRevision,
       branch: input.workspace.branch,
       allowed_scope: input.task.allowedScope.length > 0
         ? input.task.allowedScope.map((scope) => join(input.workspace.path, scope))
@@ -168,6 +187,8 @@ export function buildContextPacket(input: {
       artifacts,
       checkpoint: checkpointContext,
       config_version: input.project.configVersion,
+      source_workspace: retrieval.sourceWorkspace,
+      inspected_revision: inspectedRevision,
       derived_token_estimate: derivedTokenEstimate,
       context_budget_tokens: contextBudget,
       omissions: retrieval.omitted,
@@ -197,6 +218,8 @@ export function buildContextPacket(input: {
     files: retrieval.files.map((file) => file.absolutePath),
     artifacts,
     baseRevision: input.workspace.baseRevision,
+    sourceWorkspace: retrieval.sourceWorkspace,
+    inspectedRevision,
     configVersion: input.project.configVersion,
     provider: input.execution.harness,
     checkpointId: checkpoint?.id ?? null,
@@ -215,6 +238,10 @@ export function buildContextPacket(input: {
   if (retrieval.omitted.some((item) => item.reason.includes("budget"))) {
     input.records.recordEvent({ kind: "context.compressed", projectId: input.project.id, taskId: input.task.id, attemptId: input.attemptId,
       data: { packetId, omitted: retrieval.omitted.length, budgetTokens: contextBudget, estimateKind: "derived" } });
+  }
+  if (!revisionMatches) {
+    input.records.recordEvent({ kind: "context.revision_drift", projectId: input.project.id, taskId: input.task.id, attemptId: input.attemptId,
+      data: { packetId, sourceWorkspace: retrieval.sourceWorkspace, inspectedRevision, attemptBaseRevision: input.workspace.baseRevision } });
   }
   if (refetched && refetched.length > 0) {
     input.records.recordEvent({ kind: "context.refetched", projectId: input.project.id, taskId: input.task.id, attemptId: input.attemptId,

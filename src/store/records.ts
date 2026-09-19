@@ -8,21 +8,24 @@ import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
 import { evaluate } from "../domain/policy.ts";
 import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/policy.ts";
+import {
+  DEFAULT_REVIEW_POLICY,
+  REVIEW_MODES,
+  classifyFindings,
+  normalizeReviewPolicy,
+  reviewPolicyNormalizationNotes,
+  reviewRequiredFor,
+} from "../review/policy.ts";
+import type { ReviewPolicy } from "../review/policy.ts";
+import { QUALITY_COVERAGE_GATE } from "../gates/runner.ts";
 import type { FailureClass } from "../core/failure.ts";
 import { TASK_CLASSES } from "../routing/router.ts";
 import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
 
 export type ProjectStatus = "active" | "paused" | "archived";
 
-export interface ReviewPolicy {
-  mode: "required" | "substantive" | "none";
-  skipTaskClasses: TaskClass[];
-}
-
-export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
-  mode: "substantive",
-  skipTaskClasses: ["mechanical", "planning", "research"],
-};
+export type { ReviewPolicy } from "../review/policy.ts";
+export { DEFAULT_REVIEW_POLICY } from "../review/policy.ts";
 
 export interface GateSpec {
   name: string;
@@ -163,7 +166,12 @@ export interface ReviewResult {
   revision: string;
   verdict: "approved" | "request_changes" | "blocked";
   summary: string;
+  /** Every finding, whatever its severity. Evidence is never discarded. */
   findings: string[];
+  /** The subset that forces another repair cycle under the project's policy. */
+  blockingFindings: string[];
+  /** Retained suggestions that did not block acceptance. */
+  advisoryFindings: string[];
   requirementsChecked: string[];
   evidencePath: string | null;
   createdAt: string;
@@ -360,6 +368,8 @@ function toReview(row: Row): ReviewResult {
     verdict: row.verdict as ReviewResult["verdict"],
     summary: row.summary as string,
     findings: fromJson<string[]>(row.findings, []),
+    blockingFindings: fromJson<string[] | null>(row.blocking_findings, null) ?? fromJson<string[]>(row.findings, []),
+    advisoryFindings: fromJson<string[]>(row.advisory_findings, []),
     requirementsChecked: fromJson<string[]>(row.requirements_checked, []),
     evidencePath: (row.evidence_path as string) ?? null,
     createdAt: row.created_at as string,
@@ -581,9 +591,11 @@ export class Records {
     controllerSettings?: ProjectControllerSettings;
     routingProfile?: string;
   }): Project {
-    const reviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
-    if (!["required", "substantive", "none"].includes(reviewPolicy.mode)) throw new Error(`Invalid review mode: ${reviewPolicy.mode}`);
-    if (reviewPolicy.skipTaskClasses.some((taskClass) => !TASK_CLASSES.includes(taskClass))) throw new Error("Review policy contains an unknown task class");
+    const requestedReviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
+    if (!REVIEW_MODES.includes(requestedReviewPolicy.mode)) throw new Error(`Invalid review mode: ${requestedReviewPolicy.mode}`);
+    if (requestedReviewPolicy.skipTaskClasses.some((taskClass) => !TASK_CLASSES.includes(taskClass))) throw new Error("Review policy contains an unknown task class");
+    const reviewPolicy = normalizeReviewPolicy(requestedReviewPolicy);
+    const normalizationNotes = reviewPolicyNormalizationNotes(requestedReviewPolicy, reviewPolicy);
     const id = ids.project();
     const at = nowIso();
     const configVersion = ids.config();
@@ -625,7 +637,10 @@ export class Records {
          VALUES(?,?,NULL,'project-registration','snapshot',?,1,?)`,
         configVersion, id, toJson(initialConfig), at,
       );
-      this.recordEvent({ kind: "project.registered", projectId: id, data: { name: input.name, repoPath: input.repoPath } });
+      this.recordEvent({ kind: "project.registered", projectId: id, data: { name: input.name, repoPath: input.repoPath, reviewPolicy } });
+      if (normalizationNotes.length > 0) {
+        this.recordEvent({ kind: "project.review_policy_normalized", projectId: id, data: { requested: requestedReviewPolicy, stored: reviewPolicy, notes: normalizationNotes } });
+      }
       return project;
     });
   }
@@ -727,10 +742,12 @@ export class Records {
     return configVersion;
   }
 
-  setProjectReviewPolicy(id: string, policy: ReviewPolicy): string {
-    if (!["required", "substantive", "none"].includes(policy.mode)) throw new Error(`Invalid review mode: ${policy.mode}`);
-    const invalid = policy.skipTaskClasses.filter((taskClass) => !TASK_CLASSES.includes(taskClass));
+  setProjectReviewPolicy(id: string, requested: ReviewPolicy): string {
+    if (!REVIEW_MODES.includes(requested.mode)) throw new Error(`Invalid review mode: ${requested.mode}`);
+    const invalid = requested.skipTaskClasses.filter((taskClass) => !TASK_CLASSES.includes(taskClass));
     if (invalid.length > 0) throw new Error(`Unknown review task classes: ${invalid.join(", ")}`);
+    const policy = normalizeReviewPolicy(requested);
+    const notes = reviewPolicyNormalizationNotes(requested, policy);
     const parentId = this.getProject(id)?.configVersion ?? null;
     const configVersion = ids.config();
     this.store.tx(() => {
@@ -740,7 +757,7 @@ export class Records {
       );
       this.invalidateProjectApprovals(id, "Review policy changed.");
       this.recordCurrentProjectConfig(id, configVersion, "review-policy-change", parentId);
-      this.recordEvent({ kind: "project.review_policy_updated", projectId: id, data: { configVersion, policy } });
+      this.recordEvent({ kind: "project.review_policy_updated", projectId: id, data: { configVersion, policy, notes } });
     });
     return configVersion;
   }
@@ -1177,6 +1194,42 @@ export class Records {
 
   // --- approvals ----------------------------------------------------------
 
+  /**
+   * Whether this revision has configured quality evidence, and whether an
+   * explicit waiver stands in for it. "Not configured" is reported as its own
+   * state so readiness can never be inferred from an empty gate list.
+   */
+  qualityCoverage(taskId: string, revision: string): {
+    coverage: "configured" | "not_configured";
+    status: "passed" | "failed" | "not_configured";
+    requiredConfigured: number;
+    missing: string[];
+    failing: string[];
+    waiver: Approval | null;
+  } {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Unknown task ${taskId}`);
+    const project = this.getProject(task.projectId);
+    if (!project) throw new Error(`Unknown project ${task.projectId}`);
+    const required = project.checkCommands.filter((spec) => spec.required);
+    const gates = this.gatesForRevision(taskId, revision);
+    const missing = required.filter((spec) => !gates.some((gate) => gate.name === spec.name)).map((spec) => spec.name);
+    const failing = gates.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null).map((gate) => gate.name);
+    const waiver = this.listApprovals("approved").find((approval) =>
+      approval.taskId === taskId &&
+      approval.action === "waive_required_gate" &&
+      approval.target === `${QUALITY_COVERAGE_GATE}:${revision}`,
+    ) ?? null;
+    return {
+      coverage: required.length === 0 ? "not_configured" : "configured",
+      status: required.length === 0 ? "not_configured" : missing.length + failing.length === 0 ? "passed" : "failed",
+      requiredConfigured: required.length,
+      missing,
+      failing,
+      waiver,
+    };
+  }
+
   prepareApproval(input: { taskId: string; action: Action; target: string; reason: string }): {
     required: boolean;
     policyReason: string;
@@ -1190,14 +1243,25 @@ export class Records {
     const gates = this.gatesForRevision(task.id, task.resultRevision);
     const missingGates = project.checkCommands.filter((spec) => spec.required && !gates.some((gate) => gate.name === spec.name));
     const failedGates = gates.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null);
+    const coverage = this.qualityCoverage(task.id, task.resultRevision);
+    const coverageWaiverTarget = `${QUALITY_COVERAGE_GATE}:${task.resultRevision}`;
     if (input.action === "waive_required_gate") {
-      if (!failedGates.some((gate) => gate.id === input.target)) {
-        throw new Error(`Cannot prepare gate waiver: ${input.target} is not a failing required gate for ${task.resultRevision}`);
+      const waivesCoverage = input.target === coverageWaiverTarget && coverage.coverage === "not_configured";
+      if (!waivesCoverage && !failedGates.some((gate) => gate.id === input.target)) {
+        throw new Error(
+          `Cannot prepare gate waiver: ${input.target} is neither a failing required gate nor the unconfigured-coverage waiver ` +
+          `${coverageWaiverTarget} for ${task.resultRevision}`,
+        );
       }
     } else if (missingGates.length > 0 || failedGates.length > 0) {
       throw new Error(`Cannot prepare ${input.action}: required quality gates are missing or failing for ${task.resultRevision}`);
+    } else if (coverage.coverage === "not_configured" && coverage.waiver === null) {
+      throw new Error(
+        `Cannot prepare ${input.action}: this project has no configured required quality checks, so ${task.resultRevision} ` +
+        `has no quality evidence. Register checks, or record an explicit waiver approval for ${coverageWaiverTarget}.`,
+      );
     }
-    const reviewRequired = input.action !== "waive_required_gate" && project.reviewPolicy.mode !== "none" && !project.reviewPolicy.skipTaskClasses.includes(task.taskClass);
+    const reviewRequired = input.action !== "waive_required_gate" && reviewRequiredFor(project.reviewPolicy, task);
     const approvedReview = this.reviewsForTask(task.id).some((review) => review.revision === task.resultRevision && review.verdict === "approved");
     if (reviewRequired && !approvedReview) {
       throw new Error(`Cannot prepare ${input.action}: independent review has not approved ${task.resultRevision}`);
@@ -1211,6 +1275,7 @@ export class Records {
       reason: input.reason,
       evidence: {
         gates,
+        qualityCoverage: { ...coverage, waiver: coverage.waiver?.id ?? null },
         review: this.reviewsForTask(task.id).findLast((review) => review.revision === task.resultRevision) ?? null,
       },
     });
@@ -1806,16 +1871,23 @@ export class Records {
     verdict: ReviewResult["verdict"];
     summary: string;
     findings: string[];
+    blockingFindings?: string[];
+    advisoryFindings?: string[];
     requirementsChecked: string[];
     evidencePath?: string | null;
   }): ReviewResult {
     const id = ids.review();
+    const classified = classifyFindings(input.findings);
+    const blocking = input.blockingFindings ?? classified.blocking;
+    const advisory = input.advisoryFindings ?? classified.advisory;
     this.store.tx(() => {
       this.store.run(
         `INSERT INTO review_results(id, task_id, attempt_id, revision, verdict, summary, findings,
-           requirements_checked, evidence_path, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+           blocking_findings, advisory_findings, requirements_checked, evidence_path, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
         id, input.taskId, input.attemptId, input.revision, input.verdict, input.summary,
-        toJson(input.findings), toJson(input.requirementsChecked), input.evidencePath ?? null, nowIso(),
+        toJson(classified.all), toJson(blocking), toJson(advisory),
+        toJson(input.requirementsChecked), input.evidencePath ?? null, nowIso(),
       );
       const task = this.getTask(input.taskId);
       this.recordEvent({
@@ -1823,7 +1895,11 @@ export class Records {
         projectId: task?.projectId,
         taskId: input.taskId,
         attemptId: input.attemptId,
-        data: { reviewId: id, revision: input.revision, verdict: input.verdict, findings: input.findings.length },
+        data: {
+          reviewId: id, revision: input.revision, verdict: input.verdict,
+          findings: classified.all.length, blocking: blocking.length, advisory: advisory.length,
+          severities: classified.counts,
+        },
       });
     });
     return toReview(this.store.get("SELECT * FROM review_results WHERE id = ?", id) as Row);
@@ -2174,6 +2250,8 @@ export class Records {
     files: string[];
     artifacts: string[];
     baseRevision: string | null;
+    sourceWorkspace?: string | null;
+    inspectedRevision?: string | null;
     configVersion?: string | null;
     provider?: string | null;
     checkpointId?: string | null;
@@ -2194,8 +2272,9 @@ export class Records {
     this.store.tx(() => {
       this.store.run(
       `INSERT INTO context_packets(id, task_id, attempt_id, requirement_ids, omitted, files, artifacts,
-         base_revision, config_version, provider, checkpoint_id, token_estimate, budget_tokens, manifest_path, warnings, created_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         base_revision, source_workspace, inspected_revision, config_version, provider, checkpoint_id,
+         token_estimate, budget_tokens, manifest_path, warnings, created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       input.id,
       input.taskId,
       input.attemptId ?? null,
@@ -2204,6 +2283,8 @@ export class Records {
       toJson(input.files),
       toJson(input.artifacts),
       input.baseRevision,
+      input.sourceWorkspace ?? null,
+      input.inspectedRevision ?? null,
       input.configVersion ?? null,
       input.provider ?? null,
       input.checkpointId ?? null,

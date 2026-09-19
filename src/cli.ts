@@ -21,6 +21,7 @@ import type { Action } from "./domain/policy.ts";
 import { applyExecutionPlan, validateExecutionPlan } from "./domain/plan.ts";
 import type { ExecutionPlan } from "./domain/plan.ts";
 import { discoverChecks } from "./gates/discover.ts";
+import { DEFAULT_SKIP_TASK_CLASSES, REVIEW_MODES, normalizeReviewPolicy, type ReviewMode } from "./review/policy.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
 import {
   completeExperiment,
@@ -168,10 +169,10 @@ async function main(): Promise<void> {
         repoPath,
         baseBranch: textOption(args, "base") ?? await baseBranch(repoPath),
         goal: textOption(args, "goal"),
-        reviewPolicy: {
-          mode: (textOption(args, "review", "substantive") as "required" | "substantive" | "none"),
-          skipTaskClasses: ["mechanical", "planning", "research"],
-        },
+        reviewPolicy: normalizeReviewPolicy({
+          mode: textOption(args, "review", "substantive") as ReviewMode,
+          skipTaskClasses: [...DEFAULT_SKIP_TASK_CLASSES],
+        }),
         checkCommands: args.options.has("no-checks") ? [] : discoverChecks(repoPath),
       });
       console.log(JSON.stringify(project, null, 2));
@@ -201,14 +202,12 @@ async function main(): Promise<void> {
     if (area === "project" && action === "review") {
       const [projectValue, mode] = rest;
       const project = projectValue ? resolveProject(records, projectValue) : null;
-      if (!project || !mode || !["required", "substantive", "none"].includes(mode)) {
+      if (!project || !mode || !REVIEW_MODES.includes(mode as ReviewMode)) {
         throw new Error("Usage: mabs project review <id|name> <required|substantive|none>");
       }
-      const configVersion = records.setProjectReviewPolicy(project.id, {
-        mode: mode as "required" | "substantive" | "none",
-        skipTaskClasses: mode === "required" ? [] : ["mechanical", "planning", "research"],
-      });
-      console.log(JSON.stringify({ projectId: project.id, mode, configVersion }, null, 2));
+      const policy = normalizeReviewPolicy({ mode: mode as ReviewMode, skipTaskClasses: [...DEFAULT_SKIP_TASK_CLASSES] });
+      const configVersion = records.setProjectReviewPolicy(project.id, policy);
+      console.log(JSON.stringify({ projectId: project.id, policy, configVersion }, null, 2));
       return;
     }
     if (area === "requirement" && action === "add") {

@@ -190,6 +190,8 @@ CREATE TABLE IF NOT EXISTS context_packets (
   files           TEXT NOT NULL DEFAULT '[]',
   artifacts       TEXT NOT NULL DEFAULT '[]',
   base_revision   TEXT,
+  source_workspace TEXT,
+  inspected_revision TEXT,
   config_version  TEXT,
   provider        TEXT,
   checkpoint_id   TEXT,
@@ -381,6 +383,8 @@ CREATE TABLE IF NOT EXISTS review_results (
   verdict              TEXT NOT NULL, -- approved | request_changes | blocked
   summary              TEXT NOT NULL,
   findings             TEXT NOT NULL DEFAULT '[]',
+  blocking_findings    TEXT,
+  advisory_findings    TEXT NOT NULL DEFAULT '[]',
   requirements_checked TEXT NOT NULL DEFAULT '[]',
   evidence_path        TEXT,
   created_at           TEXT NOT NULL

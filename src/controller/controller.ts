@@ -11,6 +11,7 @@ import { scopesOverlap } from "../domain/plan.ts";
 import type { WorkerOutput } from "../domain/contract.ts";
 import { artifactDir } from "../core/paths.ts";
 import { runGates } from "../gates/runner.ts";
+import { classifyFindings, reviewRequiredFor } from "../review/policy.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, Project, Records, Task } from "../store/records.ts";
@@ -253,9 +254,7 @@ export class Controller {
   }
 
   private shouldReview(task: Task, project: Project): boolean {
-    if (task.role === "reviewer" || project.reviewPolicy.mode === "none") return false;
-    if (project.reviewPolicy.skipTaskClasses.includes(task.taskClass)) return false;
-    return project.reviewPolicy.mode === "required" || project.reviewPolicy.mode === "substantive";
+    return reviewRequiredFor(project.reviewPolicy, task);
   }
 
   private handleOf(attempt: Attempt): AdapterHandle {
@@ -447,16 +446,33 @@ export class Controller {
       specs: project.checkCommands,
     });
     if (gates.passed) {
+      const notConfigured = gates.status === "not_configured";
+      if (notConfigured) {
+        this.records.recordEvent({
+          kind: "quality.not_configured",
+          projectId: project.id,
+          taskId: task.id,
+          attemptId: attempt.id,
+          data: { revision: finalized.revision, note: "No required quality checks are registered for this project." },
+        });
+      }
       this.records.recordCheckpoint({
-        taskId: task.id, attemptId: attempt.id, kind: "checks_passed", summary: "All required checks passed.",
+        taskId: task.id, attemptId: attempt.id,
+        kind: notConfigured ? "quality_not_configured" : "checks_passed",
+        summary: notConfigured
+          ? "No required quality checks are configured; this revision has no quality evidence."
+          : `All ${gates.requiredConfigured} required checks passed.`,
         resultRevision: finalized.revision, changedFiles: finalized.changedFiles,
+        findings: notConfigured
+          ? ["[major] Quality coverage is not configured; register build, lint, typecheck, or test checks before treating this revision as ready."]
+          : [],
         nextAction: this.shouldReview(checking, project) ? "Run independent revision-bound review." : "Complete task.",
         evidence: gates.results.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
       });
       if (this.shouldReview(checking, project)) {
         await this.beginReview(this.records.getTask(task.id) as Task, project, attempt);
       } else {
-        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: "skipped by project policy", gates: gates.results.length });
+        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: "skipped by project policy", gates: gates.results.length, quality: gates.status });
         this.records.completeFeedbackForTask(task.id, done.resultSummary ?? "Response task completed without a summary.");
       }
       return;
@@ -520,13 +536,18 @@ export class Controller {
 
     const required = this.records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
     const missingCoverage = required.filter((requirement) => !output.addressed_requirements.includes(requirement));
-    const findings = [
+    const reported = [
       ...output.follow_up.unresolved,
       ...output.follow_up.decisions_requested.map((decision) => `[major] Decision required: ${decision}`),
       ...missingCoverage.map((requirement) => `[major] Review did not verify mandatory requirement ${requirement}.`),
-    ].map((finding) => /^\[(critical|major|minor)\]/i.test(finding) ? finding : `[major] ${finding}`);
-    if (output.outcome === "failed" && findings.length === 0) findings.push(`[major] ${output.reason || output.summary}`);
-    const verdict = output.outcome === "blocked" ? "blocked" : findings.length > 0 ? "request_changes" : "approved";
+    ];
+    if (output.outcome === "failed" && reported.length === 0) reported.push(`[major] ${output.reason || output.summary}`);
+    // Minor suggestions are retained as advice; only blocking severities send
+    // the task back for repair. An unfinished review is never disguised as
+    // approval: a blocked outcome stays blocked.
+    const classified = classifyFindings(reported);
+    const findings = classified.all;
+    const verdict = output.outcome === "blocked" ? "blocked" : classified.blocking.length > 0 ? "request_changes" : "approved";
     const review = this.records.recordReview({
       taskId: task.id,
       attemptId: attempt.id,
@@ -534,6 +555,8 @@ export class Controller {
       verdict,
       summary: output.summary,
       findings,
+      blockingFindings: classified.blocking,
+      advisoryFindings: classified.advisory,
       requirementsChecked: output.addressed_requirements,
       evidencePath: existsSync(resultArtifact) ? resultArtifact : null,
     });
@@ -541,7 +564,11 @@ export class Controller {
       taskId: task.id, attemptId: attempt.id, kind: `review_${verdict}`, summary: output.summary,
       resultRevision: revision, changedFiles: this.records.changedFilesForTask(task.id), findings,
       unresolved: output.follow_up.decisions_requested,
-      nextAction: verdict === "approved" ? "Complete task." : verdict === "request_changes" ? "Repair review findings and rerun checks." : output.follow_up.next_step,
+      nextAction: verdict === "approved"
+        ? classified.advisory.length > 0
+          ? `Complete task. ${classified.advisory.length} advisory finding(s) recorded without blocking acceptance.`
+          : "Complete task."
+        : verdict === "request_changes" ? "Repair blocking review findings and rerun checks." : output.follow_up.next_step,
       evidence: [review.evidencePath].filter((path): path is string => path !== null),
     });
     this.records.finishAttempt({
@@ -569,7 +596,7 @@ export class Controller {
         claimed_at: null,
         blocked_reason: null,
         failure_class: null,
-      }, { reviewId: this.records.reviewsForTask(task.id).at(-1)?.id, revision });
+      }, { reviewId: this.records.reviewsForTask(task.id).at(-1)?.id, revision, advisoryFindings: classified.advisory });
       this.records.completeFeedbackForTask(task.id, done.resultSummary ?? output.summary);
       return;
     }
@@ -578,7 +605,7 @@ export class Controller {
     if (current.repairsUsed >= current.repairLimit) {
       this.records.transition(task.id, "FAILED", {
         failure_class: "CODE",
-        blocked_reason: `Independent review found changes after the repair limit was exhausted: ${findings.join("; ")}`,
+        blocked_reason: `Independent review found changes after the repair limit was exhausted: ${classified.blocking.join("; ")}`,
         claimed_by: null,
         claimed_at: null,
       });
@@ -590,8 +617,11 @@ export class Controller {
       repairs_used: current.repairsUsed + 1,
       claimed_by: null,
       claimed_at: null,
-    }, { reason: "independent review requested changes", findings });
-    await this.launchAttempt(this.records.getTask(task.id) as Task, project, "repair", findings);
+    }, { reason: "independent review requested changes", findings: classified.blocking, advisory: classified.advisory });
+    await this.launchAttempt(this.records.getTask(task.id) as Task, project, "repair", [
+      ...classified.blocking,
+      ...classified.advisory.map((finding) => `${finding} (advisory: optional, does not block acceptance)`),
+    ]);
   }
 
   private async handleReviewFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {

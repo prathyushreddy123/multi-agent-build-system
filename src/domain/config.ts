@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 
 import { ACTIONS, DEFAULT_POLICY, type ProjectApprovalPolicy } from "./policy.ts";
-import type { GateSpec, Project, ReviewPolicy } from "../store/records.ts";
+import { DEFAULT_REVIEW_POLICY, normalizeReviewPolicy, validateReviewPolicy } from "../review/policy.ts";
+import type { ReviewPolicy } from "../review/policy.ts";
+import type { GateSpec, Project } from "../store/records.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES, type TaskClass } from "../routing/router.ts";
 
 export interface PromptProfile {
@@ -49,7 +51,7 @@ export function normalizeProjectConfig(config: ProjectConfigSnapshot): ProjectCo
     ...config,
     routingOverrides: config.routingOverrides ?? {},
     approvalPolicy: config.approvalPolicy ?? { overrides: {}, standing: [] },
-    reviewPolicy: config.reviewPolicy ?? { mode: "substantive", skipTaskClasses: ["mechanical", "planning", "research"] },
+    reviewPolicy: normalizeReviewPolicy(config.reviewPolicy ?? DEFAULT_REVIEW_POLICY),
     checkCommands: config.checkCommands ?? [],
     promptProfile: { ...DEFAULT_PROMPT_PROFILE, ...(config.promptProfile ?? {}) },
     controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...(config.controllerSettings ?? {}) },
@@ -116,17 +118,7 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
     }
   }
 
-  if (config.reviewPolicy && typeof config.reviewPolicy === "object") {
-    errors.push(...unknownKeys(config.reviewPolicy, ["mode", "skipTaskClasses"], "reviewPolicy"));
-  }
-  if (!config.reviewPolicy || !["required", "substantive", "none"].includes(config.reviewPolicy.mode)) {
-    errors.push("Review policy mode must be required, substantive, or none.");
-  } else if (!Array.isArray(config.reviewPolicy.skipTaskClasses) ||
-      config.reviewPolicy.skipTaskClasses.some((taskClass) => !TASK_CLASSES.includes(taskClass))) {
-    errors.push("Review policy contains an unknown skip task class.");
-  } else if (config.reviewPolicy.mode === "required" && config.reviewPolicy.skipTaskClasses.length > 0) {
-    errors.push("Required review mode cannot skip task classes.");
-  }
+  errors.push(...validateReviewPolicy(config.reviewPolicy));
 
   if (!Array.isArray(config.checkCommands)) errors.push("checkCommands must be an array.");
   else for (const [index, gate] of config.checkCommands.entries()) {

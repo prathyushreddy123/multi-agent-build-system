@@ -10,9 +10,14 @@ test("workbench binds locally, serves controller state, and protects mutations",
   const records = new Records(new Store(":memory:"));
   const project = records.createProject({
     name: "demo", repoPath: "/tmp/demo", reviewPolicy: { mode: "none", skipTaskClasses: [] },
+    checkCommands: [{ name: "test", command: ["true"], required: true }],
   });
   const task = records.createTask({ projectId: project.id, title: "task", objective: "do work" });
   records.updateTaskFields(task.id, { result_revision: "abc" });
+  records.recordGate({
+    taskId: task.id, attemptId: null, name: "test", status: "PASS", required: true, command: "true",
+    toolVersion: null, revision: "abc", evidencePath: null, durationMs: 1, waiverId: null,
+  });
   const approval = records.requestApproval({
     projectId: project.id,
     taskId: task.id,

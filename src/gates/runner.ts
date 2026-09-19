@@ -5,10 +5,19 @@ import { exec } from "../core/exec.ts";
 import { artifactDir } from "../core/paths.ts";
 import type { GateResult, GateSpec, Records, Task } from "../store/records.ts";
 
+/** Unconfigured coverage is a distinct outcome, never an implicit pass. */
+export type QualityCoverage = "configured" | "not_configured";
+export type QualityStatus = "passed" | "failed" | "not_configured";
+
+export const QUALITY_COVERAGE_GATE = "quality-coverage";
+
 export interface GateRunSummary {
   results: GateResult[];
   passed: boolean;
   failedRequired: GateResult[];
+  coverage: QualityCoverage;
+  requiredConfigured: number;
+  status: QualityStatus;
 }
 
 function displayCommand(command: readonly string[]): string {
@@ -80,6 +89,40 @@ export async function runGates(input: {
     }));
   }
 
+  const requiredConfigured = input.specs.filter((spec) => spec.required).length;
+  if (requiredConfigured === 0) {
+    // Record the absence as evidence bound to the revision so "nothing ran"
+    // can never be read later as "everything passed".
+    const evidencePath = join(artifactDir(input.task.id, input.attemptId ?? "controller"), "gate-quality-coverage.log");
+    writeFileSync(
+      evidencePath,
+      `No required quality checks are configured for this project.\n[revision: ${input.revision}]\n` +
+        "This revision has no build, lint, typecheck, or test evidence. It is not a passing quality result.\n",
+      { mode: 0o600 },
+    );
+    results.push(input.records.recordGate({
+      taskId: input.task.id,
+      attemptId: input.attemptId,
+      name: QUALITY_COVERAGE_GATE,
+      status: "SKIPPED",
+      required: false,
+      command: "",
+      toolVersion: null,
+      revision: input.revision,
+      evidencePath,
+      durationMs: 0,
+      waiverId: null,
+    }));
+  }
+
   const failedRequired = results.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null);
-  return { results, passed: failedRequired.length === 0, failedRequired };
+  const passed = failedRequired.length === 0;
+  return {
+    results,
+    passed,
+    failedRequired,
+    coverage: requiredConfigured === 0 ? "not_configured" : "configured",
+    requiredConfigured,
+    status: requiredConfigured === 0 ? "not_configured" : passed ? "passed" : "failed",
+  };
 }

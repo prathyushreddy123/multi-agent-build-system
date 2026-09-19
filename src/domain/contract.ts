@@ -42,6 +42,8 @@ export interface WorkerInput {
   workspace: {
     worktree_path: string;
     base_revision: string;
+    /** Revision this checkout was actually on when the packet was built. */
+    head_revision: string | null;
     branch: string;
     allowed_scope: string[];
     allowed_actions: string[];
@@ -78,6 +80,9 @@ export interface WorkerInput {
       evidence: string[];
     } | null;
     config_version: string;
+    /** Checkout the excerpts below were read from, and its revision. */
+    source_workspace: string;
+    inspected_revision: string | null;
     derived_token_estimate: number;
     context_budget_tokens: number;
     omissions: { path: string; reason: string }[];

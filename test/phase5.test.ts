@@ -62,14 +62,14 @@ test("deterministic retrieval selects scoped and explicitly referenced files, ex
     allowedScope: ["src/billing"],
   });
 
-  const generous = retrieveContext({ project, task, requirementTexts: [], budgetTokens: 8_000 });
+  const generous = retrieveContext({ project, task, sourceWorkspace: repo, requirementTexts: [], budgetTokens: 8_000 });
   assert.ok(generous.files.some((file) => file.path === "src/billing/invoice.ts"));
   assert.ok(generous.files.every((file) => file.path !== ".env"));
   assert.ok(generous.files.find((file) => file.path === "src/billing/invoice.ts")?.reason.includes("explicitly referenced") ||
     generous.files.find((file) => file.path === "src/billing/invoice.ts")?.reason.includes("declared task scope"));
   assert.ok(!generous.files.some((file) => file.path === "src/unrelated/weather.ts"));
 
-  const tight = retrieveContext({ project, task, requirementTexts: [], budgetTokens: 5 });
+  const tight = retrieveContext({ project, task, sourceWorkspace: repo, requirementTexts: [], budgetTokens: 5 });
   assert.equal(tight.files.length <= 1, true);
   assert.ok(tight.estimatedTokens <= 5 + 4);
   if (tight.files.length === 0) {
@@ -156,7 +156,9 @@ test("a real task run produces a non-empty relevant-file manifest, checkpoints, 
 
   const checkpoints = records.checkpointsForTask(task.id);
   assert.ok(checkpoints.some((checkpoint) => checkpoint.kind === "implementation_complete"));
-  assert.ok(checkpoints.some((checkpoint) => checkpoint.kind === "checks_passed" || checkpoint.kind.startsWith("review_")));
+  // This project registers no required checks, so the quality outcome is
+  // recorded as unconfigured coverage rather than as a passing check run.
+  assert.ok(checkpoints.some((checkpoint) => checkpoint.kind === "quality_not_configured"));
   assert.ok(checkpoints.every((checkpoint) => checkpoint.taskId === task.id));
 
   const diagnostics = taskDiagnostics(records, task.id);

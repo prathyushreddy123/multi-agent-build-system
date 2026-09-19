@@ -37,10 +37,14 @@ MABS_STATE_DIR=/tmp/mabs-baseline-state npm test            # 44 pass, 0 fail
 
 ## E1 — Correctness fixes
 
-- [ ] Context packets carry an explicit source workspace and inspected revision.
-- [ ] Review policy normalized and validated at every entry point; required mode cannot inherit skips.
-- [ ] Advisory findings separated from blocking findings.
-- [ ] Unconfigured quality coverage represented explicitly rather than reported as passed.
+- [x] Context packets carry an explicit source workspace and inspected revision.
+- [x] Review policy normalized and validated at every entry point; required mode cannot inherit skips.
+- [x] Advisory findings separated from blocking findings.
+- [x] Unconfigured quality coverage represented explicitly rather than reported as passed.
+
+Evidence: `docs/phases/extension-e1-summary.md`. Each defect reproduced against `50a33e9` first.
+`npm test` 49 pass / 0 fail; `npm run typecheck` clean. Schema 10 -> 11, additive, migration verified
+against a database written by baseline code.
 
 ## E2 — Configurable review without repeated work
 
