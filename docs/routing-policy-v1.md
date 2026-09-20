@@ -1,43 +1,46 @@
-# Routing policy v1
+# How provider routing works
 
-Policy ID: `phase2-routing-v1`  
-Status: **provisional**  
-Implemented in: `src/routing/router.ts`
+[Documentation](index.md) · [Provider recovery](troubleshooting.md#provider-recovery)
 
-The controller applies this map only after filtering for installed subscription adapters, required local tools, persisted provider availability, provider concurrency, and an attempt-boundary exclusion. An explicit `--adapter` is an operator override. No API-key or paid fallback is eligible.
+MABS selects an eligible subscription route for each task. The default policy is **`phase2-routing-v1`**, still marked **provisional** in [`src/routing/router.ts`](../src/routing/router.ts). It is a starting configuration, not a ranking of provider quality.
 
-| Task class | Primary | Fallback | Evidence / status |
-| --- | --- | --- | --- |
-| Mechanical | Deterministic gates | None | Model inference is unnecessary. |
-| Small implementation | Codex, default model, medium effort | Claude Sonnet 5 | Both providers passed Phase 0 bug-fix and feature cells; Codex is the initial default pending more project evidence. |
-| Complex coding | Codex, default model, high effort | Claude Opus 5 | Codex passed the resumed complex cell in 77s. Claude's observed complex run was not accepted and later subscription runs hit capacity limits. |
-| Diagnosis | Codex, default model, high effort | Claude Sonnet 5 | Codex passed the Phase 0 diagnosis cell. Claude's sampled diagnosis was not accepted. |
-| Planning | Claude Opus 5 | Codex, high effort | Provisional; no representative Phase 0 planning cell. |
-| Research | Codex, medium effort | Claude Sonnet 5 | Provisional; no representative Phase 0 research cell. |
-| Review | Claude Sonnet 5 | Codex, high effort | Provisional and intended for separate-context review in Phase 3. |
-| Troubleshooting | Codex, high effort | Claude Opus 5 | Provisional extension of diagnosis evidence. |
-| Curation | Claude Opus 5 | Codex, high effort | Provisional; activation remains approval-gated for Phase 4. |
+## Default routes
 
-## Profile adjustments
+“Default model” means Codex chooses its configured default; MABS does not invent an exact model identity. Claude entries are the model IDs recorded by the existing policy, not a promise that your installed CLI or subscription currently supports them.
 
-- A small implementation is promoted to the complex-coding route when complexity, change risk, or context size is `high`.
-- A deadline under 24 hours raises Codex effort to `high`; it does not bypass capacity, gates, or approval policy.
-- Language and domain are retained in the durable task and routing explanation. This version does not claim a language/domain preference without representative evidence.
-- Required tools must resolve locally before an AI route is eligible.
-- Quota and authentication failures exclude the failed provider at the current attempt boundary. A fallback starts with a fresh context packet and does not consume code-repair budget.
+| Task class | First choice | Fallback |
+| --- | --- | --- |
+| Mechanical | Registered checks; no model | None |
+| Small implementation | Codex default, medium effort | Claude Sonnet 5 |
+| Complex coding | Codex default, high effort | Claude Opus 5 |
+| Diagnosis | Codex default, high effort | Claude Sonnet 5 |
+| Planning | Claude Opus 5 | Codex default, high effort |
+| Research | Codex default, medium effort | Claude Sonnet 5 |
+| Review | Claude Sonnet 5 | Codex default, high effort |
+| Troubleshooting | Codex default, high effort | Claude Opus 5 |
+| Curation | Claude Opus 5 | Codex default, high effort |
 
-## Phase 0 evidence
+## What can change the choice?
 
-Primary evidence remains outside Git:
+- **Eligibility:** an adapter must be installed, required tools must be available, and the provider must not be unavailable or at capacity.
+- **Task profile:** a small implementation with high complexity, risk, or context size uses the complex-coding route. A recorded deadline less than 24 hours away raises Codex effort to high; it does not bypass safety checks.
+- **Operator preference:** `--adapter=codex` or `--adapter=claude` reorders the policy candidates. It does not make an unavailable route usable or disable all fallback.
+- **Project configuration:** the current controller applies an eligible project route override after that selection, so it can supersede the adapter preference. Inspect the recorded routing reason when both are set.
+- **Review:** the controller can prefer a different provider from the implementer, using fresh context. See [review behavior](architecture/task-execution.md#where-review-fits).
+- **Provider failure:** `AUTH` or `QUOTA` can trigger fallback between attempts, with fresh context and no code-repair charge. See the [fallback scenario](architecture/recovery-and-failures.md#provider-fallback-during-implementation).
 
-- `~/.local/state/mabs/baseline/2026-09-18T03-31-48-077Z`
-- `~/.local/state/mabs/baseline/2026-09-18T03-45-13-035Z`
+Language and domain are recorded as context, not used here to claim unmeasured provider expertise. No API-key or paid model API route is eligible.
 
-Observed accepted cells:
+## Inspect the actual decision
 
-- bug fix: Claude 21s, Codex 69s;
-- feature: Claude 33s, Codex 78s;
-- diagnosis: Codex 71s;
-- complex: Codex 77s in the resumed run.
+`node src/cli.ts task show TASK_ID` includes routing records and reasons. `node src/cli.ts provider list` shows current recorded availability. Read these instead of assuming the first-choice column was used.
 
-These samples are too small to establish broad provider superiority. Future map changes require versioning, representative evaluation, and—once the curator exists—approval before activation.
+If a model or tool is unsupported, fix the configuration rather than repeatedly retrying or enabling paid access. For a reviewed configuration change, follow the [curator guide](curator.md).
+
+## Evidence and limitations
+
+The initial choices used a small [Phase 0 sample](phases/phase-0-summary.md). Planning, research, and other sparsely measured routes remain provisional. Provider outages are availability observations, not proof of coding inferiority.
+
+The original evidence directories were `~/.local/state/mabs/baseline/2026-09-18T03-31-48-077Z` and `~/.local/state/mabs/baseline/2026-09-18T03-45-13-035Z` on the verification machine; they are not included in a fresh checkout.
+
+Use recorded outcomes and representative comparisons to justify changes. A curator evaluation tests configuration safety; improvement claims additionally need a completed [optimization experiment](../src/optimization/experiments.ts).

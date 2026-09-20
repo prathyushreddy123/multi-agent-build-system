@@ -1,5 +1,9 @@
 # MABS Extension Implementation Brief — phase checklist
 
+[Implementation history](../implementation-status.md) · [Current documentation](../index.md)
+
+> Historical acceptance record. Versions, test counts, and machine-specific observations below describe the extension work when it was verified, not your current installation.
+
 Source specification: `MABS Extension Implementation Brief`, version 1.0, 18 September 2026.
 Branch: `mabs-extension`. Reviewed baseline commit: `50a33e9e3e701b1a4d46034f26a0166d03f59e28`.
 

@@ -145,4 +145,4 @@ This opens the existing workbench, not a static documentation site. Its mutation
 
 If `XDG_STATE_HOME` is set, the default state directory is `$XDG_STATE_HOME/mabs`. Keep the same overrides across terminals and restarts. A different state path points to different records.
 
-**Next:** [follow a task visually](architecture/task-execution.md) or [browse the documentation](index.md).
+**Next:** [follow a task visually](architecture/task-execution.md), [troubleshoot a blocker](troubleshooting.md), or [browse the documentation](index.md).

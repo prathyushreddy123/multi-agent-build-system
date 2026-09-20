@@ -13,8 +13,13 @@
 | See the system without a wall of arrows | [Visual guide](architecture/index.md) |
 | Understand the controller and workers | [System overview](architecture/system-overview.md) |
 | Follow a task or a failure scenario | [Task execution](architecture/task-execution.md) and [recovery](architecture/recovery-and-failures.md) |
+| Fix a blocked task or failed check | [Troubleshooting](troubleshooting.md) |
+| Find a command without reading CLI source | [Command reference](commands.md) |
+| Check subscriptions, safety, or supported workflows | [FAQ](faq.md) |
+| Start from an idea using Pi | [Conversational intake](faq.md#can-i-start-from-an-idea-instead-of-an-existing-repository) |
 | Change project configuration safely | [Configuration curator](curator.md) |
 | Understand provider selection | [Routing policy](routing-policy-v1.md) |
+| Improve the tool or its documentation | [Contributing](../CONTRIBUTING.md) |
 
 ## Five terms worth knowing
 
@@ -30,9 +35,7 @@
 
 You do not need these to get started. They preserve the reasons behind the design and evidence from earlier verification runs; versions and test counts are historical.
 
-- [Original implementation phases](implementation-status.md)
-- [Extension checklist](phases/extension-checklist.md)
-- [Why Pi is the interface, not the task worker](adr/0001-pi-and-worker-execution.md)
-- [Original requirements and roadmap](requirements/source-plan.txt)
+- [Implementation history](implementation-status.md): original phases, extensions, documentation refresh, and evidence links.
+- [Why Pi is the interface, not the task worker](adr/0001-pi-and-worker-execution.md): the original design decision.
 
 Need a command that is not in a guide? Run `node src/cli.ts help` from the MABS checkout.

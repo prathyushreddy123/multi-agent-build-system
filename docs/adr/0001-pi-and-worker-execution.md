@@ -3,6 +3,10 @@
 - Status: accepted for Phase 1
 - Date: 18 September 2026
 
+[Implementation history](../implementation-status.md) · [Current Pi workflow](../faq.md#is-pi-required)
+
+> Historical decision record. References to a future Pi extension describe the original decision point; the extension is now implemented. The reasoning and observations below are preserved as recorded.
+
 ## Context
 
 The source plan requires existing Claude Pro and ChatGPT Plus subscription allowance only. It also requires proving the execution path instead of assuming that a third-party provider login receives subscription allowance.
