@@ -124,6 +124,11 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => ctx.ui.notify(await run(["provider", ...words(args)]), "info"),
   });
 
+  pi.registerCommand("mabs-ops", {
+    description: "Inspect or dry-run optional operations: /mabs-ops status <project>",
+    handler: async (args, ctx) => ctx.ui.notify(await run(["ops", ...words(args)]), "info"),
+  });
+
   pi.registerCommand("mabs-backup", {
     description: "Create a consistent backup of MABS SQLite state",
     handler: async (_args, ctx) => ctx.ui.notify(`Backup: ${await run(["maintenance", "backup"])}`, "info"),
@@ -373,6 +378,38 @@ export default function mabsExtension(pi: ExtensionAPI) {
         `--by=${params.acceptedBy}`,
         ...(params.note ? [`--note=${params.note}`] : []),
       ], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  pi.registerTool({
+    name: "mabs_get_operations",
+    label: "Get MABS Operations",
+    description: "Show effective CI, deployment, monitoring, scheduling, delivery, and cost settings. All are disabled/manual by default.",
+    parameters: Type.Object({ project: Type.String() }),
+    async execute(_toolCallId, params, signal) {
+      const output = await run(["ops", "status", params.project], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  pi.registerTool({
+    name: "mabs_prepare_operation",
+    label: "Prepare MABS Operation",
+    description: "Return a dry-run plan for one optional capability. This never writes provider configuration or performs an external action.",
+    promptGuidelines: [
+      "Preparation is not execution or authorization.",
+      "Do not describe disabled, incomplete, or approval-required output as deployed, scheduled, delivered, or monitored.",
+    ],
+    parameters: Type.Object({
+      project: Type.String(),
+      capability: Type.Union([
+        Type.Literal("ci"), Type.Literal("deployment"), Type.Literal("monitoring"),
+        Type.Literal("scheduling"), Type.Literal("delivery"), Type.Literal("costs"),
+      ]),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const output = await run(["ops", "prepare", params.project, params.capability], signal);
       return { content: [{ type: "text", text: output }], details: { output } };
     },
   });

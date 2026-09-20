@@ -1,0 +1,29 @@
+{
+  "project": {
+    "id": "prj_01M2XJRKAXXW8BDPR31R0EEPG3",
+    "name": "ai-engineering-study-assistant",
+    "repoPath": "/home/prat/src/products/ai-engineering-study-assistant"
+  },
+  "configuration": {
+    "version": 0,
+    "source": "synthesized safe default; no enabling record was written",
+    "fingerprint": "5cc906eeac36dd857af638efee16e12420b8bd3f6866d9c3b7a81caecda7b4dc"
+  },
+  "effective": {
+    "ci": {"status": "disabled", "target": null},
+    "deployment": {"status": "disabled", "target": null},
+    "monitoring": {"status": "disabled", "target": "off"},
+    "scheduling": {"status": "manual", "target": null},
+    "delivery": {"status": "ready", "target": "outputs", "scope": "local files only"},
+    "costs": {"status": "disabled", "target": null, "paidModelApis": "prohibited"}
+  },
+  "health": {
+    "lastSuccess": null,
+    "failedRuns": 0,
+    "missedSchedules": 0,
+    "backlog": 0,
+    "source": "local_mabs_records"
+  },
+  "operationRuns": 0,
+  "externalActionsPerformed": []
+}

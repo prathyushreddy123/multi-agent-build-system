@@ -95,5 +95,12 @@ product is revision `ccc7d83` on its MABS task branch; merge/push remain disable
 
 ## E6 — Optional operations and release validation
 
-- [ ] CI, deployment, monitoring, scheduling, delivery, and cost interfaces defined and disabled.
-- [ ] End-to-end scenario and handoff evidence.
+- [x] Versioned CI, deployment, monitoring, scheduling, delivery, and cost contracts default disabled/manual/local-only.
+- [x] Incomplete targets fail closed; preparation is dry-run; no production external-operation adapter or execute command is registered.
+- [x] Exact deployment approval consumption plus simulated failure/recovery, schema 13 -> 14 migration, CLI/Pi/workbench visibility pass focused tests.
+- [x] User-approved E5 local merge was bound to reviewed revision `ccc7d83`, rechecked on pilot `main`, and consumed; no push/release/deploy followed.
+- [x] End-to-end evidence matrix separates real provider/pilot/runtime evidence from automated and simulated portions.
+- [x] Bounded subscription-backed Pi read-only verification used exactly the two status tools, reported the Git-proof limitation, and performed no mutation.
+- [x] Final gates: clean typecheck, 79/79 MABS tests, 33/33 pilot tests from merged `main`, compile pass, Pi extension load, valid evidence JSON, and clean diff check.
+
+Current evidence: `docs/phases/extension-e6-summary.md` and `docs/phases/evidence/e6-*.json`.

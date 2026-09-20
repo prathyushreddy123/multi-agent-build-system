@@ -21,6 +21,7 @@ export const ACTIONS = [
   "shared_data_deletion",
   "waive_required_gate",
   "activate_config_change",
+  "external_cost",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
@@ -50,6 +51,7 @@ export const DEFAULT_POLICY: Record<Action, ApprovalRule> = {
   shared_data_deletion: "approval_required",
   waive_required_gate: "approval_required",
   activate_config_change: "approval_required",
+  external_cost: "approval_required",
 };
 
 /** Actions whose external effect cannot be safely replayed after an uncertain outcome. */
@@ -60,6 +62,7 @@ export const CONSEQUENTIAL_ACTIONS: readonly Action[] = [
   "deploy",
   "destructive_migration",
   "shared_data_deletion",
+  "external_cost",
 ];
 
 export function isConsequential(action: Action): boolean {

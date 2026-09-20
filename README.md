@@ -4,9 +4,9 @@ A local multi-agent build system with an LLM-assisted orchestrator and a determi
 
 ## Current status
 
-Phases 0–5 are complete, along with the source plan's pre-routine-use acceptance checklist (stale-heartbeat visibility, many inactive projects alongside active ones, and database/lease-error visibility). No further numbered phases are defined in the plan. The system now includes durable projects/tasks/attempts/events, isolated Git worktrees, portable context packets with deterministic relevant-file retrieval and bounded context budgets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing with outcome telemetry, persisted execution plans, structured task checkpoints and cross-provider continuity, evidence/context diagnostics, durable user feedback, an approval-gated configuration curator, a measured optimization-experiment registry, and a localhost workbench.
+Phases 0–5 of the source plan and extension phases E0–E6 are complete, along with the pre-routine-use acceptance checklist. The system now includes durable projects/tasks/attempts/events, conversational product intake with exact plan consent, resumable profile-aware bootstrap, isolated Git worktrees, portable bounded context packets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing with outcome telemetry, durable feedback and configuration curation, measured optimization experiments, disabled-by-default optional-operation contracts, and a localhost workbench.
 
-See [`docs/implementation-status.md`](docs/implementation-status.md), the [configuration curator guide](docs/curator.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
+See [`docs/implementation-status.md`](docs/implementation-status.md), the [extension checklist](docs/phases/extension-checklist.md), the [configuration curator guide](docs/curator.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
 
 ## Architecture
 
@@ -231,7 +231,7 @@ flowchart LR
     ACT --> VER["New configuration version<br/>revert is separately approval-gated<br/>and keeps its source version"]
 ```
 
-The same shape governs every consequential action. An approval is a durable authorization record bound to an exact action, target, revision, and configuration — not an executor. Push, merge, release, and deployment executors do not exist in this codebase, and any drift in a binding invalidates the open approval rather than widening it.
+The same shape governs every consequential action. An approval is a durable authorization record bound to an exact action, target, revision, and configuration — not an executor. Push, merge, and release executors do not exist. Deployment exposes only an adapter boundary exercised by simulated tests: no production adapter or CLI/Pi execute command is registered. Any binding drift fails closed rather than widening authorization.
 
 ## Requirements
 
@@ -272,7 +272,7 @@ node src/cli.ts controller run --adapter=codex --ui
 
 The default workbench is `http://127.0.0.1:4317`. Runtime state defaults to `~/.local/state/mabs`; worktrees default to `~/worktrees`. Override these with `MABS_STATE_DIR`, `MABS_DB_PATH`, and `MABS_WORKTREE_ROOT`.
 
-When this repository is trusted by Pi, `.pi/extensions/mabs.ts` adds `/mabs-status`, `/mabs-project`, `/mabs-task`, `/mabs-plan`, `/mabs-feedback`, `/mabs-approval`, `/mabs-curate`, `/mabs-provider`, `/mabs-start`, `/mabs-ui`, and `/mabs-backup`, plus read-status and submit-task tools.
+When this repository is trusted by Pi, `.pi/extensions/mabs.ts` adds the controller commands plus `/mabs-new`, `/mabs-bootstrap`, `/mabs-product`, and `/mabs-ops`. Product-intake, bootstrap, status, and dry-run operation tools are conversationally available; no external-operation execute tool is registered.
 
 ## Useful commands
 
@@ -285,6 +285,12 @@ node src/cli.ts plan apply demo plan.json
 node src/cli.ts plan list --project=<id>
 node src/cli.ts feedback add task <id> question --body="..." --version=<recordVersion>
 node src/cli.ts approval request <task> deploy <target> --reason="..."
+node src/cli.ts brief show <brief>
+node src/cli.ts brief bootstrap <brief> /path/to/empty-target --profile=auto
+node src/cli.ts product show <brief>
+node src/cli.ts ops status demo
+node src/cli.ts ops prepare demo ci                    # dry-run only
+node src/cli.ts ops configure demo --version=0 --payload="$(cat ops.json)" --reason="reviewed candidate" --dry-run
 node src/cli.ts curator snapshot demo > config.json
 node src/cli.ts curator suggest demo --title="Rules-first suggestion"
 node src/cli.ts curator propose demo config.json --title="..." --rationale="..."
@@ -314,4 +320,4 @@ The Phase 4 curator writes proposed configuration to an isolated local Git branc
 
 Phase 5 replaces the previously empty context relevant-file manifest with deterministic, rules-first retrieval bounded by a per-project token budget; every included or omitted file is recorded with a reason. Durable checkpoints let a rerouted attempt build a fresh context packet for the new provider instead of relying on another provider's history. Improvement or limitation-resolution claims require a completed optimization experiment comparing a fixed baseline and candidate suite; regressions in accepted work, requirement violations, or interventions are rejected.
 
-Consequential actions such as push, merge, and deploy are not performed by the controller. The workbench and CLI can prepare and decide exact revision/configuration-bound approvals, but no approval is itself an external-action executor. Target, revision, or project-configuration drift invalidates open approvals.
+Consequential actions such as push, merge, and production deployment are not performed by the controller. Optional CI, deployment, monitoring, scheduling, delivery, and cost settings synthesize disabled/manual/local-only version-0 defaults. Preparation is dry-run; enabling external cost requires a separately decided exact fingerprint approval; paid model APIs remain prohibited. Deployment execution is an internal adapter boundary with failure/unknown/recovery evidence, but no production adapter or CLI/Pi executor is registered. Target, revision, fingerprint, or project-configuration drift fails closed.

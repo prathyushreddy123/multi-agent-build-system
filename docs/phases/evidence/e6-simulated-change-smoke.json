@@ -1,0 +1,28 @@
+{
+  "evidence_label": "SIMULATED TEST DATA for the requested-change portion of the E6 scenario.",
+  "revision": {
+    "carried_backlog": [],
+    "created_at": "2026-09-20T04:45:26+00:00",
+    "focus": "Retrieval evaluation and enterprise RAG reliability",
+    "reason": "SIMULATED TEST DATA: request more retrieval-evaluation practice.",
+    "revision_id": "rev_e64c12fca01e307e9fae",
+    "revision_key": "rkey_44aedec15e3785c30ee6",
+    "revision_number": 2,
+    "supersedes_revision_id": "rev_f3440a49b4df2da49814",
+    "week_id": "wek_5a0d533ab1696fbd538c"
+  },
+  "preserved_week7_revision_ids": [
+    "rev_f3440a49b4df2da49814",
+    "rev_e64c12fca01e307e9fae"
+  ],
+  "packet": {
+    "day": 43,
+    "week": 7,
+    "focus": "Retrieval evaluation and enterprise RAG reliability",
+    "retrieval_query": "Retrieval evaluation and enterprise RAG reliability: concepts chunking, retrieval, grounding, and evaluation from token and context fundamentals — part 1; implementation create and evaluate a retrieval pipeline using a scaffolded local pipeline with explicit checks — exercise 1",
+    "status": "complete",
+    "total_minutes": 270
+  },
+  "prior_progress_events_preserved": 1,
+  "prior_open_backlog_preserved": 1
+}

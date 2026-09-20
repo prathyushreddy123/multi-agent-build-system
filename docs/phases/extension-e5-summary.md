@@ -60,10 +60,12 @@ Final reviewed pilot deliverable:
 - worktree: `/home/prat/worktrees/prj_01M2XJRKAXXW8BDPR31R0EEPG3/tsk_01M2XQKVHW2QHKNEF17M4KZWFN`
 - product tests: 33 pass, 0 fail
 
-The product's `main` remains at bootstrap revision `f0afffc`. The reviewed branch was deliberately not
-merged or pushed because E5 authorization explicitly left merge and remote publication disabled. The
-tool is executable directly from the reviewed worktree; this branch placement is a publication
-boundary, not a claim that `main` contains the finished product.
+At the E5 phase commit, the product's `main` remained at bootstrap revision `f0afffc`; the reviewed
+branch was deliberately not merged or pushed because E5 authorization explicitly left merge and remote
+publication disabled. During E6, the user separately approved the exact reviewed revision. Approval
+`apr_01M2YJPP7N4YHS84KNJ5TWSC5W` was bound to `merge`, target `main`, revision `ccc7d83`, the current
+project configuration, passing gates, and approved review. `main` was fast-forwarded locally, its 33
+tests and compile check passed, and the approval was consumed. No pilot remote or push was added.
 
 ## Pilot behavior
 
@@ -166,5 +168,5 @@ No schedule, timezone, notification destination, CI, deployment, monitoring serv
 merge, paid API, extra credit, or automatic upgrade was configured. The optional local
 subscription-synthesis adapter remains a real runtime dependency when explicitly supplied; it is not
 background or unlimited intelligence. The live adapter currently covers arXiv Atom only. Publisher
-and DOI metadata remain replaceable future adapters. The reviewed pilot branch still requires a
-separate merge decision before `main` can become the default finished-product branch.
+and DOI metadata remain replaceable future adapters. The local pilot `main` now contains the reviewed
+revision following the separately recorded E6 merge decision; remote publication remains unconfigured.

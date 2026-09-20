@@ -566,3 +566,33 @@ CREATE TABLE IF NOT EXISTS bootstrap_runs (
 );
 
 CREATE INDEX IF NOT EXISTS bootstrap_by_brief ON bootstrap_runs(brief_id, created_at);
+
+-- Optional operations are configured separately from execution. Defaults are
+-- synthesized as disabled until a user records a versioned configuration.
+CREATE TABLE IF NOT EXISTS operation_configs (
+  project_id   TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  version      INTEGER NOT NULL DEFAULT 1,
+  config       TEXT NOT NULL,
+  fingerprint  TEXT NOT NULL,
+  updated_by   TEXT NOT NULL,
+  reason       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operation_runs (
+  id                 TEXT PRIMARY KEY,
+  project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  capability         TEXT NOT NULL,
+  action             TEXT NOT NULL,
+  target             TEXT NOT NULL,
+  config_fingerprint TEXT NOT NULL,
+  state              TEXT NOT NULL, -- prepared | running | succeeded | failed | unknown | recovered
+  dry_run            INTEGER NOT NULL DEFAULT 1,
+  approval_id        TEXT REFERENCES approvals(id),
+  detail             TEXT NOT NULL DEFAULT '{}',
+  started_at         TEXT NOT NULL,
+  ended_at           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS operation_runs_by_project ON operation_runs(project_id, started_at);

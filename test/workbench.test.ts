@@ -44,10 +44,13 @@ test("workbench binds locally, serves controller state, and protects mutations",
     approvals: { id: string }[];
     curatorProposals: unknown[];
     activations: unknown[];
+    optionalOperations: { configuration: { version: number }; effective: { deployment: { status: string } } }[];
   };
   assert.equal(body.taskCounts.QUEUED, 1);
   assert.deepEqual(body.curatorProposals, []);
   assert.deepEqual(body.activations, []);
+  assert.equal(body.optionalOperations[0]?.configuration.version, 0);
+  assert.equal(body.optionalOperations[0]?.effective.deployment.status, "disabled");
   assert.equal(body.approvals[0]?.id, approval.id);
 
   const denied = await fetch(`${origin}/api/approvals/${approval.id}/approve`, { method: "POST" });

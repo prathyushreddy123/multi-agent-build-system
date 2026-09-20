@@ -44,6 +44,8 @@ import {
   type ReviewPreset,
 } from "./review/policy.ts";
 import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
+import { getOperationsConfig, operationsStatus, prepareOperation, prepareOperationsConfig, requestExternalCostApproval, setOperationsConfig } from "./operations/service.ts";
+import type { Capability, OperationsConfig } from "./operations/types.ts";
 import { resolveApplicationProfiles } from "./profiles/index.ts";
 import {
   completeExperiment,
@@ -127,6 +129,10 @@ Commands:
   brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript] [--package-manager=...]
   bootstrap resume <id>                         Resume without duplicate projects or destructive cleanup
   profile inspect <repo>                        Show components, checks, setup, and artifacts
+  ops status <project>                          Effective disabled/manual operational capabilities
+  ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval|--approval=<id>]
+  ops prepare <project> <capability>             Dry-run only; never executes an external action
+  ops runs <project>                             Recorded operation attempts and recovery state
   product show <brief>                          Brief, pending decisions, work, outputs, next actions
   plan validate <file>
   plan apply <project> <file>
@@ -384,6 +390,52 @@ async function main(): Promise<void> {
       if (!repo) throw new Error("Usage: mabs profile inspect <repo>");
       console.log(JSON.stringify(resolveApplicationProfiles(resolve(repo)), null, 2));
       return;
+    }
+    if (area === "ops") {
+      const args = parseArgs(rest);
+      const value = args.positionals[0];
+      const project = value ? resolveProject(records, value) : null;
+      if (!project) throw new Error(`Usage: mabs ops ${String(action)} <project> ...`);
+      if (action === "status") {
+        console.log(JSON.stringify(operationsStatus(records, project.id), null, 2));
+        return;
+      }
+      if (action === "runs") {
+        console.log(JSON.stringify(operationsStatus(records, project.id).runs, null, 2));
+        return;
+      }
+      if (action === "prepare") {
+        const capability = args.positionals[1] as Capability | undefined;
+        if (!capability || !["ci", "deployment", "monitoring", "scheduling", "delivery", "costs"].includes(capability)) {
+          throw new Error("Usage: mabs ops prepare <project> <ci|deployment|monitoring|scheduling|delivery|costs>");
+        }
+        console.log(JSON.stringify(prepareOperation(records, project.id, capability), null, 2));
+        return;
+      }
+      if (action === "configure") {
+        const expectedVersion = Number(textOption(args, "version"));
+        const raw = textOption(args, "payload");
+        const reason = textOption(args, "reason");
+        if (!Number.isSafeInteger(expectedVersion) || !raw || !reason) {
+          throw new Error("Usage: mabs ops configure <project> --version=N --payload='{...}' --reason=...");
+        }
+        const config = JSON.parse(raw) as OperationsConfig;
+        if (args.options.get("dry-run") === true) {
+          console.log(JSON.stringify(prepareOperationsConfig(records, project.id, config), null, 2));
+          return;
+        }
+        if (args.options.get("request-approval") === true) {
+          console.log(JSON.stringify(requestExternalCostApproval(records, { projectId: project.id, config, reason }), null, 2));
+          return;
+        }
+        console.log(JSON.stringify(setOperationsConfig(records, {
+          projectId: project.id, expectedVersion, config,
+          actor: textOption(args, "by", "local-cli") as string, reason,
+          approvalId: textOption(args, "approval"),
+        }), null, 2));
+        return;
+      }
+      throw new Error(`Unknown ops command: ${String(action)}. Current version: ${getOperationsConfig(records, project.id).version}.`);
     }
     if (area === "brief" || (area === "product" && action === "show")) {
       const args = parseArgs(rest);

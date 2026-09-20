@@ -45,6 +45,7 @@ export const ids = {
   acceptance: () => newId("acc"),
   bootstrap: () => newId("bst"),
   conversation: () => newId("cnv"),
+  operationRun: () => newId("opr"),
 };
 
 /** RFC 4122 v4 UUID, required by harnesses that accept an explicit session id. */
