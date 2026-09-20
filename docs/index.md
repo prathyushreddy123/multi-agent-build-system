@@ -10,7 +10,9 @@
 | --- | --- |
 | Decide whether MABS fits my workflow | [What MABS does](../README.md#why-use-it) |
 | Install it and run a first task | [Getting started](getting-started.md) |
-| Understand the controller and workers | [Architecture reference](../README.md#architecture) |
+| See the system without a wall of arrows | [Visual guide](architecture/index.md) |
+| Understand the controller and workers | [System overview](architecture/system-overview.md) |
+| Follow a task or a failure scenario | [Task execution](architecture/task-execution.md) and [recovery](architecture/recovery-and-failures.md) |
 | Change project configuration safely | [Configuration curator](curator.md) |
 | Understand provider selection | [Routing policy](routing-policy-v1.md) |
 
