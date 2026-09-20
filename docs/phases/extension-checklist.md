@@ -83,9 +83,15 @@ Evidence: `docs/phases/extension-e4-summary.md`. Full gate: 72 tests, typecheck 
 
 ## E5 — AI engineering study assistant pilot
 
-- [ ] Separate product repository created through the generic MABS services.
-- [ ] Assessment, syllabus, daily packet, progress, weekly revision, status.
-- [ ] Evidence-verified retrieval with honest access labels and partial packets.
+- [x] Real learner brief, corrected exact proposal consent, resumable bootstrap, and five reviewed tasks used only generic MABS services.
+- [x] Separate Python repository provides assessment, 8 x 7-day syllabus, 270-minute packet, progress, weekly revision, and status.
+- [x] Fixed-fixture retrieval verifies identity/authors/status/access/provenance, deduplicates reruns, and returns honest partial packets.
+- [x] One bounded free-public arXiv smoke retrieved two distinct preprints and labeled inspected evidence `abstract_only`; no key or paid service was used.
+- [x] Finished CLI ran independently of MABS; product suite passes 33/33 and simulated progress evidence is explicitly labeled.
+- [x] Proposal-value and multi-commit dependency defects found by the pilot have fail-closed regression coverage.
+
+Evidence: `docs/phases/extension-e5-summary.md` and `docs/phases/evidence/e5-*.json`. The reviewed
+product is revision `ccc7d83` on its MABS task branch; merge/push remain disabled pending separate approval.
 
 ## E6 — Optional operations and release validation
 

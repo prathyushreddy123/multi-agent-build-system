@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -142,6 +142,9 @@ test("downstream workspaces materialize completed dependency revisions", async (
   writeFileSync(join(left, "left.txt"), "left\n");
   git(left, "-c", "user.name=Test", "-c", "user.email=test@local", "add", "-A");
   git(left, "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "left");
+  writeFileSync(join(left, "left.txt"), "left after reviewed repair\n");
+  git(left, "-c", "user.name=Test", "-c", "user.email=test@local", "add", "-A");
+  git(left, "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "left repair");
   const leftRevision = git(left, "rev-parse", "HEAD");
   git(repo, "worktree", "add", "-q", "-b", "right", right, base);
   writeFileSync(join(right, "right.txt"), "right\n");
@@ -152,7 +155,8 @@ test("downstream workspaces materialize completed dependency revisions", async (
 
   const integrated = await integrateDependencyRevisions(target, [leftRevision, rightRevision]);
   assert.equal(git(target, "rev-parse", "HEAD"), integrated);
-  assert.equal(existsSync(join(target, "left.txt")), true);
+  assert.equal(readFileSync(join(target, "left.txt"), "utf8"), "left after reviewed repair\n",
+    "the complete initial-plus-repair history is materialized, not only the final repair commit");
   assert.equal(existsSync(join(target, "right.txt")), true);
 });
 

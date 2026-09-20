@@ -55,14 +55,27 @@ export async function integrateDependencyRevisions(path: string, revisions: stri
   for (const revision of revisions) {
     const present = await exec("git", ["merge-base", "--is-ancestor", revision, "HEAD"], { cwd: path, timeoutMs: 30_000 });
     if (present.code === 0) continue;
-    const cherryPick = await exec("git", [
-      "-c", "user.name=MABS Controller",
-      "-c", "user.email=mabs@local",
-      "cherry-pick", revision,
-    ], { cwd: path, timeoutMs: 120_000 });
-    if (cherryPick.code !== 0) {
-      await exec("git", ["cherry-pick", "--abort"], { cwd: path, timeoutMs: 30_000 });
-      throw new Error(`Could not integrate dependency revision ${revision}: ${(cherryPick.stderr || cherryPick.stdout).trim()}`);
+
+    // A reviewed task can contain an initial controller commit plus one or more
+    // repair commits. Replaying only resultRevision loses its parents and can
+    // conflict even on an otherwise empty downstream branch. Apply every
+    // dependency commit not already reachable from this workspace, oldest first.
+    const missing = await git(path, ["rev-list", "--reverse", "--topo-order", revision, "--not", "HEAD"]);
+    const commits = missing.split("\n").filter(Boolean);
+    if (commits.length === 0) throw new Error(`Dependency revision ${revision} is not reachable and has no integrable commits.`);
+    for (const commit of commits) {
+      const cherryPick = await exec("git", [
+        "-c", "user.name=MABS Controller",
+        "-c", "user.email=mabs@local",
+        "cherry-pick", commit,
+      ], { cwd: path, timeoutMs: 120_000 });
+      if (cherryPick.code !== 0) {
+        await exec("git", ["cherry-pick", "--abort"], { cwd: path, timeoutMs: 30_000 });
+        throw new Error(
+          `Could not integrate dependency revision ${revision} at commit ${commit}: ` +
+          (cherryPick.stderr || cherryPick.stdout).trim(),
+        );
+      }
     }
   }
   return workspaceRevision(path);

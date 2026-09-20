@@ -245,6 +245,22 @@ test("an invalid dependency graph is rejected before the user ever sees it", (t)
   assert.equal(overlapping.valid, false);
   assert.ok(overlapping.errors.some((error) => error.includes("parallel edit scopes overlap")));
 
+  const invalidRouting = proposePlan(records, {
+    brief: brief.id,
+    ...proposalPayload(samplePlan({
+      tasks: [{
+        key: "bad-route", title: "Bad route", objective: "Must fail before acceptance", acceptanceCriteria: ["rejected"],
+        taskClass: "implementation", changeRisk: "elevated", requiredTools: [""], priority: -1,
+        executionMode: "sequential", executionReason: "invalid runtime values",
+      }] as never,
+    })),
+  });
+  assert.equal(invalidRouting.valid, false);
+  assert.ok(invalidRouting.errors.some((error) => error.includes("unknown task class implementation")));
+  assert.ok(invalidRouting.errors.some((error) => error.includes("unknown changeRisk elevated")));
+  assert.ok(invalidRouting.errors.some((error) => error.includes("requiredTools")));
+  assert.ok(invalidRouting.errors.some((error) => error.includes("priority")));
+
   const missingRequirement = proposePlan(records, { brief: brief.id, ...proposalPayload(), requirements: [] });
   assert.equal(missingRequirement.valid, false);
   assert.ok(missingRequirement.errors.some((error) => error.includes("at least one requirement")));

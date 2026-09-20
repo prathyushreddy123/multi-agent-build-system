@@ -1,0 +1,53 @@
+{
+  "evidence_label": "Independent local runtime smoke. Progress/difficulty/revision entries are SIMULATED TEST DATA; assessment levels are the user-supplied assessment.",
+  "assessment": {
+    "assessment_id": "asm_b466d31c275f13657f52",
+    "created_at": "2026-09-20T04:35:36+00:00",
+    "llm_level": "beginner",
+    "ml_level": "beginner",
+    "python_level": "intermediate"
+  },
+  "syllabus": {
+    "weeks": 8,
+    "days": 56,
+    "schedule": {
+      "days_per_week": 7,
+      "hours_per_day": 4.5,
+      "minutes_per_day": 270,
+      "practice_minutes_per_day": 108,
+      "theory_minutes_per_day": 162,
+      "theory_practice_ratio": "60/40",
+      "weeks": 8
+    }
+  },
+  "packet": {
+    "status": "complete",
+    "total_minutes": 270,
+    "paper_evidence_access": ["full_text", "abstract_only"],
+    "packet_id": "pkt_d14b1b981c9e7a1342a1"
+  },
+  "simulated_progress": {
+    "created_at": "2026-09-20T04:35:36+00:00",
+    "day_number": 1,
+    "difficulty": 4,
+    "event_id": "prg_b3c23a5d992d34acde5d",
+    "event_key": "simulated-e5-smoke-day-1",
+    "exercise_id": "typed-module",
+    "minutes": 120,
+    "notes": "SIMULATED TEST DATA: exercises progress and backlog persistence only.",
+    "result": "partial",
+    "revision_id": "rev_620758988eb0cca5abaa",
+    "syllabus_id": "syl_36d51b363df0b7ebb981",
+    "week_id": "wek_f398dc0740fa6168673a"
+  },
+  "simulated_revision": {
+    "revision_number": 2,
+    "supersedes": "rev_620758988eb0cca5abaa",
+    "carried_backlog": ["bkl_99e978a32fe61286643a"]
+  },
+  "status": {
+    "progress_events": 1,
+    "open_backlog": 1,
+    "revision_records": 9
+  }
+}

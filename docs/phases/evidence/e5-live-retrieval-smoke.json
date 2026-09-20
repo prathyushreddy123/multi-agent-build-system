@@ -1,0 +1,89 @@
+{
+  "cache_hits": [],
+  "content_policy": "adapter content is untrusted data; labels require inspected fields",
+  "controls": {
+    "cache_ttl_seconds": 300.0,
+    "rate_limit_seconds": 0.0,
+    "timeout_seconds": 5.0
+  },
+  "created_count": 2,
+  "failures": [],
+  "live_smoke": "complete",
+  "missing_requirements": [],
+  "mode": "optional_live_smoke",
+  "network": {
+    "api_key": "not_used",
+    "enabled_by": "explicit --live-smoke option",
+    "max_results": 2,
+    "paid_service": "disabled",
+    "source": "free public arXiv Atom API",
+    "timeout_seconds": 5.0
+  },
+  "query": "retrieval augmented generation evaluation",
+  "resources": [
+    {
+      "access_level": "open",
+      "authors": ["Minhu Park", "Hongseok Oh", "Eunkyung Choi", "Wonseok Hwang"],
+      "canonical_identity": "repo:arxiv:2504.01840v2",
+      "canonical_url": "http://arxiv.org/abs/2504.01840v2",
+      "doi": null,
+      "evidence_access": "abstract_only",
+      "evidence_snippets": [
+        "arXiv Atom entry identifies this record as a preprint.",
+        "Feed publication timestamp: 2025-04-02T15:45:03Z.",
+        "Feed exposes a PDF link: https://arxiv.org/pdf/2504.01840v2",
+        "Feed abstract excerpt: Recently, building retrieval-augmented generation (RAG) systems to enhance the capability of large language models (LLMs) has become a common practice. Especially in the legal domain, previous judicial decisions play a significant role under the doctrine of stare decisis which emphasizes the importance of making decisions based on (retrieved) prior documents"
+      ],
+      "inspected_fields": ["access_level", "authors", "evidence_access", "publication_status"],
+      "publication_status": "preprint",
+      "rank_score": 0.08,
+      "related_identifiers": ["repo:arxiv:2504.01840v2", "url:http://arxiv.org/abs/2504.01840v2"],
+      "repository_id": "arxiv:2504.01840v2",
+      "retrieved_at": "2026-09-20T04:34:49+00:00",
+      "scores": {"evidence_quality": 0.8},
+      "source": "arxiv-public-atom",
+      "source_observations": [{
+        "canonical_url": "http://arxiv.org/abs/2504.01840v2",
+        "retrieved_at": "2026-09-20T04:34:49+00:00",
+        "source": "arxiv-public-atom"
+      }],
+      "title": "LRAGE: Legal Retrieval Augmented Generation Evaluation Tool",
+      "trust": "untrusted_fetched_content"
+    },
+    {
+      "access_level": "open",
+      "authors": [
+        "Mario Ceresa", "Lorenzo Bertolini", "Valentin Comte", "Nicholas Spadaro", "Barbara Raffael",
+        "Brigitte Toussaint", "Sergio Consoli", "Amalia Muñoz Piñeiro", "Alex Patak", "Maddalena Querci",
+        "Tobias Wiesenthal"
+      ],
+      "canonical_identity": "repo:arxiv:2505.04680v1",
+      "canonical_url": "http://arxiv.org/abs/2505.04680v1",
+      "doi": null,
+      "evidence_access": "abstract_only",
+      "evidence_snippets": [
+        "arXiv Atom entry identifies this record as a preprint.",
+        "Feed publication timestamp: 2025-05-07T16:12:53Z.",
+        "Feed exposes a PDF link: https://arxiv.org/pdf/2505.04680v1",
+        "Feed abstract excerpt: Safe and trustworthy use of Large Language Models (LLM) in the processing of healthcare documents and scientific papers could substantially help clinicians, scientists and policymakers in overcoming information overload and focusing on the most relevant information at a given moment. Retrieval Augmented Generation (RAG) is a promising method to leverage the "
+      ],
+      "inspected_fields": ["access_level", "authors", "evidence_access", "publication_status"],
+      "publication_status": "preprint",
+      "rank_score": 0.08,
+      "related_identifiers": ["repo:arxiv:2505.04680v1", "url:http://arxiv.org/abs/2505.04680v1"],
+      "repository_id": "arxiv:2505.04680v1",
+      "retrieved_at": "2026-09-20T04:34:49+00:00",
+      "scores": {"evidence_quality": 0.8},
+      "source": "arxiv-public-atom",
+      "source_observations": [{
+        "canonical_url": "http://arxiv.org/abs/2505.04680v1",
+        "retrieved_at": "2026-09-20T04:34:49+00:00",
+        "source": "arxiv-public-atom"
+      }],
+      "title": "Retrieval Augmented Generation Evaluation for Health Documents",
+      "trust": "untrusted_fetched_content"
+    }
+  ],
+  "status": "complete",
+  "updated_count": 0
+}

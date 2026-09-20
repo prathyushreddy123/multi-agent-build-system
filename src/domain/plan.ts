@@ -1,3 +1,4 @@
+import { TASK_CLASSES } from "../routing/router.ts";
 import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
 import type { Records, Task } from "../store/records.ts";
 
@@ -96,6 +97,20 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
       errors.push(`${label}: unknown execution mode ${String(task?.executionMode)}.`);
     }
     if (typeof task?.executionReason !== "string" || !task.executionReason.trim()) errors.push(`${label}: execution reason is required.`);
+    if (task?.taskClass !== undefined && !TASK_CLASSES.includes(task.taskClass as TaskClass)) {
+      errors.push(`${label}: unknown task class ${String(task.taskClass)}.`);
+    }
+    for (const [field, value] of [
+      ["complexity", task?.complexity], ["ambiguity", task?.ambiguity], ["changeRisk", task?.changeRisk], ["contextSize", task?.contextSize],
+    ] as const) {
+      if (value !== undefined && !["low", "medium", "high"].includes(value)) errors.push(`${label}: unknown ${field} ${String(value)}.`);
+    }
+    if (task?.requiredTools !== undefined && (
+      !Array.isArray(task.requiredTools) || task.requiredTools.some((tool) => typeof tool !== "string" || !tool.trim())
+    )) errors.push(`${label}: requiredTools must contain only non-empty tool names.`);
+    if (task?.priority !== undefined && (!Number.isSafeInteger(task.priority) || task.priority < 0)) {
+      errors.push(`${label}: priority must be a non-negative integer.`);
+    }
     if (task?.allowedScope !== undefined) {
       const invalidScope = !Array.isArray(task.allowedScope) || task.allowedScope.some((scope) => {
         if (typeof scope !== "string") return true;
