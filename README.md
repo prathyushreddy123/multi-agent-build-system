@@ -1,14 +1,55 @@
-# MABS
+# MABS — Multi-Agent Build System
 
-A local multi-agent build system with an LLM-assisted orchestrator and a deterministic, SQLite-backed task controller. It uses existing Claude Pro and ChatGPT subscription sessions and strips API-key paths before launching workers.
+**Turn scoped tasks into local, checked Git changes using your Claude or Codex subscription.**
 
-## Current status
+MABS coordinates coding workers, runs your repository's checks, and keeps a record of what happened. You define the goal and acceptance criteria; the controller manages the queue, isolated task branches, repairs, and review.
 
-Phases 0–5 of the source plan and extension phases E0–E6 are complete, along with the pre-routine-use acceptance checklist. The system now includes durable projects/tasks/attempts/events, conversational product intake with exact plan consent, resumable profile-aware bootstrap, isolated Git worktrees, portable bounded context packets, Claude and Codex subscription adapters, deterministic quality gates, bounded implementation/review feedback loops, revision-bound approvals, crash recovery, multi-project scheduling, provider-aware routing with outcome telemetry, durable feedback and configuration curation, measured optimization experiments, disabled-by-default optional-operation contracts, and a localhost workbench.
+[Get started](docs/getting-started.md) · [Documentation](docs/index.md) · [How it works](#architecture)
 
-See [`docs/implementation-status.md`](docs/implementation-status.md), the [extension checklist](docs/phases/extension-checklist.md), the [configuration curator guide](docs/curator.md), the [versioned routing policy](docs/routing-policy-v1.md), and the source plan in [`docs/requirements/source-plan.txt`](docs/requirements/source-plan.txt).
+## Why use it?
+
+- **Keep work separate.** Each task runs in its own Git worktree—a separate checkout with its own branch.
+- **Check more than the model's answer.** Run repository checks and apply the project's review policy before marking work done.
+- **Understand failures.** Inspect attempts, logs, review findings, and the reason a task is blocked.
+- **Continue after an interruption.** A restarted controller reconciles recorded workers rather than blindly starting them again.
+- **Coordinate multiple projects.** Bound concurrency by project and provider; keep paused projects without running workers.
+
+## Is MABS for you?
+
+A good fit if you already use Git and a supported subscription CLI, want repeatable local workflows, and are comfortable inspecting diffs and test results.
+
+It is **not** a hosted coding service, a security sandbox for untrusted repositories, or an automatic production deployment system. Workers and repository checks execute local commands: use trusted repositories and inspect the results.
+
+## Start here
+
+You need **Node.js 24+**, **Git**, and an authenticated **Claude Code or Codex CLI** for model tasks. Python and JavaScript/TypeScript project profiles can discover supported checks; your target project's tools must also be installed.
+
+```bash
+git clone https://github.com/prathyushreddy123/multi-agent-build-system.git
+cd multi-agent-build-system
+# The extension features documented here are on this branch.
+git switch mabs-extension
+npm ci
+npm test
+npm run typecheck
+node src/cli.ts help
+```
+
+These steps install and check MABS; they do not start coding workers. Follow the **[getting-started guide](docs/getting-started.md)** to register a repository and run a small first task.
+
+## What stays under your control
+
+- **Local state:** SQLite stores task history; files store logs and other evidence.
+- **Subscription access:** supported workers use Claude/ChatGPT sessions. Paid model API fallback is prohibited; subscription limits still apply.
+- **Quality policy:** checks and review coverage are explicit. Missing checks are not proof of success.
+- **Publication:** the controller does not push, merge, or release changes. Deployment has a tested adapter boundary, but no production adapter or CLI execution command.
+- **Optional operations:** CI, deployment, monitoring, delivery, and related settings start disabled/manual. Preparing an operation does not execute it.
 
 ## Architecture
+
+<details>
+<summary>Detailed architecture reference (components, task flow, and safety boundaries)</summary>
+
 
 MABS splits the system along one line: a **deterministic controller** owns scheduling, state, quality gates, and evidence, while **non-deterministic workers** only ever run inside an isolated Git worktree behind a strict output contract. SQLite is the authoritative record, large artifacts are files on disk referenced by path, and the controller itself never pushes, merges, releases, or deploys.
 
@@ -233,46 +274,14 @@ flowchart LR
 
 The same shape governs every consequential action. An approval is a durable authorization record bound to an exact action, target, revision, and configuration — not an executor. Push, merge, and release executors do not exist. Deployment exposes only an adapter boundary exercised by simulated tests: no production adapter or CLI/Pi execute command is registered. Any binding drift fails closed rather than widening authorization.
 
-## Requirements
+</details>
 
-- Node.js 24+
-- Git
-- At least one authenticated subscription CLI:
-  - `claude auth status` using `claude.ai`
-  - `codex login status` using ChatGPT
+## Using MABS
 
-No API key is required or permitted for worker launches.
-
-## Setup
-
-```bash
-npm install
-npm test
-npm run typecheck
-node src/cli.ts verify --quick
-```
-
-## Basic workflow
-
-```bash
-# Register a repository. Existing npm/pytest checks are proposed automatically.
-node src/cli.ts project add demo /path/to/repo --goal="Deliver the next milestone"
-
-# Add stable project requirements and a task.
-node src/cli.ts requirement add demo REQ-1 "All existing tests must continue to pass"
-node src/cli.ts task add demo "Implement feature" \
-  --objective="Implement the accepted feature scope" \
-  --accept="registered checks pass;result is committed locally" \
-  --class=small_implementation --scope=src,test \
-  --mode=single --mode-reason="One bounded implementation task."
-
-# Run the controller and local workbench.
-node src/cli.ts controller run --adapter=codex --ui
-```
-
-The default workbench is `http://127.0.0.1:4317`. Runtime state defaults to `~/.local/state/mabs`; worktrees default to `~/worktrees`. Override these with `MABS_STATE_DIR`, `MABS_DB_PATH`, and `MABS_WORKTREE_ROOT`.
-
-When this repository is trusted by Pi, `.pi/extensions/mabs.ts` adds the controller commands plus `/mabs-new`, `/mabs-bootstrap`, `/mabs-product`, and `/mabs-ops`. Product-intake, bootstrap, status, and dry-run operation tools are conversationally available; no external-operation execute tool is registered.
+- **First task:** [setup, registration, execution, and result inspection](docs/getting-started.md).
+- **Local workbench:** `http://127.0.0.1:4317` while the UI is running. Inspect tasks, checks, reviews, and evidence.
+- **Configuration changes:** [curator guide](docs/curator.md).
+- **Implementation history:** [original phases](docs/implementation-status.md) and [extension checklist](docs/phases/extension-checklist.md). These are historical verification records, not onboarding instructions.
 
 ## Useful commands
 
