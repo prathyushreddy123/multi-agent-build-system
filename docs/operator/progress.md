@@ -4,7 +4,7 @@
 
 Resumable record for the MABS Operator Workspace Implementation Plan. After a context reset, read this file, inspect the current diff, and resume the first incomplete phase.
 
-**Current position:** Phase 1 complete. Next action: Phase 2 (Code browsing and reliable file opening).
+**Current position:** Phase 2 complete. Next action: Phase 3 (Tasks and recorded implementation steps).
 
 ## Phase status
 
@@ -12,7 +12,7 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 | --- | --- | --- |
 | 0 | Inspect and prove compatibility | Complete |
 | 1 | Compact Agent output | Complete |
-| 2 | Code browsing and reliable file opening | Not started |
+| 2 | Code browsing and reliable file opening | Complete |
 | 3 | Tasks and recorded implementation steps | Not started |
 | 4 | Logs and evidence following | Not started |
 | 5 | Workspace automation and release checks | Not started |
@@ -74,6 +74,43 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 
 **Blockers:** none.
 
+## Phase 2 — Code browsing and reliable file opening
+
+**Files changed**
+
+- `src/operator/context.ts` (new): task/attempt/worktree/revision selection, with candidates instead of a guess.
+- `src/operator/files.ts` (new): path resolution and containment, all-files and changed-files listings, revision reads, diffs.
+- `src/operator/links.ts` (new): `mabs://` encoding and dispatch, OSC-8, and the equivalent command.
+- `src/operator/viewer.ts` (new): the owned viewer, its request channel, and the optional external editor plan.
+- `src/operator/code.ts` (new): one entry point per action, shared by the CLI and Pi.
+- `src/cli.ts`: `files`, `changes`, `open`, `diff`, `dispatch`, `viewer serve`, `viewer status`.
+- `.pi/extensions/mabs.ts`: `/mabs-files`, `/mabs-changes`, `/mabs-open`, `/mabs-diff`, `/mabs-viewer`, with a picker on ambiguity.
+- `test/operator/phase2.test.ts`, `test/operator/viewer.test.ts` (new).
+- `docs/operator/code-surface.md` (new); index and command reference updated.
+
+**Checks**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | Clean |
+| `npm run typecheck:extensions` | Clean |
+| `npm test` | 115 passed, 0 failed |
+| Live CLI against real worktrees | `changes`, `open`, `diff`, `dispatch` returned the task's own content; traversal and `file://` were refused |
+| Live extension load | `pi --mode rpc` loaded both extensions; no model call |
+
+**Validation covered**
+
+Two task worktrees holding different content at the same relative path; filenames with spaces, non-ASCII characters, quotes, leading hyphens, and nested paths; line numbers; symlinks inside and outside the worktree; rename and delete diffs; a removed worktree falling back to its recorded revision; a path absent from that revision; a task with neither worktree nor revision; a file changing during inspection; viewer reuse, read-only replacement, and edit-mode queueing.
+
+**Decisions**
+
+- Rename diffs resolve the rename pair first and pass both paths, because a single-path pathspec makes git report a rename as an unrelated new file.
+- A removed worktree never falls back to the base checkout. Unavailable content says so explicitly.
+- Viewer reuse is a MABS-owned process reading its own request file, since no editor remote-control channel exists here.
+- A read-only buffer is replaced on a new selection; an editable one is queued instead.
+
+**Blockers:** none.
+
 ## Manual checks not executable here
 
 These need a human attached to the Herdr TUI. They are unverified until then, and are not claimed as passing.
@@ -85,3 +122,6 @@ These need a human attached to the Herdr TUI. They are unverified until then, an
 | Split layout remains usable | Open the workspace, confirm Agent and Code are readable side by side |
 | Compact rows expand with `ctrl+e` | Run a command in an interactive Pi session and toggle the row |
 | `/mabs-verbose on` survives a restart | Toggle it, quit Pi, start it again |
+| A picker appears for an ambiguous task | Run `/mabs-open` with two active tasks and confirm the selector lists both |
+| The viewer opens in its own pane | Run `viewer serve` in a second pane, then `/mabs-open` from the Agent pane |
+| Opening a file does not steal focus from a background worker | Start a worker, open a file, confirm focus follows the explicit action only |

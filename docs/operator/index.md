@@ -20,6 +20,7 @@ The controller stays the scheduler and the only writer of task transitions. Work
 | Page | Contents |
 | --- | --- |
 | [Compact Agent output](compact-output.md) | What a summary is allowed to say, the commands, and how to turn it off |
+| [Code browsing and file opening](code-surface.md) | The shared resolver, changed files, the viewer, and path safety |
 | [Phase 0 capabilities](phase-0-capabilities.md) | What the installed Pi, Herdr, viewer, and editor actually support, and the two integration proofs |
 | [Progress note](progress.md) | Phase status, changed files, checks, blockers, and next action |
 

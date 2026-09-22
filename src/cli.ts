@@ -57,6 +57,10 @@ import {
 } from "./optimization/experiments.ts";
 import { routingOutcomes } from "./optimization/routing.ts";
 import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/capabilities.ts";
+import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
+import { parseOpenTarget } from "./operator/links.ts";
+import { readPreferences } from "./operator/preferences.ts";
+import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
 import { openRecords } from "./store/records.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
@@ -163,6 +167,15 @@ Commands:
   maintenance prune [--apply]                Preview or apply evidence retention
   ui [--port=4317]                          Run the localhost workbench
   operator probe [--json] [--repo=<path>]    Prove Pi, Herdr, viewer, and worktree capabilities
+
+Code surface (read-only inspection of a task worktree):
+  files [<task>] [--filter=...] [--attempt=<id>]      Browse every file in the task worktree
+  changes [<task>] [--attempt=<id>]                   List changed files with their categories
+  open <task> <path> [--line=N] [--view] [--edit]     Open a file through the shared resolver
+  diff <task> <path> [--view]                         Diff a file against the task's base revision
+  dispatch <mabs://open/...>                          Open a MABS link through the same resolver
+  viewer serve [--surface=code] [--viewer=vim]        Run the owned read-only viewer
+  viewer status [--surface=code]                      Show whether a viewer owns this surface
 `);
 }
 
@@ -211,9 +224,81 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (area === "viewer" && action === "serve") {
+    const args = parseArgs(rest);
+    const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;
+    if (!["code", "diff", "logs"].includes(surface)) throw new Error("--surface must be code, diff, or logs");
+    const viewer = textOption(args, "viewer") ?? readPreferences().viewer;
+    console.log(`Serving the ${surface} surface. Ctrl-C stops this viewer only; workers are unaffected.`);
+    await serveViewer({
+      surface,
+      viewer: viewer as never,
+      onEvent: (event) => console.log(`[${event.kind}] ${event.detail}`),
+    });
+    return;
+  }
+  if (area === "viewer" && action === "status") {
+    const args = parseArgs(rest);
+    const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;
+    console.log(JSON.stringify({ surface, viewer: readViewerState(surface) }, null, 2));
+    return;
+  }
+
   const records = openRecords();
   let keepOpen = false;
   try {
+    if (area === "files" || area === "changes" || area === "open" || area === "diff" || area === "dispatch") {
+      const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
+      const selector = {
+        attempt: textOption(args, "attempt"),
+        project: textOption(args, "project"),
+      };
+      const useViewer = args.options.has("view") || args.options.has("edit");
+      const mode = args.options.has("edit") ? "edit" as const : "read-only" as const;
+
+      if (area === "dispatch") {
+        const link = args.positionals[0];
+        if (!link) throw new Error("Usage: mabs dispatch <mabs://open/...>");
+        const target = parseOpenTarget(link);
+        // A link is routed through exactly the same resolver as the picker and
+        // the slash command, so it cannot select a different worktree.
+        const result = target.action === "diff"
+          ? await diffFile(records, target.path, { task: target.taskId, attempt: target.attemptId, project: target.projectId, revision: target.revision, useViewer, mode })
+          : await openFile(records, target.path, { task: target.taskId, attempt: target.attemptId, project: target.projectId, revision: target.revision, line: target.line, useViewer, mode });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      if (area === "files") {
+        const result = await taskFiles(records, {
+          ...selector, task: args.positionals[0], filter: textOption(args, "filter"),
+          limit: args.options.has("limit") ? numberOption(args, "limit", 2000) : undefined,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      if (area === "changes") {
+        const result = await taskChanges(records, { ...selector, task: args.positionals[0] });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      const [taskValue, path] = args.positionals;
+      if (!path) throw new Error(`Usage: mabs ${area} <task> <path> [--line=N] [--view]`);
+      const options = {
+        ...selector, task: taskValue,
+        line: args.options.has("line") ? numberOption(args, "line", 1) : null,
+        revision: textOption(args, "revision"),
+        useViewer, mode,
+      };
+      const result = area === "diff"
+        ? await diffFile(records, path, options)
+        : await openFile(records, path, options);
+      console.log(JSON.stringify(result, null, 2));
+      if (result.kind === "not-found") process.exitCode = 1;
+      return;
+    }
     if (area === "project" && action === "add") {
       const args = parseArgs(rest);
       const [name, repoArg] = args.positionals;

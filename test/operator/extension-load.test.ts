@@ -141,6 +141,10 @@ test("the MABS tool extension keeps its tools and routes them through the compac
       assert.equal(typeof tool.renderResult, "function", `${tool.name} is not compacted`);
     }
     assert.ok(recorded.commands.includes("mabs-status"));
+    // The Code surface is reachable from Pi through the same resolver as the CLI.
+    for (const command of ["mabs-changes", "mabs-files", "mabs-open", "mabs-diff", "mabs-viewer"]) {
+      assert.ok(recorded.commands.includes(command), `${command} is not registered`);
+    }
   });
 });
 

@@ -91,6 +91,27 @@ These affect presentation only. None of them starts work, changes task state, or
 | --- | --- |
 | `/mabs-verbose on\|off` | Show original tool output instead of compact summaries; persists across sessions |
 | `/mabs-compact on\|off` | Enable or disable the operator presentation layer, then `/reload` |
+| `/mabs-files [TASK]` | Browse every file in a task worktree |
+| `/mabs-changes [TASK]` | Changed files with their categories, renames, and deletions |
+| `/mabs-open TASK PATH --line=N` | Open a file in the Code surface |
+| `/mabs-diff TASK PATH` | Diff a file against the task's recorded base revision |
+| `/mabs-viewer` | Show whether a MABS viewer owns the Code surface |
+
+Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
+
+### Code surface from the CLI
+
+Read-only inspection of one task worktree. These do not start workers or change task state. See the [Code surface guide](operator/code-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts files [TASK] [--filter=src]` | Every file in the task worktree |
+| `node src/cli.ts changes [TASK] [--attempt=ID]` | Changed files, one entry per path, with categories |
+| `node src/cli.ts open TASK PATH [--line=N] [--view]` | One file, from the worktree or a recorded revision |
+| `node src/cli.ts diff TASK PATH [--view]` | A diff against the task's recorded base revision |
+| `node src/cli.ts dispatch 'mabs://open/...'` | The same, from a link; other schemes are refused |
+| `node src/cli.ts viewer serve [--surface=code]` | Run the owned read-only viewer; Ctrl+C stops only the viewer |
+| `node src/cli.ts viewer status` | Whether a viewer owns a surface |
 
 ## Verification is not all the same
 

@@ -90,6 +90,116 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => ctx.ui.notify(await run(["status"]), "info"),
   });
 
+  // --- Code surface -------------------------------------------------------
+  // Every route below goes through the same task/attempt/worktree/revision
+  // resolver as the CLI, so a picker selection and a typed command can never
+  // choose different worktrees for the same task.
+
+  interface Candidate { taskId: string; title: string; state: string; projectName: string }
+
+  /**
+   * Run a Code command, turning an ambiguous selection into a picker rather
+   * than a guess. Returns null when the user cancelled.
+   */
+  async function code(
+    args: string[],
+    ctx: { ui: { select(title: string, options: string[]): Promise<string | undefined>; notify(message: string, kind: "info" | "warning" | "error"): void } },
+    retryWithTask: (taskId: string) => string[],
+  ): Promise<Record<string, unknown> | null> {
+    const first = JSON.parse(await run(args)) as Record<string, unknown> & { kind?: string; candidates?: Candidate[]; reason?: string };
+    if (first.kind !== "selection-needed") return first;
+
+    const candidates = first.candidates ?? [];
+    const labels = candidates.map((candidate) => `${candidate.taskId}  ${candidate.title}  [${candidate.state}]`);
+    const chosen = await ctx.ui.select(first.reason ?? "Select a task", labels);
+    if (!chosen) {
+      ctx.ui.notify("No task selected; nothing was opened.", "info");
+      return null;
+    }
+    const index = labels.indexOf(chosen);
+    const taskId = candidates[index]?.taskId;
+    if (!taskId) throw new Error("The selected task could not be identified.");
+    return JSON.parse(await run(retryWithTask(taskId))) as Record<string, unknown>;
+  }
+
+  function reportUnavailable(result: Record<string, unknown>, ctx: { ui: { notify(message: string, kind: "info" | "warning" | "error"): void } }): boolean {
+    if (result.kind !== "not-found") return false;
+    ctx.ui.notify(String(result.reason ?? "The requested content is unavailable."), "warning");
+    return true;
+  }
+
+  pi.registerCommand("mabs-changes", {
+    description: "List a task's changed files with their worktree and revision context: /mabs-changes [task]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const result = await code(["changes", ...extra], ctx, (taskId) => ["changes", taskId, ...extra.slice(1)]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const files = (result.files ?? []) as { path: string; status: string; categories: string[] }[];
+      const lines = files.map((file) => `  ${file.status.padEnd(12)} ${file.categories.join(",").padEnd(26)} ${file.path}`);
+      ctx.ui.notify(
+        [String(result.context), `${files.length} changed file(s)`, ...lines].join("\n") ||
+        "No changed files.",
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("mabs-files", {
+    description: "Browse every file in a task worktree: /mabs-files [task] [--filter=src]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const result = await code(["files", ...extra], ctx, (taskId) => ["files", taskId, ...extra.slice(1)]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const files = (result.files ?? []) as string[];
+      ctx.ui.notify([String(result.context), `${files.length} file(s)`, ...files.map((file) => `  ${file}`)].join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("mabs-open", {
+    description: "Open a file from a task worktree in the Code surface: /mabs-open <task> <path> [--line=N]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-open <task> <path> [--line=N]");
+      const result = await code(["open", ...extra, "--view"], ctx, (taskId) => ["open", taskId, ...extra.slice(1), "--view"]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const viewer = result.viewer as { delivered?: boolean; reason?: string } | null;
+      const content = result.content as { text: string | null; unavailableReason: string | null; source: string };
+      ctx.ui.notify([
+        String(result.context),
+        `${String(result.relativePath)}${result.line ? `:${String(result.line)}` : ""} (${content.source})`,
+        result.viewReason ? String(result.viewReason) : "",
+        content.unavailableReason ? content.unavailableReason : "",
+        viewer?.delivered ? "Opened in the Code viewer." : String(viewer?.reason ?? ""),
+        `Command: ${String(result.command)}`,
+      ].filter(Boolean).join("\n"), content.unavailableReason ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-diff", {
+    description: "Diff a file against the task's recorded base revision: /mabs-diff <task> <path>",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-diff <task> <path>");
+      const result = await code(["diff", ...extra, "--view"], ctx, (taskId) => ["diff", taskId, ...extra.slice(1), "--view"]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const diff = result.diff as { text: string | null; from: string; to: string; unavailableReason: string | null };
+      ctx.ui.notify([
+        String(result.context),
+        `${String(result.relativePath)}: ${diff.from} → ${diff.to}`,
+        diff.unavailableReason ?? (diff.text === "" ? "No changes against the recorded base." : "Opened in the Code viewer."),
+        `Command: ${String(result.command)}`,
+      ].filter(Boolean).join("\n"), diff.unavailableReason ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-viewer", {
+    description: "Show whether a MABS viewer owns the Code surface: /mabs-viewer [status]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      ctx.ui.notify(await run(["viewer", extra[0] ?? "status", ...extra.slice(1)]), "info");
+    },
+  });
+
   pi.registerCommand("mabs-project", {
     description: "Run a project command, e.g. /mabs-project list",
     handler: async (args, ctx) => ctx.ui.notify(await run(["project", ...words(args)]), "info"),
