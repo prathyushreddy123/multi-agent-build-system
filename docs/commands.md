@@ -18,6 +18,7 @@ Run commands from the MABS checkout. This is a curated reference; `node src/cli.
 | `node src/cli.ts review decide TASK_ID` | Why a task does or does not need review |
 | `node src/cli.ts profile inspect /absolute/path/to/repo` | Detected components, checks, and setup needs |
 | `node src/cli.ts ui` | Localhost workbench; does not start dispatch, but its controls can mutate records |
+| `node src/cli.ts operator probe` | Pi, Herdr, viewer, and worktree capabilities of the installed tools ([details](operator/phase-0-capabilities.md)) |
 
 Inspection commands do not launch workers. Commands that open MABS records can initialize or migrate the local database; they are not a promise of zero filesystem writes.
 

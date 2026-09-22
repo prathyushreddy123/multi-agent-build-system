@@ -56,6 +56,7 @@ import {
   type ExperimentVariant,
 } from "./optimization/experiments.ts";
 import { routingOutcomes } from "./optimization/routing.ts";
+import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/capabilities.ts";
 import { openRecords } from "./store/records.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
@@ -161,6 +162,7 @@ Commands:
   maintenance backup                        Create a consistent SQLite backup
   maintenance prune [--apply]                Preview or apply evidence retention
   ui [--port=4317]                          Run the localhost workbench
+  operator probe [--json] [--repo=<path>]    Prove Pi, Herdr, viewer, and worktree capabilities
 `);
 }
 
@@ -196,6 +198,16 @@ async function main(): Promise<void> {
     const only = textOption(args, "only")?.split(",").filter(Boolean);
     const harnesses = textOption(args, "harness")?.split(",").filter(Boolean);
     await runBaseline({ only, harnesses });
+    return;
+  }
+  if (area === "operator" && action === "probe") {
+    const args = parseArgs(rest);
+    const capabilities = await probeOperatorCapabilities({ repoPath: textOption(args, "repo") });
+    console.log(args.options.has("json") ? JSON.stringify(capabilities, null, 2) : renderCapabilityReport(capabilities));
+    // Only the two narrow integration proofs gate the exit status. A missing
+    // optional capability is reported with its limitation, not treated as a failure.
+    const proofs = new Set(["OP0-10", "OP0-11"]);
+    if (capabilities.probes.some((probe) => proofs.has(probe.id) && probe.status !== "PASS")) process.exitCode = 1;
     return;
   }
 
