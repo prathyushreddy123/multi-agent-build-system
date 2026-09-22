@@ -61,6 +61,7 @@ import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
 import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
 import { buildProgressSnapshot } from "./operator/progress.ts";
 import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
+import { closeWorkspace, openWorkspace, workspaceStatus } from "./operator/herdr.ts";
 import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
@@ -188,6 +189,11 @@ Logs surface (original evidence; closing it never stops a worker):
   logs <task> [--attempt=<id>]                        List evidence for a task and its attempts
   logs <task> --evidence=<id> [--tail=200]            Open one evidence record
   logs <task> --evidence=<id> --follow                Follow it in bounded chunks
+
+Workspace (creates only missing operator surfaces; closes only what it owns):
+  workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
+  workspace status
+  workspace close
 `);
 }
 
@@ -236,6 +242,34 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (area === "workspace") {
+    const args = parseArgs(rest);
+    if (action === "status") {
+      console.log(JSON.stringify(await workspaceStatus(), null, 2));
+      return;
+    }
+    if (action === "close") {
+      console.log(JSON.stringify(await closeWorkspace(), null, 2));
+      return;
+    }
+    if (action === "open") {
+      const layout = textOption(args, "layout", "tabs");
+      if (layout !== "tabs" && layout !== "split") throw new Error("--layout must be tabs or split");
+      const focus = textOption(args, "focus") ?? null;
+      if (focus && !["agent", "code", "tasks", "logs"].includes(focus)) {
+        throw new Error("--focus must be agent, code, tasks, or logs");
+      }
+      const result = await openWorkspace({
+        repoPath: resolve(textOption(args, "repo") ?? process.cwd()),
+        projectId: textOption(args, "project") ?? null,
+        layout,
+        focus: focus as never,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    throw new Error(`Usage: mabs workspace open|status|close`);
+  }
   if (area === "viewer" && action === "serve") {
     const args = parseArgs(rest);
     const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;

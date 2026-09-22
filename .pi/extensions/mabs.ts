@@ -221,6 +221,38 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("mabs-workspace", {
+    description: "Create or recover the Agent, Code, Tasks, and Logs surfaces: /mabs-workspace [open|status|close]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const action = extra[0] ?? "open";
+      if (!["open", "status", "close"].includes(action)) throw new Error("Usage: /mabs-workspace [open|status|close]");
+      const output = await run(["workspace", action, ...extra.slice(1)]);
+      if (action === "status") { ctx.ui.notify(output, "info"); return; }
+      if (action === "close") {
+        const closed = JSON.parse(output) as { closed: string[]; kept: { surface: string; reason: string }[]; notes: string[] };
+        ctx.ui.notify([
+          closed.closed.length > 0 ? `Closed: ${closed.closed.join(", ")}` : "Nothing owned by MABS was open.",
+          ...closed.kept.map((entry) => `  kept ${entry.surface}: ${entry.reason}`),
+          ...closed.notes,
+        ].join("\n"), "info");
+        return;
+      }
+      const result = JSON.parse(output) as {
+        degraded: boolean; layout: string;
+        surfaces: { surface: string; action: string; paneId: string | null; reason: string }[];
+        notes: string[];
+      };
+      ctx.ui.notify([
+        result.degraded
+          ? "Herdr is not driving this session; every surface is available as a CLI command:"
+          : `Operator workspace (${result.layout} layout):`,
+        ...result.surfaces.map((surface) => `  ${surface.action.padEnd(9)} ${surface.surface.padEnd(6)} ${surface.paneId ?? ""}  ${surface.reason}`),
+        ...result.notes.map((note) => `  · ${note}`),
+      ].join("\n"), result.degraded ? "warning" : "info");
+    },
+  });
+
   pi.registerCommand("mabs-logs", {
     description: "Open original task evidence: /mabs-logs <task> [--attempt=<id>] [--evidence=<id>] [--tail=200]",
     handler: async (args, ctx) => {

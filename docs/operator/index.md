@@ -23,6 +23,8 @@ The controller stays the scheduler and the only writer of task transitions. Work
 | [Code browsing and file opening](code-surface.md) | The shared resolver, changed files, the viewer, and path safety |
 | [Tasks and recorded steps](tasks-surface.md) | The read-only dashboard, what a step is, and what is not instrumented |
 | [Logs and evidence](logs-surface.md) | Selecting evidence, following safely, and what retention and redaction do |
+| [Workspace automation](workspace.md) | Creating and recovering surfaces, ownership, focus, and rollback |
+| [Release acceptance](release-acceptance.md) | Matrix results, the end-to-end run, and what is not verified |
 | [Phase 0 capabilities](phase-0-capabilities.md) | What the installed Pi, Herdr, viewer, and editor actually support, and the two integration proofs |
 | [Progress note](progress.md) | Phase status, changed files, checks, blockers, and next action |
 
@@ -33,6 +35,14 @@ The controller stays the scheduler and the only writer of task transitions. Work
 - No new model calls, API billing, automatic merge, push, or deployment.
 - No provider routing or authentication change.
 - Disabling the feature leaves the original CLI, Pi integration, and workbench working.
+
+## Open everything at once
+
+```bash
+node src/cli.ts workspace open --project=PROJECT_ID
+```
+
+Creates only the surfaces that are missing and reuses the ones it already owns, so it is safe to run repeatedly. Outside Herdr it prints the equivalent CLI command for each surface instead of failing. See [workspace automation](workspace.md).
 
 ## Verify the environment
 

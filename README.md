@@ -13,6 +13,7 @@ MABS coordinates coding workers, runs your repository's checks, and keeps a reco
 - **Understand failures.** Inspect attempts, logs, review findings, and the reason a task is blocked.
 - **Continue after an interruption.** A restarted controller reconciles recorded workers rather than blindly starting them again.
 - **Coordinate multiple projects.** Bound concurrency by project and provider; keep paused projects without running workers.
+- **Work in a terminal workspace.** Concise agent output, read-only code browsing bound to the right task worktree, live task progress, and the original evidence — see the [operator workspace](docs/operator/index.md).
 
 ## Is MABS for you?
 
@@ -31,7 +32,7 @@ flowchart TB
     CTRL --> DB[("SQLite: task history")]
 ```
 
-**In words:** you submit a task through the CLI or Pi. The controller launches a worker in a separate checkout, collects its result, runs checks and any required review, and records the outcome. The workbench lets you inspect the records and evidence. The controller does not merge or publish the result.
+**In words:** you submit a task through the CLI or Pi. The controller launches a worker in a separate checkout, collects its result, runs checks and any required review, and records the outcome. The workbench and the [operator workspace](docs/operator/index.md) let you inspect the records and evidence; both are read-only over the controller's data. The controller does not merge or publish the result.
 
 This is a simplified responsibility map—not the full lifecycle. Choose a focused view:
 

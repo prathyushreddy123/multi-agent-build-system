@@ -4,7 +4,7 @@
 
 Resumable record for the MABS Operator Workspace Implementation Plan. After a context reset, read this file, inspect the current diff, and resume the first incomplete phase.
 
-**Current position:** Phase 4 complete. Next action: Phase 5 (workspace automation and release checks).
+**Current position:** All phases complete. Next action: the manual checks below, which need a real provider run or a human attached to the Herdr TUI.
 
 ## Phase status
 
@@ -15,7 +15,7 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 | 2 | Code browsing and reliable file opening | Complete |
 | 3 | Tasks and recorded implementation steps | Complete |
 | 4 | Logs and evidence following | Complete |
-| 5 | Workspace automation and release checks | Not started |
+| 5 | Workspace automation and release checks | Complete |
 
 ## Phase 0 — inspect and prove compatibility
 
@@ -178,6 +178,40 @@ The first reader treated "reached end of file" as "the line is complete" and emi
 
 **Blockers:** none.
 
+## Phase 5 — workspace automation and release checks
+
+**Files changed**
+
+- `src/operator/herdr.ts` (new): session discovery, ownership verification, idempotent surface creation, scoped close.
+- `src/cli.ts`: `workspace open|status|close`.
+- `.pi/extensions/mabs.ts`: `/mabs-workspace`.
+- `test/operator/phase5.test.ts`, `test/operator/acceptance.test.ts` (new).
+- `docs/operator/workspace.md`, `docs/operator/release-acceptance.md` (new); index and command reference updated.
+
+**Checks**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | Clean |
+| `npm run typecheck:extensions` | Clean |
+| `npm test` | 154 passed, 0 failed |
+| Live Herdr acceptance | See [release acceptance](release-acceptance.md) |
+
+**Bug found and fixed during the phase**
+
+A created pane starts a fresh shell and did not inherit the caller's `MABS_STATE_DIR`, so the Code and Tasks surfaces silently read the default store instead of the one the operator was looking at. The MABS environment overrides are now forwarded on pane creation, and a test asserts that only those keys are forwarded. The live run confirmed the viewer then registered in the caller's state directory.
+
+A second, smaller fix: `herdr pane run` exits 0 with no output, and the first helper required JSON from every command, so successful pane commands were reported as failures. The fake `herdr` in the tests was corrected to behave the same way, so the tests exercise the real path.
+
+**Decisions**
+
+- Ownership is proved by returned pane ID plus current workspace membership. A label is display only.
+- A surface command runs only in a pane this call created; a reused pane is left untouched, which is what prevents duplicate watchers and viewers.
+- The Agent pane is never created or closed. It is the user's session.
+- Outside Herdr the plan degrades to CLI commands rather than failing.
+
+**Blockers:** none.
+
 ## Manual checks not executable here
 
 These need a human attached to the Herdr TUI. They are unverified until then, and are not claimed as passing.
@@ -195,3 +229,7 @@ These need a human attached to the Herdr TUI. They are unverified until then, an
 | Selection survives a live refresh | Run `task watch` during real dispatch, select a row, confirm it stays selected as rows change |
 | The dashboard reports a controller restart | Stop and restart the controller while `task watch` is open; confirm it shows stale, then recovers |
 | Following a live provider transcript | Follow an attempt during a real worker run and confirm output appears without duplication |
+| A real worker run end to end | Register a project, submit a task, run the controller, and watch all four surfaces during dispatch |
+| Split layout ergonomics | `workspace open --layout=split` and confirm Agent and Code are both readable |
+
+These are recorded with their expected results in [release acceptance](release-acceptance.md).

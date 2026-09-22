@@ -99,6 +99,7 @@ These affect presentation only. None of them starts work, changes task state, or
 | `/mabs-progress` | Read-only task, attempt, and recorded-step view |
 | `/mabs-steps TASK` | Recorded implementation steps for one task |
 | `/mabs-logs TASK [--evidence=ID]` | List or open the original evidence for a task |
+| `/mabs-workspace [open\|status\|close]` | Create or recover the Agent, Code, Tasks, and Logs surfaces |
 
 Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
 
@@ -137,6 +138,16 @@ Original evidence only, read from the MABS artifacts directory. Closing or inter
 | `node src/cli.ts logs TASK_ID --attempt=ATTEMPT_ID` | Narrowed to one attempt; earlier attempts stay available |
 | `node src/cli.ts logs TASK_ID --evidence=ID [--tail=200]` | One evidence record's tail |
 | `node src/cli.ts logs TASK_ID --evidence=ID --follow` | Bounded following that survives appends and rotation |
+
+### Workspace from the CLI
+
+Creates only missing surfaces and closes only what it owns. See [workspace automation](operator/workspace.md).
+
+| Command | Effect |
+| --- | --- |
+| `node src/cli.ts workspace open [--project=PROJECT_ID] [--layout=tabs\|split] [--focus=code]` | Create or recover the four surfaces; safe to repeat |
+| `node src/cli.ts workspace status` | Which surfaces this feature still owns |
+| `node src/cli.ts workspace close` | Close only operator-owned panes; never the Agent pane, never a worker |
 
 ## Verification is not all the same
 

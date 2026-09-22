@@ -43,6 +43,21 @@ E6 distinguishes real provider runs, local runtime checks, and simulated operati
 | 2 | Layered visual architecture | [Summary](phases/documentation-phase-2-summary.md) |
 | 3 | Practical guides, cleanup, and consistency audit | [Summary](phases/documentation-phase-3-summary.md) |
 
+## Operator workspace — 22 September 2026
+
+A Herdr and Pi workspace with Agent, Code, Tasks, and Logs surfaces, built on the existing controller, task store, and evidence. It is presentation and read-only inspection only: no second scheduler, no duplicate task store, and no change to model-facing tool results.
+
+| Phase | Focus | Evidence |
+| --- | --- | --- |
+| 0 | Capability proof against the installed Pi and Herdr | [Capabilities](operator/phase-0-capabilities.md) |
+| 1 | Compact agent output derived from execution facts | [Compact output](operator/compact-output.md) |
+| 2 | Code browsing through one shared task/worktree resolver | [Code surface](operator/code-surface.md) |
+| 3 | Read-only task and recorded-step view | [Tasks surface](operator/tasks-surface.md) |
+| 4 | Evidence lookup and safe following | [Logs surface](operator/logs-surface.md) |
+| 5 | Idempotent workspace automation | [Workspace](operator/workspace.md) |
+
+The [release acceptance record](operator/release-acceptance.md) separates automated results, live results on the verification machine, and checks that remain unverified. The [progress note](operator/progress.md) is the resumable implementation record.
+
 ## Reading evidence correctly
 
 - Paths under `~/.local/state/mabs` refer to the original verification machine. A fresh clone does not contain those private runtime artifacts.
