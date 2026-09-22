@@ -96,6 +96,24 @@ See the [restart diagram](architecture/recovery-and-failures.md#controller-resta
 - The current UI refreshes the overview every ten seconds and can replace a detail view. Use `task show` for uninterrupted inspection; stable task URLs are not implemented.
 - Do not expose the workbench publicly. Its capability token is a local control mechanism, not a multi-user login system.
 
+## MABS tools missing in pi, or every first turn fails
+
+Symptoms, on pi 0.86 or newer with `pi-claude-agent-sdk` 0.8.6:
+
+- The first message of each pi session fails with `No conversation found with session ID: ...`, and a `Session file issue: file missing after save` warning precedes it. A second message usually succeeds.
+- No `mabs_*` tool ever runs. The model describes calling one and reports task counts it invented, because pi's prompt advertises tools the bridge never registered.
+
+The second symptom is the dangerous one: fabricated task state is exactly what MABS exists to prevent. Treat any run that shows it as unverified.
+
+pi 0.86 changed the provider contract the bridge reads. Apply the shim and re-verify:
+
+```bash
+.pi/patches/apply.sh
+# Mutation: edits the installed pi extension, not this repository.
+```
+
+See [`.pi/patches/README.md`](../.pi/patches/README.md) for the cause, the verification command, and when to drop the patch. Re-run it after every `pi update` — an update restores the stock package and both symptoms return.
+
 ## Asking for help
 
 Share the MABS Git revision, Node version, exact command, task state/failure class, and a short sanitized error excerpt. Include a minimal reproduction if possible.
