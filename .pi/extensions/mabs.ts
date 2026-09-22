@@ -192,6 +192,35 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("mabs-progress", {
+    description: "Read-only task, attempt, and recorded-step view: /mabs-progress [--project=<id>]",
+    handler: async (args, ctx) => {
+      // The dashboard never schedules work; this is a snapshot of what is recorded.
+      ctx.ui.notify(await run(["task", "watch", ...words(args), "--once"]), "info");
+    },
+  });
+
+  pi.registerCommand("mabs-steps", {
+    description: "Recorded implementation steps for one task: /mabs-steps <task>",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-steps <task>");
+      const detail = JSON.parse(await run(["task", "steps", ...extra])) as {
+        task: { state: string; steps: { kind: string; status: string; summary: string; attemptNumber: number | null }[]; stepGaps: string[]; delivery: string };
+        controller: { state: string; stale: boolean; reason: string };
+      };
+      const steps = detail.task.steps.map(
+        (step) => `  ${step.status.padEnd(10)} #${String(step.attemptNumber ?? "-")} ${step.kind.padEnd(24)} ${step.summary}`,
+      );
+      ctx.ui.notify([
+        `state ${detail.task.state} · delivery ${detail.task.delivery}`,
+        ...(steps.length > 0 ? steps : ["  No steps have been recorded for this task yet."]),
+        ...detail.task.stepGaps.map((gap) => `  unavailable: ${gap}`),
+        detail.controller.stale ? `  ⚠ ${detail.controller.reason}` : "",
+      ].filter(Boolean).join("\n"), detail.controller.stale ? "warning" : "info");
+    },
+  });
+
   pi.registerCommand("mabs-viewer", {
     description: "Show whether a MABS viewer owns the Code surface: /mabs-viewer [status]",
     handler: async (args, ctx) => {

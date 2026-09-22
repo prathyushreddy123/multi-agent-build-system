@@ -96,6 +96,8 @@ These affect presentation only. None of them starts work, changes task state, or
 | `/mabs-open TASK PATH --line=N` | Open a file in the Code surface |
 | `/mabs-diff TASK PATH` | Diff a file against the task's recorded base revision |
 | `/mabs-viewer` | Show whether a MABS viewer owns the Code surface |
+| `/mabs-progress` | Read-only task, attempt, and recorded-step view |
+| `/mabs-steps TASK` | Recorded implementation steps for one task |
 
 Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
 
@@ -112,6 +114,17 @@ Read-only inspection of one task worktree. These do not start workers or change 
 | `node src/cli.ts dispatch 'mabs://open/...'` | The same, from a link; other schemes are refused |
 | `node src/cli.ts viewer serve [--surface=code]` | Run the owned read-only viewer; Ctrl+C stops only the viewer |
 | `node src/cli.ts viewer status` | Whether a viewer owns a surface |
+
+### Tasks surface from the CLI
+
+Read-only. These never schedule work or change task state, and `Ctrl+C` stops only the dashboard. See the [Tasks surface guide](operator/tasks-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts task watch [--project=PROJECT_ID]` | Live dashboard of tasks, attempts, steps, and freshness |
+| `node src/cli.ts task watch --once` | One frame, for a non-interactive caller |
+| `node src/cli.ts task watch --json` | The whole snapshot as JSON |
+| `node src/cli.ts task steps TASK_ID` | Recorded steps, gaps, and delivery state for one task |
 
 ## Verification is not all the same
 

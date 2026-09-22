@@ -4,7 +4,7 @@
 
 Resumable record for the MABS Operator Workspace Implementation Plan. After a context reset, read this file, inspect the current diff, and resume the first incomplete phase.
 
-**Current position:** Phase 2 complete. Next action: Phase 3 (Tasks and recorded implementation steps).
+**Current position:** Phase 3 complete. Next action: Phase 4 (Logs and evidence following).
 
 ## Phase status
 
@@ -13,7 +13,7 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 | 0 | Inspect and prove compatibility | Complete |
 | 1 | Compact Agent output | Complete |
 | 2 | Code browsing and reliable file opening | Complete |
-| 3 | Tasks and recorded implementation steps | Not started |
+| 3 | Tasks and recorded implementation steps | Complete |
 | 4 | Logs and evidence following | Not started |
 | 5 | Workspace automation and release checks | Not started |
 
@@ -111,6 +111,41 @@ Two task worktrees holding different content at the same relative path; filename
 
 **Blockers:** none.
 
+## Phase 3 — Tasks and recorded implementation steps
+
+**Files changed**
+
+- `src/operator/progress.ts` (new): read-only snapshot, step assembly, freshness, delivery, provider availability.
+- `src/operator/dashboard.ts` (new): the Tasks surface, its pure renderer, and the bounded polling loop.
+- `src/cli.ts`: `task watch [--project] [--interval] [--once|--json]`, `task steps <task>`.
+- `.pi/extensions/mabs.ts`: `/mabs-progress`, `/mabs-steps`.
+- `test/operator/phase3.test.ts` (new).
+- `docs/operator/tasks-surface.md` (new); index and command reference updated.
+
+**Checks**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | Clean |
+| `npm run typecheck:extensions` | Clean |
+| `npm test` | 126 passed, 0 failed |
+| Live `task watch` against real records | Rendered two queued tasks, an unknown controller, and the missing-step note |
+
+**Finding: step instrumentation already exists**
+
+The plan allowed for adding an event contract if step events were absent. They are not. The controller records a checkpoint at every boundary it owns (`implementation_complete`, `repair_complete`, `checks_passed`, `checks_failed`, `review_*`, `worker_blocked`, `attempt_failed`, `quality_not_configured`), and gates and reviews are recorded separately. Steps are therefore derived from existing records, with no parallel step table and no controller change.
+
+The real gap is progress *inside* a running attempt: the worker reports only at the end. That is labelled unavailable everywhere it matters, and the shape a future executor-side contract would need (stable execution ID plus monotonic sequence, persisted by the controller) is documented rather than faked.
+
+**Decisions**
+
+- Grouping never replaces the state machine; the authoritative state travels with every row.
+- Selection follows the task ID across refreshes, and the scroll offset is clamped rather than reset.
+- Delivery is tracked from outward-action approvals and stays separate from task completion and from check and review outcomes.
+- Provider availability is `unknown` without a capacity or health record.
+
+**Blockers:** none.
+
 ## Manual checks not executable here
 
 These need a human attached to the Herdr TUI. They are unverified until then, and are not claimed as passing.
@@ -125,3 +160,5 @@ These need a human attached to the Herdr TUI. They are unverified until then, an
 | A picker appears for an ambiguous task | Run `/mabs-open` with two active tasks and confirm the selector lists both |
 | The viewer opens in its own pane | Run `viewer serve` in a second pane, then `/mabs-open` from the Agent pane |
 | Opening a file does not steal focus from a background worker | Start a worker, open a file, confirm focus follows the explicit action only |
+| Selection survives a live refresh | Run `task watch` during real dispatch, select a row, confirm it stays selected as rows change |
+| The dashboard reports a controller restart | Stop and restart the controller while `task watch` is open; confirm it shows stale, then recovers |

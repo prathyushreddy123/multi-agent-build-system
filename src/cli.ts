@@ -58,6 +58,8 @@ import {
 import { routingOutcomes } from "./optimization/routing.ts";
 import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/capabilities.ts";
 import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
+import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
+import { buildProgressSnapshot } from "./operator/progress.ts";
 import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
@@ -176,6 +178,10 @@ Code surface (read-only inspection of a task worktree):
   dispatch <mabs://open/...>                          Open a MABS link through the same resolver
   viewer serve [--surface=code] [--viewer=vim]        Run the owned read-only viewer
   viewer status [--surface=code]                      Show whether a viewer owns this surface
+
+Tasks surface (read-only; never schedules work or changes task state):
+  task watch [--project=<id>] [--interval=1000] [--json|--once]
+  task steps <task>                                   Recorded implementation steps for one task
 `);
 }
 
@@ -446,6 +452,46 @@ async function main(): Promise<void> {
         projectId: textOption(args, "project"),
         state: textOption(args, "state") as never,
       }), null, 2));
+      return;
+    }
+    if (area === "task" && action === "watch") {
+      const args = parseArgs(rest);
+      const projectValue = textOption(args, "project");
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
+      const once = args.options.has("once") || args.options.has("json") || !process.stdout.isTTY;
+      if (once) {
+        // Non-interactive callers get one honest snapshot rather than a loop
+        // that would never repaint.
+        const snapshot = buildProgressSnapshot(records, { projectId: project?.id, withSteps: true });
+        if (args.options.has("json")) console.log(JSON.stringify(snapshot, null, 2));
+        else console.log(renderDashboard(snapshot, reconcileView(snapshot, { ...INITIAL_VIEW, pageSize: 50 })));
+        return;
+      }
+      keepOpen = true;
+      const stop = new AbortController();
+      const watching = watchTasks(records, {
+        projectId: project?.id,
+        intervalMs: numberOption(args, "interval", 1000),
+        signal: stop.signal,
+      });
+      // Ctrl-C stops this dashboard only. No worker or task is touched.
+      await Promise.race([watching, waitForSignal(() => stop.abort())]);
+      await watching.catch(() => undefined);
+      records.store.close();
+      return;
+    }
+    if (area === "task" && action === "steps") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      if (!id) throw new Error("Usage: mabs task steps <id>");
+      const snapshot = buildProgressSnapshot(records, { taskId: id, withSteps: true });
+      if (snapshot.tasks.length === 0) throw new Error(`Unknown task ${id}`);
+      console.log(JSON.stringify({
+        task: snapshot.tasks[0],
+        controller: snapshot.controller,
+        notes: snapshot.notes,
+      }, null, 2));
       return;
     }
     if (area === "task" && action === "show") {
