@@ -83,6 +83,15 @@ Database records are retained indefinitely. Attempt artifacts become eligible af
 
 See [state locations and overrides](getting-started.md#where-things-live) and the [retention implementation](../src/maintenance/retention.ts).
 
+## Operator workspace (Pi slash commands)
+
+These affect presentation only. None of them starts work, changes task state, or reaches a provider. See the [operator workspace](operator/index.md).
+
+| Command | Effect |
+| --- | --- |
+| `/mabs-verbose on\|off` | Show original tool output instead of compact summaries; persists across sessions |
+| `/mabs-compact on\|off` | Enable or disable the operator presentation layer, then `/reload` |
+
 ## Verification is not all the same
 
 - `npm test` and `npm run typecheck`: local repository checks.

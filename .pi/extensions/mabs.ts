@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { compactToolRegistrar } from "./mabs-ux.ts";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = resolve(ROOT, "src/cli.ts");
 const MAX_OUTPUT = 12_000;
@@ -28,6 +30,10 @@ export default function mabsExtension(pi: ExtensionAPI) {
     if (result.code !== 0) throw new Error(output || `mabs exited ${result.code}`);
     return output;
   }
+
+  // Every MABS tool is drawn by the operator presentation layer, so custom
+  // tools and forwarded worker output follow the same rules as Pi's built-ins.
+  const registerCompactTool = compactToolRegistrar(pi);
 
   pi.on("session_start", async (_event, ctx) => {
     try {
@@ -163,7 +169,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_status",
     label: "MABS Status",
     description: "Read the durable MABS project, task, approval, and controller-health summary. Output is capped at 12KB.",
@@ -189,7 +195,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     executionReason: Type.String({ description: "Why this task runs that way" }),
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_create_brief",
     label: "Create MABS Product Brief",
     description: "Record a product idea durably before any repository or project exists. Returns the brief with its ID and version.",
@@ -214,7 +220,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_update_brief",
     label: "Update MABS Product Brief",
     description: "Record answers, assumptions, or a scope revision on a brief. Requires the brief version you last read, so concurrent edits cannot be lost.",
@@ -264,7 +270,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_ask_clarifications",
     label: "Record MABS Clarifications",
     description: "Persist only material questions for a product brief, including why each answer would change the plan.",
@@ -291,7 +297,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_answer_clarification",
     label: "Record MABS Clarification Answer",
     description: "Persist the user's answer to one material question, or an explicitly labeled assumption when no answer is available.",
@@ -316,7 +322,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_propose_plan",
     label: "Propose MABS Product Plan",
     description: "Persist a structured proposal with requirements, milestones, tasks, dependencies, scope, and rationale. The plan is validated before it can be presented.",
@@ -354,7 +360,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_accept_plan",
     label: "Record MABS Plan Acceptance",
     description: "Bind a decision the user actually made to one exact proposal version. Requires the proposal fingerprint and the name of the person who accepted.",
@@ -382,7 +388,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_get_operations",
     label: "Get MABS Operations",
     description: "Show effective CI, deployment, monitoring, scheduling, delivery, and cost settings. All are disabled/manual by default.",
@@ -393,7 +399,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_prepare_operation",
     label: "Prepare MABS Operation",
     description: "Return a dry-run plan for one optional capability. This never writes provider configuration or performs an external action.",
@@ -414,7 +420,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_bootstrap_project",
     label: "Bootstrap MABS Project",
     description: "Safely scaffold an accepted product in a user-selected local directory. Refuses unrelated non-empty directories, records every step, and resumes by bootstrap ID without duplicate projects.",
@@ -447,7 +453,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_submit_plan",
     label: "Submit Accepted MABS Plan",
     description: "Apply the accepted, validated plan to the registered project. No hand-written plan JSON is involved.",
@@ -467,7 +473,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_get_product",
     label: "Get MABS Product State",
     description: "Return the current brief, pending decisions, tasks, outputs, and next actions for a product, in a concise form.",
@@ -479,7 +485,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_submit_task",
     label: "Submit MABS Task",
     description: "Submit a scoped task to an already registered MABS project. This does not approve push, merge, or deployment.",

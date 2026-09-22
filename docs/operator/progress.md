@@ -4,14 +4,14 @@
 
 Resumable record for the MABS Operator Workspace Implementation Plan. After a context reset, read this file, inspect the current diff, and resume the first incomplete phase.
 
-**Current position:** Phase 0 complete. Next action: Phase 1 (compact Agent output).
+**Current position:** Phase 1 complete. Next action: Phase 2 (Code browsing and reliable file opening).
 
 ## Phase status
 
 | Phase | Focus | Status |
 | --- | --- | --- |
 | 0 | Inspect and prove compatibility | Complete |
-| 1 | Compact Agent output | Not started |
+| 1 | Compact Agent output | Complete |
 | 2 | Code browsing and reliable file opening | Not started |
 | 3 | Tasks and recorded implementation steps | Not started |
 | 4 | Logs and evidence following | Not started |
@@ -44,6 +44,36 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 
 **Blockers:** none.
 
+## Phase 1 — compact Agent output
+
+**Files changed**
+
+- `src/operator/summaries.ts` (new): factual execution summaries and reporter recognition.
+- `src/operator/rendering.ts` (new): compact/expanded line construction, shell-result fact extraction, control-sequence escaping, renderer replacement.
+- `src/operator/preferences.ts` (new): persisted operator preferences, kept out of the task store.
+- `.pi/extensions/mabs-ux.ts` (new): the Pi presentation layer, `/mabs-verbose`, `/mabs-compact`.
+- `.pi/extensions/mabs.ts`: all thirteen MABS tools now register through the shared compact renderer.
+- `scripts/link-pi.mjs`, `tsconfig.extensions.json`, `package.json`: optional dev link so the extension can be typechecked and load-tested.
+- `test/operator/phase1.test.ts`, `test/operator/extension-load.test.ts` (new).
+- `docs/operator/compact-output.md` (new); index and command reference updated.
+
+**Checks**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | Clean |
+| `npm run typecheck:extensions` | Clean (requires `npm run link-pi`) |
+| `npm test` | 95 passed, 0 failed |
+| Live extension load in a real Pi process | `pi --mode rpc` loaded both extensions and set their status lines; no model call |
+
+**Decisions**
+
+- Built-ins are re-registered from Pi's own definition object with only the two render functions replaced, so the executor, schema, and the user's configured shell path and command prefix are preserved. Re-creating the tools from defaults would have dropped those settings.
+- `powershell` is not re-registered; this checkout targets WSL.
+- `npm run link-pi` symlinks the globally installed Pi into `node_modules` for typechecking and the load test. It installs and upgrades nothing, and the base `npm run typecheck` does not need it.
+
+**Blockers:** none.
+
 ## Manual checks not executable here
 
 These need a human attached to the Herdr TUI. They are unverified until then, and are not claimed as passing.
@@ -53,3 +83,5 @@ These need a human attached to the Herdr TUI. They are unverified until then, an
 | Clicking a file reference opens the Code surface | Attach to Herdr, run a task, click a path in the Agent pane |
 | Focus is preserved during background execution | Start a worker, keep typing in the Agent pane, confirm focus does not move |
 | Split layout remains usable | Open the workspace, confirm Agent and Code are readable side by side |
+| Compact rows expand with `ctrl+e` | Run a command in an interactive Pi session and toggle the row |
+| `/mabs-verbose on` survives a restart | Toggle it, quit Pi, start it again |

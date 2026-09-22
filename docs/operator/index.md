@@ -19,6 +19,7 @@ The controller stays the scheduler and the only writer of task transitions. Work
 
 | Page | Contents |
 | --- | --- |
+| [Compact Agent output](compact-output.md) | What a summary is allowed to say, the commands, and how to turn it off |
 | [Phase 0 capabilities](phase-0-capabilities.md) | What the installed Pi, Herdr, viewer, and editor actually support, and the two integration proofs |
 | [Progress note](progress.md) | Phase status, changed files, checks, blockers, and next action |
 
@@ -37,3 +38,10 @@ node src/cli.ts operator probe
 ```
 
 Re-run after upgrading Pi or Herdr and compare with the versions recorded in [Phase 0 capabilities](phase-0-capabilities.md).
+
+To typecheck and load-test the Pi extension locally, link the installed Pi into `node_modules` first. This installs and upgrades nothing:
+
+```bash
+npm run link-pi                 # npm run link-pi -- --remove to undo
+npm run typecheck:extensions
+```
