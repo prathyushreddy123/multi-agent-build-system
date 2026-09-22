@@ -98,6 +98,7 @@ These affect presentation only. None of them starts work, changes task state, or
 | `/mabs-viewer` | Show whether a MABS viewer owns the Code surface |
 | `/mabs-progress` | Read-only task, attempt, and recorded-step view |
 | `/mabs-steps TASK` | Recorded implementation steps for one task |
+| `/mabs-logs TASK [--evidence=ID]` | List or open the original evidence for a task |
 
 Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
 
@@ -125,6 +126,17 @@ Read-only. These never schedule work or change task state, and `Ctrl+C` stops on
 | `node src/cli.ts task watch --once` | One frame, for a non-interactive caller |
 | `node src/cli.ts task watch --json` | The whole snapshot as JSON |
 | `node src/cli.ts task steps TASK_ID` | Recorded steps, gaps, and delivery state for one task |
+
+### Logs surface from the CLI
+
+Original evidence only, read from the MABS artifacts directory. Closing or interrupting these never stops a worker. See the [Logs surface guide](operator/logs-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts logs TASK_ID` | Evidence records for a task and its attempts |
+| `node src/cli.ts logs TASK_ID --attempt=ATTEMPT_ID` | Narrowed to one attempt; earlier attempts stay available |
+| `node src/cli.ts logs TASK_ID --evidence=ID [--tail=200]` | One evidence record's tail |
+| `node src/cli.ts logs TASK_ID --evidence=ID --follow` | Bounded following that survives appends and rotation |
 
 ## Verification is not all the same
 

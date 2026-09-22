@@ -221,6 +221,31 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("mabs-logs", {
+    description: "Open original task evidence: /mabs-logs <task> [--attempt=<id>] [--evidence=<id>] [--tail=200]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-logs <task> [--attempt=<id>] [--evidence=<id>]");
+      if (extra.some((word) => word.startsWith("--evidence"))) {
+        // Opening one record streams its bounded tail rather than the whole file.
+        ctx.ui.notify(await run(["logs", ...extra]), "info");
+        return;
+      }
+      const listing = JSON.parse(await run(["logs", ...extra])) as {
+        entries: { id: string; label: string; exists: boolean; kind: string; attemptNumber: number | null; sizeBytes: number | null }[];
+        notes: string[];
+      };
+      const rows = listing.entries.map((item) =>
+        `  ${item.exists ? " " : "✕"} ${String(item.attemptNumber ?? "-").padStart(2)} ${item.kind.padEnd(18)} ${item.label.padEnd(36)} ${item.id}`,
+      );
+      ctx.ui.notify([
+        `${listing.entries.length} evidence record(s). Open one with --evidence=<id>.`,
+        ...rows,
+        ...listing.notes.map((note) => `  ⚠ ${note}`),
+      ].join("\n"), "info");
+    },
+  });
+
   pi.registerCommand("mabs-viewer", {
     description: "Show whether a MABS viewer owns the Code surface: /mabs-viewer [status]",
     handler: async (args, ctx) => {

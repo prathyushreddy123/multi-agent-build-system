@@ -60,6 +60,7 @@ import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/ca
 import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
 import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
 import { buildProgressSnapshot } from "./operator/progress.ts";
+import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
 import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
@@ -182,6 +183,11 @@ Code surface (read-only inspection of a task worktree):
 Tasks surface (read-only; never schedules work or changes task state):
   task watch [--project=<id>] [--interval=1000] [--json|--once]
   task steps <task>                                   Recorded implementation steps for one task
+
+Logs surface (original evidence; closing it never stops a worker):
+  logs <task> [--attempt=<id>]                        List evidence for a task and its attempts
+  logs <task> --evidence=<id> [--tail=200]            Open one evidence record
+  logs <task> --evidence=<id> --follow                Follow it in bounded chunks
 `);
 }
 
@@ -452,6 +458,59 @@ async function main(): Promise<void> {
         projectId: textOption(args, "project"),
         state: textOption(args, "state") as never,
       }), null, 2));
+      return;
+    }
+    if (area === "logs") {
+      const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
+      const taskValue = args.positionals[0];
+      if (!taskValue) throw new Error("Usage: mabs logs <task> [--attempt=<id>] [--evidence=<id>] [--follow]");
+      const task = records.getTask(taskValue) ?? records.listTasks().find((item) => item.id.startsWith(taskValue));
+      if (!task) throw new Error(`Unknown task ${taskValue}`);
+      const listing = listEvidence(records, { taskId: task.id, attemptId: textOption(args, "attempt") });
+
+      const evidenceId = textOption(args, "evidence");
+      if (!evidenceId) {
+        console.log(JSON.stringify(listing, null, 2));
+        return;
+      }
+      const selected = listing.entries.find((item) => item.id === evidenceId || item.id.endsWith(`:${evidenceId}`));
+      if (!selected) throw new Error(`No evidence ${evidenceId} for task ${task.id}. Run mabs logs ${task.id} to list it.`);
+      if (!selected.exists) {
+        console.log(JSON.stringify({ evidence: selected, unavailableReason: selected.unavailableReason }, null, 2));
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!args.options.has("follow")) {
+        const chunk = args.options.has("from")
+          ? readChunk(selected.path, { offset: numberOption(args, "from", 0) })
+          : readTail(selected.path, numberOption(args, "tail", 200));
+        console.log(`# ${selected.label} — ${selected.path}`);
+        if (selected.navigationNote) console.log(`# ${selected.navigationNote}`);
+        for (const line of chunk.lines) console.log(line);
+        console.log(`# offset ${chunk.to}${chunk.atEnd ? " (end of file)" : ""}`);
+        return;
+      }
+
+      keepOpen = true;
+      const stop = new AbortController();
+      console.log(`# following ${selected.label} — ${selected.path}`);
+      console.log("# Ctrl-C stops following only; the worker keeps running.");
+      const following = (async () => {
+        for await (const chunk of followLog(selected.path, {
+          fromOffset: 0,
+          signal: stop.signal,
+          // The attempt's own state decides when following can end.
+          isFinished: () => records.getAttempt(selected.attemptId ?? "")?.state !== "running",
+        })) {
+          if (chunk.rotated) console.log("# the evidence file was replaced or truncated; following the new file from its start");
+          if (chunk.unavailableReason) console.log(`# ${chunk.unavailableReason}`);
+          for (const line of chunk.lines) console.log(line);
+        }
+      })();
+      await Promise.race([following, waitForSignal(() => stop.abort())]);
+      await following.catch(() => undefined);
+      records.store.close();
       return;
     }
     if (area === "task" && action === "watch") {

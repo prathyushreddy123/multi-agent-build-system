@@ -144,7 +144,7 @@ test("the MABS tool extension keeps its tools and routes them through the compac
     // The Code surface is reachable from Pi through the same resolver as the CLI.
     for (const command of [
       "mabs-changes", "mabs-files", "mabs-open", "mabs-diff", "mabs-viewer",
-      "mabs-progress", "mabs-steps",
+      "mabs-progress", "mabs-steps", "mabs-logs",
     ]) {
       assert.ok(recorded.commands.includes(command), `${command} is not registered`);
     }

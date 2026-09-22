@@ -4,7 +4,7 @@
 
 Resumable record for the MABS Operator Workspace Implementation Plan. After a context reset, read this file, inspect the current diff, and resume the first incomplete phase.
 
-**Current position:** Phase 3 complete. Next action: Phase 4 (Logs and evidence following).
+**Current position:** Phase 4 complete. Next action: Phase 5 (workspace automation and release checks).
 
 ## Phase status
 
@@ -14,7 +14,7 @@ Resumable record for the MABS Operator Workspace Implementation Plan. After a co
 | 1 | Compact Agent output | Complete |
 | 2 | Code browsing and reliable file opening | Complete |
 | 3 | Tasks and recorded implementation steps | Complete |
-| 4 | Logs and evidence following | Not started |
+| 4 | Logs and evidence following | Complete |
 | 5 | Workspace automation and release checks | Not started |
 
 ## Phase 0 — inspect and prove compatibility
@@ -146,6 +146,38 @@ The real gap is progress *inside* a running attempt: the worker reports only at 
 
 **Blockers:** none.
 
+## Phase 4 — Logs and evidence following
+
+**Files changed**
+
+- `src/operator/logs.ts` (new): evidence listing per task and attempt, artifacts containment, bounded chunk reads, tail, and following with rotation handling.
+- `src/operator/progress.ts`: every step now carries `evidenceRefs` pointing at openable evidence records.
+- `src/cli.ts`: `logs <task> [--attempt] [--evidence] [--tail|--from] [--follow]`.
+- `.pi/extensions/mabs.ts`: `/mabs-logs`.
+- `test/operator/phase4.test.ts` (new).
+- `docs/operator/logs-surface.md` (new); index and command reference updated.
+
+**Checks**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | Clean |
+| `npm run typecheck:extensions` | Clean |
+| `npm test` | 137 passed, 0 failed |
+| Live follow with rotation | Appends and a mid-follow file replacement produced no duplicate lines; Ctrl+C left the task `RUNNING` |
+
+**Bug found and fixed during the phase**
+
+The first reader treated "reached end of file" as "the line is complete" and emitted a half-written line. A file mid-write is indistinguishable from one with no final newline, so a trailing fragment is now held back while the run is live and flushed only once the attempt is no longer running.
+
+**Decisions**
+
+- Raw transcripts are kept as written; per-command navigation inside them is labelled unavailable rather than reconstructed from output MABS never recorded as events.
+- Rotation is detected by device and inode, in-place truncation by size against the saved offset.
+- Retention and redaction behaviour is reused unchanged. Evidence files are not content-redacted, and the docs say so.
+
+**Blockers:** none.
+
 ## Manual checks not executable here
 
 These need a human attached to the Herdr TUI. They are unverified until then, and are not claimed as passing.
@@ -162,3 +194,4 @@ These need a human attached to the Herdr TUI. They are unverified until then, an
 | Opening a file does not steal focus from a background worker | Start a worker, open a file, confirm focus follows the explicit action only |
 | Selection survives a live refresh | Run `task watch` during real dispatch, select a row, confirm it stays selected as rows change |
 | The dashboard reports a controller restart | Stop and restart the controller while `task watch` is open; confirm it shows stale, then recovers |
+| Following a live provider transcript | Follow an attempt during a real worker run and confirm output appears without duplication |

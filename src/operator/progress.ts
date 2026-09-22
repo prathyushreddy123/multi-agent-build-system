@@ -59,6 +59,11 @@ export interface TaskStep {
   evidencePaths: string[];
   /** Evidence referenced but no longer on disk. */
   missingEvidence: string[];
+  /**
+   * Evidence record IDs this step points at. Open one directly with
+   * `mabs logs <task> --evidence=<id>`, so a summary is never a dead end.
+   */
+  evidenceRefs: string[];
   durationMs: number | null;
 }
 
@@ -194,6 +199,14 @@ export function stepsForTask(records: Records, taskId: string): TaskStep[] {
       detail: attempt.reason,
       evidencePaths: evidence.present,
       missingEvidence: evidence.missing,
+      // A worker result is only referenced when the attempt actually recorded
+      // an output path; the transcript and completion envelope are conventional
+      // per-attempt paths the Logs surface always lists.
+      evidenceRefs: [
+        ...(attempt.outputPath ? [`result:${attempt.id}`] : []),
+        `transcript:${attempt.id}`,
+        `completion:${attempt.id}`,
+      ],
       durationMs: attempt.endedAt ? Date.parse(attempt.endedAt) - Date.parse(attempt.startedAt) : null,
     });
   }
@@ -214,6 +227,7 @@ export function stepsForTask(records: Records, taskId: string): TaskStep[] {
       detail: checkpoint.nextAction,
       evidencePaths: evidence.present,
       missingEvidence: evidence.missing,
+      evidenceRefs: checkpoint.attemptId ? [`transcript:${checkpoint.attemptId}`] : [],
       durationMs: null,
     });
   }
@@ -233,6 +247,7 @@ export function stepsForTask(records: Records, taskId: string): TaskStep[] {
       detail: gate.command,
       evidencePaths: evidence.present,
       missingEvidence: evidence.missing,
+      evidenceRefs: gate.evidencePath ? [`check:${gate.id}`] : [],
       durationMs: gate.durationMs,
     });
   }
@@ -252,6 +267,7 @@ export function stepsForTask(records: Records, taskId: string): TaskStep[] {
       detail: review.blockingFindings.length > 0 ? `${review.blockingFindings.length} blocking finding(s)` : null,
       evidencePaths: evidence.present,
       missingEvidence: evidence.missing,
+      evidenceRefs: review.evidencePath ? [`review:${review.id}`] : [],
       durationMs: null,
     });
   }
