@@ -43,7 +43,7 @@ import {
   type ReviewMode,
   type ReviewPreset,
 } from "./review/policy.ts";
-import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
+import { createBackup, pruneArtifacts, pruneWorktrees, RETENTION_POLICY } from "./maintenance/retention.ts";
 import { getOperationsConfig, operationsStatus, prepareOperation, prepareOperationsConfig, requestExternalCostApproval, setOperationsConfig } from "./operations/service.ts";
 import type { Capability, OperationsConfig } from "./operations/types.ts";
 import { resolveApplicationProfiles } from "./profiles/index.ts";
@@ -1041,8 +1041,25 @@ async function main(): Promise<void> {
     if (area === "maintenance" && action === "prune") {
       const args = parseArgs(rest);
       const applied = args.options.has("apply");
-      const candidates = pruneArtifacts(records, { apply: applied });
-      console.log(JSON.stringify({ applied, candidates }, null, 2));
+      // Worktrees can be reclaimed on their own, because they are the bulk of
+      // the disk cost and the only part with refusal conditions worth reading.
+      const only = textOption(args, "only");
+      if (only !== undefined && only !== "artifacts" && only !== "worktrees") {
+        throw new Error("--only must be artifacts or worktrees");
+      }
+      const artifacts = only === "worktrees" ? [] : pruneArtifacts(records, { apply: applied });
+      const worktrees = only === "artifacts" ? [] : await pruneWorktrees(records, { apply: applied });
+      const refused = worktrees.filter((candidate) => candidate.refusal !== null);
+      console.log(JSON.stringify({
+        applied,
+        artifacts,
+        worktrees: {
+          // Branches are never touched, so this can never lose a commit.
+          branchesRetained: true,
+          removable: worktrees.filter((candidate) => candidate.refusal === null),
+          refused,
+        },
+      }, null, 2));
       return;
     }
     if (area === "approval" && action === "request") {
