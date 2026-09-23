@@ -250,11 +250,19 @@ export default function mabsExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("mabs-workspace", {
-    description: "Create or recover the Agent, Code, Tasks, and Logs surfaces: /mabs-workspace [open|status|close]",
+    description: "Create or recover the Agent, Code, Tasks, and Logs surfaces: /mabs-workspace [open|status|close|viewer]",
     handler: async (args, ctx) => {
       const extra = words(args);
       const action = extra[0] ?? "open";
-      if (!["open", "status", "close"].includes(action)) throw new Error("Usage: /mabs-workspace [open|status|close]");
+      if (!["open", "status", "close", "viewer"].includes(action)) {
+        throw new Error("Usage: /mabs-workspace [open|status|close|viewer]");
+      }
+      // Viewer ownership is a property of the workspace surfaces, so it belongs
+      // here rather than in a command of its own.
+      if (action === "viewer") {
+        ctx.ui.notify(await run(["viewer", extra[1] ?? "status", ...extra.slice(2)]), "info");
+        return;
+      }
       const output = await run(["workspace", action, ...extra.slice(1)]);
       if (action === "status") { ctx.ui.notify(output, "info"); return; }
       if (action === "close") {
@@ -303,14 +311,6 @@ export default function mabsExtension(pi: ExtensionAPI) {
         ...rows,
         ...listing.notes.map((note) => `  ⚠ ${note}`),
       ].join("\n"), "info");
-    },
-  });
-
-  pi.registerCommand("mabs-viewer", {
-    description: "Show whether a MABS viewer owns the Code surface: /mabs-viewer [status]",
-    handler: async (args, ctx) => {
-      const extra = words(args);
-      ctx.ui.notify(await run(["viewer", extra[0] ?? "status", ...extra.slice(1)]), "info");
     },
   });
 

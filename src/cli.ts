@@ -108,26 +108,21 @@ async function baseBranch(repoPath: string): Promise<string> {
 }
 
 function printHelp(): void {
+  // Tiered on purpose. A flat list of every command makes the eight you need
+  // daily as hard to find as the ones you may never run.
   console.log(`mabs — local multi-agent build controller
 
-Commands:
-  verify [--quick]                          Run Phase 0 subscription/access proof
-  baseline [--only=a,b] [--harness=codex]  Run task-class baseline
-  project add <name> <repo> [--goal=...] [--review=substantive]
-                                               Register a project and discover existing checks
-  project list                              List registered projects
-  project status <id|name> <active|paused|archived>
-  project review <id|name> [required|substantive|none]   Show or set the resolved review policy
-  project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
-  review decide <task>                         Explain the review decision for a task
-  review request <task>                        Record an explicit manual review request
-  project base <id|name> <branch>              Change target and invalidate open approvals
-  requirement add <project> <id> <text>
-  task add <project> <title> --objective=... [--class=small_implementation]
-  task list [--project=id] [--state=READY]
-  task show <id>
-  task retry <id> --version=<recordVersion>
-  task cancel <id> --version=<recordVersion>
+EVERYDAY
+  status                                    Queue, controller liveness, and health
+  controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
+  controller once [--adapter=codex]         Reconcile and dispatch one cycle
+  task list [--project=id] [--state=READY]  What is queued, running, or blocked
+  task show <id>                            One task with its evidence
+  changes [<task>]                          Changed files for a task, with categories
+  diff <task> <path> [--view]               Diff a file against the task's base revision
+  ui [--port=4317]                          Localhost workbench
+
+PRODUCTS AND PLANS
   brief create --payload='{"title":...}'        Start a product brief before any repository exists
   brief list | brief show <brief>
   brief update <brief> --version=N --summary=... --payload='{...}'
@@ -136,20 +131,50 @@ Commands:
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
-  brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript] [--package-manager=...]
-  bootstrap resume <id>                         Resume without duplicate projects or destructive cleanup
-  profile inspect <repo>                        Show components, checks, setup, and artifacts
-  ops status <project>                          Effective disabled/manual operational capabilities
-  ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval|--approval=<id>]
-  ops prepare <project> <capability>             Dry-run only; never executes an external action
-  ops runs <project>                             Recorded operation attempts and recovery state
+  brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript]
   product show <brief>                          Brief, pending decisions, work, outputs, next actions
-  plan validate <file>
-  plan apply <project> <file>
+  plan validate <file> | plan apply <project> <file>
   plan list [--project=id] | plan show <id>
+
+PROJECTS AND TASKS
+  project add <name> <repo> [--goal=...] [--review=substantive]
+  project list | project status <id|name> <active|paused|archived>
+  project review <id|name> [required|substantive|none]
+  project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
+  project base <id|name> <branch>              Change target and invalidate open approvals
+  requirement add <project> <id> <text>
+  task add <project> <title> --objective=... [--class=small_implementation]
+  task retry <id> --version=<recordVersion>
+  task cancel <id> --version=<recordVersion>
+  task watch [--project=<id>] [--interval=1000] [--json|--once]
+  task steps <task>                            Recorded implementation steps
+
+REVIEW, APPROVAL, FEEDBACK
+  review decide <task>                         Explain the review decision for a task
+  review request <task>                        Record an explicit manual review request
+  approval request <task> <action> <target> --reason=...
+  approval approve|reject <id> [--by=name]
   feedback add task|plan <id> <kind> --body=... --version=N
   feedback list [--project=id] | feedback answer <id> --response=...
+
+CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
+  files [<task>] [--filter=...] [--attempt=<id>]
+  open <task> <path> [--line=N] [--view] [--edit]
+  dispatch <mabs://open/...>                   Open a MABS link through the same resolver
+  logs <task> [--attempt=<id>]                 Evidence for a task and its attempts
+  logs <task> --evidence=<id> [--tail=200] [--follow]
+  workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
+  workspace status | workspace close
+  viewer serve [--surface=code] [--viewer=vim] | viewer status [--surface=code]
+
+MAINTENANCE
+  maintenance policy                           Retention and backup defaults
+  maintenance backup                           Consistent SQLite backup
+  maintenance prune [--only=artifacts|worktrees] [--apply]
+                                               Preview or apply retention. Branches are never removed.
   provider list | provider reset <name>
+
+OCCASIONAL — tuning and measurement
   curator analyze|snapshot|suggest <project>
   curator propose <project> <config.json> --title=... --rationale=...
   curator list [project] | curator show <proposal>
@@ -162,39 +187,17 @@ Commands:
   optimization list [project] | optimization show|complete <experiment>
   optimization record <experiment> <baseline|candidate> <case> <measurement.json>
   optimization routing [project]
-  controller once [--adapter=codex]          Reconcile and dispatch one cycle
-  controller run [--adapter=codex] [--ui]   Run controller loop
-  status                                    Show queue and controller health
-  approval request <task> <action> <target> --reason=...
-  approval approve|reject <id> [--by=name]
-  maintenance policy                         Show retention and backup defaults
-  maintenance backup                        Create a consistent SQLite backup
-  maintenance prune [--apply]                Preview or apply evidence retention
-  ui [--port=4317]                          Run the localhost workbench
-  operator probe [--json] [--repo=<path>]    Prove Pi, Herdr, viewer, and worktree capabilities
+  ops status <project>                          Effective disabled/manual operational capabilities
+  ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval]
+  ops prepare <project> <capability>            Dry-run only; never executes an external action
+  ops runs <project>                            Recorded operation attempts and recovery state
 
-Code surface (read-only inspection of a task worktree):
-  files [<task>] [--filter=...] [--attempt=<id>]      Browse every file in the task worktree
-  changes [<task>] [--attempt=<id>]                   List changed files with their categories
-  open <task> <path> [--line=N] [--view] [--edit]     Open a file through the shared resolver
-  diff <task> <path> [--view]                         Diff a file against the task's base revision
-  dispatch <mabs://open/...>                          Open a MABS link through the same resolver
-  viewer serve [--surface=code] [--viewer=vim]        Run the owned read-only viewer
-  viewer status [--surface=code]                      Show whether a viewer owns this surface
-
-Tasks surface (read-only; never schedules work or changes task state):
-  task watch [--project=<id>] [--interval=1000] [--json|--once]
-  task steps <task>                                   Recorded implementation steps for one task
-
-Logs surface (original evidence; closing it never stops a worker):
-  logs <task> [--attempt=<id>]                        List evidence for a task and its attempts
-  logs <task> --evidence=<id> [--tail=200]            Open one evidence record
-  logs <task> --evidence=<id> --follow                Follow it in bounded chunks
-
-Workspace (creates only missing operator surfaces; closes only what it owns):
-  workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
-  workspace status
-  workspace close
+DIAGNOSTIC — when something is wrong or unproven
+  verify [--quick]                              Subscription and access proof
+  baseline [--only=a,b] [--harness=codex]       Task-class baseline; the evidence routing needs
+  operator probe [--json] [--repo=<path>]       Prove Pi, Herdr, viewer, and worktree capabilities
+  profile inspect <repo>                        Components, checks, setup, and artifacts
+  bootstrap resume <id>                         Resume without duplicate projects or cleanup
 `);
 }
 

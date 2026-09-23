@@ -205,40 +205,49 @@ export default function mabsUxExtension(pi: ExtensionAPI) {
   // preferences and status
   // ----------------------------------------------------------------------
 
-  pi.registerCommand("mabs-verbose", {
-    description: "Show full tool output instead of compact summaries: /mabs-verbose on|off",
+  // One command for one concern. Verbosity and the presentation layer were two
+  // separate toggles over the same question: how much of a tool run to show.
+  pi.registerCommand("mabs-display", {
+    description: "Control MABS output rendering: /mabs-display [verbose|compact|off|on|status]",
     handler: async (args, ctx) => {
-      const value = args.trim().toLowerCase();
-      if (value !== "on" && value !== "off" && value !== "") throw new Error("Usage: /mabs-verbose on|off");
-      if (value === "") {
-        ctx.ui.notify(`MABS verbose output is ${verbose ? "on" : "off"} (persisted in operator preferences).`, "info");
+      const value = args.trim().toLowerCase() || "status";
+      const usage = "Usage: /mabs-display verbose|compact|off|on|status";
+
+      if (value === "status") {
+        ctx.ui.notify(
+          `MABS presentation layer is ${preferences.enabled ? "on" : "off"}; output is ${verbose ? "verbose" : "compact"}. ` +
+          "Both are persisted in operator preferences.",
+          "info",
+        );
         return;
       }
-      verbose = value === "on";
-      preferences = updatePreferences({ verbose });
-      // Keep Pi's own expansion state in step so ctrl+e and this command agree.
-      ctx.ui.setToolsExpanded(verbose);
-      ctx.ui.notify(
-        verbose
-          ? "MABS verbose output is on. Executions show their original output."
-          : "MABS verbose output is off. Executions show a compact summary; expand a row for the original output.",
-        "info",
-      );
-    },
-  });
 
-  pi.registerCommand("mabs-compact", {
-    description: "Enable or disable the MABS operator presentation layer: /mabs-compact on|off",
-    handler: async (args, ctx) => {
-      const value = args.trim().toLowerCase();
-      if (value !== "on" && value !== "off") throw new Error("Usage: /mabs-compact on|off");
-      preferences = updatePreferences({ enabled: value === "on" });
-      ctx.ui.notify(
-        value === "on"
-          ? "MABS operator presentation enabled. Run /reload to apply it."
-          : "MABS operator presentation disabled. Run /reload to restore Pi's own tool rendering. Task data is untouched.",
-        "info",
-      );
+      if (value === "verbose" || value === "compact") {
+        verbose = value === "verbose";
+        preferences = updatePreferences({ verbose });
+        // Keep Pi's own expansion state in step so ctrl+e and this command agree.
+        ctx.ui.setToolsExpanded(verbose);
+        ctx.ui.notify(
+          verbose
+            ? "MABS output is verbose. Executions show their original output."
+            : "MABS output is compact. Expand a row for the original output.",
+          "info",
+        );
+        return;
+      }
+
+      if (value === "on" || value === "off") {
+        preferences = updatePreferences({ enabled: value === "on" });
+        ctx.ui.notify(
+          value === "on"
+            ? "MABS operator presentation enabled. Run /reload to apply it."
+            : "MABS operator presentation disabled. Run /reload to restore Pi's own tool rendering. Task data is untouched.",
+          "info",
+        );
+        return;
+      }
+
+      throw new Error(usage);
     },
   });
 

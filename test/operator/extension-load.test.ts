@@ -80,7 +80,9 @@ test("the presentation extension re-registers built-in tools with renderers only
       assert.equal(typeof tool.renderResult, "function", `${tool.name} has no compact result renderer`);
     }
 
-    assert.deepEqual(recorded.commands.sort(), ["mabs-compact", "mabs-verbose"]);
+    // One command covers rendering; verbosity and the presentation layer were
+    // two toggles over the same question.
+    assert.deepEqual(recorded.commands.sort(), ["mabs-display"]);
     // Only observational hooks are used; tool_result would be model-facing.
     assert.ok(recorded.events.includes("tool_execution_start"));
     assert.ok(recorded.events.includes("tool_execution_end"));
@@ -143,11 +145,17 @@ test("the MABS tool extension keeps its tools and routes them through the compac
     assert.ok(recorded.commands.includes("mabs-status"));
     // The Code surface is reachable from Pi through the same resolver as the CLI.
     for (const command of [
-      "mabs-changes", "mabs-files", "mabs-open", "mabs-diff", "mabs-viewer",
+      "mabs-changes", "mabs-files", "mabs-open", "mabs-diff",
       "mabs-progress", "mabs-steps", "mabs-logs", "mabs-workspace",
     ]) {
       assert.ok(recorded.commands.includes(command), `${command} is not registered`);
     }
+    // Viewer ownership is a workspace property, reachable as a subcommand
+    // rather than a command of its own.
+    assert.ok(!recorded.commands.includes("mabs-viewer"), "mabs-viewer should be folded into mabs-workspace");
+    // Assessment is opt-in and must stay separately invocable from intake.
+    assert.ok(recorded.commands.includes("mabs-assess"), "mabs-assess is not registered");
+    assert.ok(recorded.commands.includes("mabs-new"), "mabs-new is not registered");
   });
 });
 
