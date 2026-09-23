@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -354,14 +355,38 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const adapter = args.trim() || "policy";
       if (!["policy", "codex", "claude"].includes(adapter)) throw new Error("Usage: /mabs-start [policy|codex|claude]");
+
+      // Starting a second controller used to be silent and permanent: the loser
+      // of the lease race failed every tick forever with its output discarded.
+      // Check first, and never spawn a twin.
+      const status = JSON.parse(await run(["status"])) as {
+        controller?: { liveness?: { state?: string; reason?: string; startWouldContend?: boolean } };
+      };
+      const liveness = status.controller?.liveness;
+      if (liveness?.startWouldContend) {
+        ctx.ui.notify(`${liveness.reason ?? "A controller is already running."}\nNot starting another.`, "warning");
+        return;
+      }
+      if (liveness?.state === "wedged") {
+        ctx.ui.notify(`${liveness.reason ?? ""}\nNot starting another; investigate that process first.`, "warning");
+        return;
+      }
+
       const adapterArgs = adapter === "policy" ? [] : [`--adapter=${adapter}`];
+      // Keep the output. Discarding it is what hid the lease contention.
+      const logPath = join(ROOT, "controller.log");
+      const log = openSync(logPath, "a");
       const child = spawn(process.execPath, [CLI, "controller", "run", ...adapterArgs, "--ui"], {
         cwd: ROOT,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", log, log],
       });
       child.unref();
-      ctx.ui.notify(`MABS controller started with ${adapter} routing (pid ${child.pid ?? "unknown"})`, "info");
+      closeSync(log);
+      ctx.ui.notify(
+        `MABS controller started with ${adapter} routing (pid ${child.pid ?? "unknown"})\nLog: ${logPath}`,
+        "info",
+      );
     },
   });
 

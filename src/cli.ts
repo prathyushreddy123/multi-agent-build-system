@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
-import { Controller } from "./controller/controller.ts";
+import { Controller, ControllerLeaseHeldError } from "./controller/controller.ts";
 import {
   analyzeProject,
   createProposal,
@@ -59,7 +59,8 @@ import { routingOutcomes } from "./optimization/routing.ts";
 import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/capabilities.ts";
 import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
 import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
-import { buildProgressSnapshot } from "./operator/progress.ts";
+import { buildProgressSnapshot, controllerFreshness } from "./operator/progress.ts";
+import { controllerLiveness } from "./operator/liveness.ts";
 import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
 import { closeWorkspace, openWorkspace, workspaceStatus } from "./operator/herdr.ts";
 import { parseOpenTarget } from "./operator/links.ts";
@@ -1021,6 +1022,10 @@ async function main(): Promise<void> {
         staleHeartbeatWorkers: records.staleHeartbeatAttempts(10 * 60_000).length,
         providers: records.listProviderCapacity(),
         operations: records.operationalMetrics(),
+        // The health row records what a controller last said. Freshness and
+        // liveness say whether that claim is still worth believing, which the
+        // raw row cannot: a killed controller leaves "running" behind forever.
+        controller: { ...controllerFreshness(records), liveness: controllerLiveness(records) },
         health: records.latestHealth() ?? null,
       }, null, 2));
       return;
@@ -1127,6 +1132,18 @@ async function main(): Promise<void> {
       const args = parseArgs(rest);
       const adapter = textOption(args, "adapter") ?? process.env.MABS_ADAPTER;
       if (adapter !== undefined && adapter !== "claude" && adapter !== "codex") throw new Error("--adapter must be claude or codex");
+
+      // Refuse to become the second controller. Without this, the loser of the
+      // lease race runs forever, failing every tick and dispatching nothing.
+      // Exit 0 because "one is already running" is the desired end state.
+      const existing = controllerLiveness(records);
+      if (existing.startWouldContend && !args.options.has("force")) {
+        console.log(existing.reason);
+        console.log("Not starting a second controller. Use --force to override, or stop the running one first.");
+        return;
+      }
+      if (existing.state === "wedged" || existing.state === "crashed") console.warn(existing.reason);
+
       const controller = new Controller(records, {
         defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
@@ -1147,18 +1164,35 @@ async function main(): Promise<void> {
         console.log("controller cycle complete");
         return;
       }
-      controller.start();
-      keepOpen = true;
       let workbench: ReturnType<typeof createWorkbench> | null = null;
+      const stopWorkbench = async () => {
+        if (workbench) await new Promise<void>((resolvePromise) => workbench?.server.close(() => resolvePromise()));
+      };
+      keepOpen = true;
       if (args.options.has("ui")) {
         workbench = createWorkbench(records, { controller, port: numberOption(args, "port", 4317) });
         const address = await workbench.listen();
         console.log(`workbench: http://${address.host}:${address.port}`);
       }
-      console.log(`controller ${controller.options.controllerId} running with ${adapter ?? controller.routingPolicy.version}; Ctrl-C to stop`);
+      // Losing the lease race mid-flight is not a retryable fault: stand down
+      // and exit rather than fail every tick for the life of the process.
+      controller.start({
+        onStepDown: (error: ControllerLeaseHeldError) => {
+          console.error(error.message);
+          void (async () => {
+            await controller.stop();
+            await stopWorkbench();
+            records.store.close();
+            process.exit(1);
+          })();
+        },
+      });
+      if (!controller.stepDownReason) {
+        console.log(`controller ${controller.options.controllerId} running with ${adapter ?? controller.routingPolicy.version}; Ctrl-C to stop`);
+      }
       await waitForSignal(async () => {
         await controller.stop();
-        if (workbench) await new Promise<void>((resolvePromise) => workbench?.server.close(() => resolvePromise()));
+        await stopWorkbench();
         records.store.close();
       });
       return;
