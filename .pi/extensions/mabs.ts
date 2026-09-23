@@ -71,6 +71,33 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("mabs-assess", {
+    description: "Weigh an idea before recording it: /mabs-assess a tool that drafts my weekly report",
+    handler: async (args, ctx) => {
+      const idea = args.trim();
+      if (!idea) throw new Error("Usage: /mabs-assess <the idea, in your own words>");
+      ctx.ui.notify(
+        `Assessing before recording: ${idea}\n\n` +
+        "You will get assumptions, prior art, cost of being wrong, and the cheapest test that could kill " +
+        "the idea. You will not get a verdict, and no brief is created until you ask for one.",
+        "info",
+      );
+      pi.sendUserMessage([
+        "Run the product-discovery assessment stage on this idea, and do not create a brief yet:",
+        idea,
+        "",
+        "Produce exactly the four sections the skill defines: what would have to be true, prior art,",
+        "cost of being wrong, and the cheapest disconfirming test. Mark each assumption as checkable now,",
+        "checkable after building, or unfalsifiable. Label prior art as recall from training data unless you",
+        "actually retrieved current sources in this session, and say so if you did.",
+        "",
+        "Do not give a go or no-go verdict. Do not state market size, pricing, funding, or adoption figures",
+        "unless they came from a source you retrieved here; say they are unavailable instead of estimating.",
+        "Ask me whether to record the result as a brief once you are done.",
+      ].join("\n"));
+    },
+  });
+
   pi.registerCommand("mabs-product", {
     description: "Show a product brief, its pending decisions, work, and next actions: /mabs-product <brief>",
     handler: async (args, ctx) => ctx.ui.notify(await run(["product", "show", ...words(args)]), "info"),

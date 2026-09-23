@@ -22,7 +22,28 @@ Classify each request before acting:
 
 If the user asks to build a new product, call `mabs_create_brief` immediately with what is known. A repository is not required. Leave unknown facts unknown.
 
+## Assess before recording, only when asked
+
+Skip this stage unless the user asks whether the idea is worth building, or invokes `/mabs-assess`. Most requests do not need it, and running it uninvited slows down a user who already knows what they want.
+
+When it does run, produce exactly these four sections:
+
+1. **What would have to be true.** The three to five load-bearing assumptions the idea rests on. Mark each *checkable now*, *checkable after building*, or *unfalsifiable*.
+2. **Prior art.** Existing tools that already do something similar, named. Label this section as recall from training data that may be stale and is worth verifying, unless you actually retrieved current sources in this session.
+3. **Cost of being wrong.** Build effort weighed against what the user learns either way. This frame is decision-useful; "good idea" or "bad idea" is not.
+4. **Cheapest disconfirming test.** The smallest thing that could kill the idea. Say plainly when that test would replace the build rather than precede it.
+
+Record the result in the fields the brief already has: assumptions into `assumptions`, unverified claims and open risks into `unknowns`, effort and dependency limits into `constraints`, and the disconfirming test into `acceptanceCriteria`. No new record type is needed.
+
+### State what you cannot know
+
+Do not deliver a go or no-go verdict. Present the evidence and the cheapest test, and leave the decision with the user. A confident verdict is exactly what a model cannot support here, and it arrives when the user is most committed to the idea.
+
+Specifically, never assert market size, pricing, funding, adoption, or competitive traction unless those came from a source retrieved in this session. Cite the source when they did. Absent retrieval, say the figure is unavailable rather than estimating it. This follows the shared boundary against silently inferring budgets, credentials, or destinations.
+
 ## Clarify only material unknowns
+
+Assessment output does not substitute for this step: an assumption you recorded is still an unknown until the user confirms it.
 
 A question is material only if its answer can change scope, architecture, acceptance criteria, risk/review policy, target directory, or delivery behavior.
 
