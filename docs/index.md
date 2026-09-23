@@ -15,6 +15,7 @@
 | Follow a task or a failure scenario | [Task execution](architecture/task-execution.md) and [recovery](architecture/recovery-and-failures.md) |
 | Fix a blocked task or failed check | [Troubleshooting](troubleshooting.md) |
 | Find a command without reading CLI source | [Command reference](commands.md) |
+| Work in a Herdr and Pi workspace with Agent, Code, Tasks, and Logs | [Operator workspace](operator/index.md) |
 | Check subscriptions, safety, or supported workflows | [FAQ](faq.md) |
 | Start from an idea using Pi | [Conversational intake](faq.md#can-i-start-from-an-idea-instead-of-an-existing-repository) |
 | Change project configuration safely | [Configuration curator](curator.md) |

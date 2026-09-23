@@ -50,6 +50,37 @@ export async function workspaceRevision(path: string): Promise<string> {
   return git(path, ["rev-parse", "HEAD"]);
 }
 
+/** Whether a worktree still holds changes that exist nowhere else. */
+export async function workspaceIsDirty(path: string): Promise<boolean> {
+  return (await git(path, ["status", "--porcelain"], 60_000, true)) !== "";
+}
+
+/** Whether every commit on `branch` is already reachable from `baseBranch`. */
+export async function branchIsMerged(repoPath: string, branch: string, baseBranch: string): Promise<boolean> {
+  const merged = await exec("git", ["merge-base", "--is-ancestor", branch, baseBranch], { cwd: repoPath, timeoutMs: 30_000 });
+  return merged.code === 0;
+}
+
+/**
+ * Remove a worktree directory, leaving its branch in place.
+ *
+ * The directory holds effectively all of the disk cost; the branch is a ref
+ * costing nothing, and until the work is merged that ref is the only thing
+ * keeping the commits reachable. Separating the two means reclaiming space
+ * cannot destroy work. Deleting the branch is a separate, explicit decision.
+ */
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  const args = ["worktree", "remove", worktreePath];
+  if (options.force) args.push("--force");
+  await git(repoPath, args);
+  // Drops the administrative files git keeps for worktrees that are gone.
+  await git(repoPath, ["worktree", "prune"]);
+}
+
 /** Materialize completed prerequisite revisions into a downstream task branch. */
 export async function integrateDependencyRevisions(path: string, revisions: string[]): Promise<string> {
   for (const revision of revisions) {

@@ -12,13 +12,16 @@
   },
   "pi": {
     "extensions": [
-      "./.pi/extensions/mabs.ts"
+      "./.pi/extensions/mabs.ts",
+      "./.pi/extensions/mabs-ux.ts"
     ]
   },
   "scripts": {
     "mabs": "node src/cli.ts",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/operator/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:extensions": "tsc --noEmit -p tsconfig.extensions.json",
+    "link-pi": "node scripts/link-pi.mjs",
     "verify": "node src/cli.ts verify"
   },
   "devDependencies": {

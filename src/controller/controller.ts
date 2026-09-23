@@ -22,6 +22,30 @@ import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, work
 /** Marks a task whose only outstanding work is a review the controller can retry. */
 export const REVIEW_PENDING_PREFIX = "Review pending:";
 
+/**
+ * A live peer already owns the lease.
+ *
+ * Distinguished from every other tick failure because the correct response is
+ * the opposite one: other failures are worth retrying next tick, but a lease
+ * held by a healthy peer will still be held next tick. Retrying it forever
+ * produces a process that fails every cycle and accomplishes nothing, so the
+ * loser steps down instead.
+ */
+export class ControllerLeaseHeldError extends Error {
+  readonly holderId: string | null;
+  readonly holderPid: number | null;
+
+  constructor(holderId: string | null, holderPid: number | null) {
+    super(
+      `Controller lease is held by ${holderId ?? "another process"} (pid ${holderPid ?? "unknown"}). ` +
+      "Only one controller may dispatch work; this one is standing down.",
+    );
+    this.name = "ControllerLeaseHeldError";
+    this.holderId = holderId;
+    this.holderPid = holderPid;
+  }
+}
+
 export interface ControllerOptions {
   workerLimit?: number;
   activeProjectLimit?: number;
@@ -68,7 +92,13 @@ export class Controller {
   private stopped = false;
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
-  private dbErrors = 0;
+  /**
+   * Ticks that threw, for any reason. Persisted in the `db_errors` column,
+   * which predates the counter's actual meaning.
+   */
+  private failedTicks = 0;
+  /** Set when this controller stood down because a live peer holds the lease. */
+  private steppedDown: ControllerLeaseHeldError | null = null;
   private backpressureReason: string | null = null;
   private reportedStaleHeartbeats = new Set<string>();
   private expectedTickAt = Date.now();
@@ -119,7 +149,10 @@ export class Controller {
     try {
       if (!this.records.acquireControllerLease(this.options.controllerId, process.pid, this.options.leaseTimeoutMs)) {
         const lease = this.records.currentControllerLease();
-        throw new Error(`Controller lease is held by ${String(lease?.controller_id ?? "another process")} (pid ${String(lease?.pid ?? "unknown")})`);
+        throw new ControllerLeaseHeldError(
+          (lease?.controller_id as string | null) ?? null,
+          lease?.pid === undefined || lease?.pid === null ? null : Number(lease.pid),
+        );
       }
       await this.reconcileAttempts();
       await this.resumePendingReviews();
@@ -127,8 +160,12 @@ export class Controller {
       await this.dispatchReadyTasks();
       this.writeHealth(loopDelayMs, "running");
     } catch (error) {
-      this.dbErrors += 1;
-      try { this.writeHealth(loopDelayMs, "degraded"); } catch { /* database outage is already represented by the failed tick */ }
+      this.failedTicks += 1;
+      // A lease loss is not this controller's health to report: the holder owns
+      // the health row, and overwriting it with "degraded" would misreport a
+      // healthy peer as broken.
+      if (error instanceof ControllerLeaseHeldError) this.steppedDown = error;
+      else try { this.writeHealth(loopDelayMs, "degraded"); } catch { /* database outage is already represented by the failed tick */ }
       throw error;
     } finally {
       this.ticking = false;
@@ -136,13 +173,37 @@ export class Controller {
     }
   }
 
-  start(): void {
+  /**
+   * Run the loop until stopped, or until a live peer proves this controller is
+   * redundant.
+   *
+   * `onStepDown` is invoked once if the lease turns out to belong to someone
+   * else, after the loop has already been halted. Callers use it to exit
+   * cleanly rather than linger as a process that can never do any work.
+   */
+  start(options: { onStepDown?: (error: ControllerLeaseHeldError) => void } = {}): void {
     if (this.timer) return;
     this.stopped = false;
-    void this.tick().catch((error) => console.error("controller tick failed", error));
-    this.timer = setInterval(() => {
-      if (!this.stopped) void this.tick().catch((error) => console.error("controller tick failed", error));
-    }, this.options.pollIntervalMs);
+    const run = () => {
+      if (this.stopped) return;
+      void this.tick().catch((error) => {
+        if (error instanceof ControllerLeaseHeldError) {
+          this.stopped = true;
+          if (this.timer) clearInterval(this.timer);
+          this.timer = null;
+          options.onStepDown?.(error);
+          return;
+        }
+        console.error("controller tick failed", error);
+      });
+    };
+    run();
+    this.timer = setInterval(run, this.options.pollIntervalMs);
+  }
+
+  /** The lease-held error that made this controller stand down, if any. */
+  get stepDownReason(): ControllerLeaseHeldError | null {
+    return this.steppedDown;
   }
 
   async stop(): Promise<void> {
@@ -150,8 +211,12 @@ export class Controller {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.ticking) await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-    this.writeHealth(0, "stopped");
-    this.records.releaseControllerLease(this.options.controllerId);
+    // A controller that never owned the lease must not touch either record:
+    // the health row and the lease both belong to the live holder.
+    if (!this.steppedDown) {
+      this.writeHealth(0, "stopped");
+      this.records.releaseControllerLease(this.options.controllerId);
+    }
   }
 
   async cancelTask(taskId: string, expectedVersion?: number): Promise<void> {
@@ -1160,7 +1225,7 @@ export class Controller {
       pid: process.pid,
       startedAt: this.startedAt,
       loopDelayMs: Math.round(loopDelayMs),
-      dbErrors: this.dbErrors,
+      dbErrors: this.failedTicks,
       queueDepth: ready.length,
       oldestReadyAgeS: Math.round(oldest),
       oldestClaimAgeS: Math.round(oldestClaim),

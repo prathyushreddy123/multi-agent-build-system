@@ -18,6 +18,7 @@ Run commands from the MABS checkout. This is a curated reference; `node src/cli.
 | `node src/cli.ts review decide TASK_ID` | Why a task does or does not need review |
 | `node src/cli.ts profile inspect /absolute/path/to/repo` | Detected components, checks, and setup needs |
 | `node src/cli.ts ui` | Localhost workbench; does not start dispatch, but its controls can mutate records |
+| `node src/cli.ts operator probe` | Pi, Herdr, viewer, and worktree capabilities of the installed tools ([details](operator/phase-0-capabilities.md)) |
 
 Inspection commands do not launch workers. Commands that open MABS records can initialize or migrate the local database; they are not a promise of zero filesystem writes.
 
@@ -81,6 +82,72 @@ Use the [curator guide](curator.md) for configuration proposal, approval, activa
 Database records are retained indefinitely. Attempt artifacts become eligible after 30 days for successful tasks or 90 days for failed/cancelled tasks. Active and blocked task artifacts are not eligible under this policy. A SQLite backup does not back up all artifact files or task worktrees.
 
 See [state locations and overrides](getting-started.md#where-things-live) and the [retention implementation](../src/maintenance/retention.ts).
+
+## Operator workspace (Pi slash commands)
+
+These affect presentation only. None of them starts work, changes task state, or reaches a provider. See the [operator workspace](operator/index.md).
+
+| Command | Effect |
+| --- | --- |
+| `/mabs-verbose on\|off` | Show original tool output instead of compact summaries; persists across sessions |
+| `/mabs-compact on\|off` | Enable or disable the operator presentation layer, then `/reload` |
+| `/mabs-files [TASK]` | Browse every file in a task worktree |
+| `/mabs-changes [TASK]` | Changed files with their categories, renames, and deletions |
+| `/mabs-open TASK PATH --line=N` | Open a file in the Code surface |
+| `/mabs-diff TASK PATH` | Diff a file against the task's recorded base revision |
+| `/mabs-viewer` | Show whether a MABS viewer owns the Code surface |
+| `/mabs-progress` | Read-only task, attempt, and recorded-step view |
+| `/mabs-steps TASK` | Recorded implementation steps for one task |
+| `/mabs-logs TASK [--evidence=ID]` | List or open the original evidence for a task |
+| `/mabs-workspace [open\|status\|close]` | Create or recover the Agent, Code, Tasks, and Logs surfaces |
+
+Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
+
+### Code surface from the CLI
+
+Read-only inspection of one task worktree. These do not start workers or change task state. See the [Code surface guide](operator/code-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts files [TASK] [--filter=src]` | Every file in the task worktree |
+| `node src/cli.ts changes [TASK] [--attempt=ID]` | Changed files, one entry per path, with categories |
+| `node src/cli.ts open TASK PATH [--line=N] [--view]` | One file, from the worktree or a recorded revision |
+| `node src/cli.ts diff TASK PATH [--view]` | A diff against the task's recorded base revision |
+| `node src/cli.ts dispatch 'mabs://open/...'` | The same, from a link; other schemes are refused |
+| `node src/cli.ts viewer serve [--surface=code]` | Run the owned read-only viewer; Ctrl+C stops only the viewer |
+| `node src/cli.ts viewer status` | Whether a viewer owns a surface |
+
+### Tasks surface from the CLI
+
+Read-only. These never schedule work or change task state, and `Ctrl+C` stops only the dashboard. See the [Tasks surface guide](operator/tasks-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts task watch [--project=PROJECT_ID]` | Live dashboard of tasks, attempts, steps, and freshness |
+| `node src/cli.ts task watch --once` | One frame, for a non-interactive caller |
+| `node src/cli.ts task watch --json` | The whole snapshot as JSON |
+| `node src/cli.ts task steps TASK_ID` | Recorded steps, gaps, and delivery state for one task |
+
+### Logs surface from the CLI
+
+Original evidence only, read from the MABS artifacts directory. Closing or interrupting these never stops a worker. See the [Logs surface guide](operator/logs-surface.md).
+
+| Command | Shows |
+| --- | --- |
+| `node src/cli.ts logs TASK_ID` | Evidence records for a task and its attempts |
+| `node src/cli.ts logs TASK_ID --attempt=ATTEMPT_ID` | Narrowed to one attempt; earlier attempts stay available |
+| `node src/cli.ts logs TASK_ID --evidence=ID [--tail=200]` | One evidence record's tail |
+| `node src/cli.ts logs TASK_ID --evidence=ID --follow` | Bounded following that survives appends and rotation |
+
+### Workspace from the CLI
+
+Creates only missing surfaces and closes only what it owns. See [workspace automation](operator/workspace.md).
+
+| Command | Effect |
+| --- | --- |
+| `node src/cli.ts workspace open [--project=PROJECT_ID] [--layout=tabs\|split] [--focus=code]` | Create or recover the four surfaces; safe to repeat |
+| `node src/cli.ts workspace status` | Which surfaces this feature still owns |
+| `node src/cli.ts workspace close` | Close only operator-owned panes; never the Agent pane, never a worker |
 
 ## Verification is not all the same
 

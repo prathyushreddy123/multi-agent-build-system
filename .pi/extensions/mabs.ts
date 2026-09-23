@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+import { compactToolRegistrar } from "./mabs-ux.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = resolve(ROOT, "src/cli.ts");
@@ -28,6 +31,10 @@ export default function mabsExtension(pi: ExtensionAPI) {
     if (result.code !== 0) throw new Error(output || `mabs exited ${result.code}`);
     return output;
   }
+
+  // Every MABS tool is drawn by the operator presentation layer, so custom
+  // tools and forwarded worker output follow the same rules as Pi's built-ins.
+  const registerCompactTool = compactToolRegistrar(pi);
 
   pi.on("session_start", async (_event, ctx) => {
     try {
@@ -64,6 +71,33 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("mabs-assess", {
+    description: "Weigh an idea before recording it: /mabs-assess a tool that drafts my weekly report",
+    handler: async (args, ctx) => {
+      const idea = args.trim();
+      if (!idea) throw new Error("Usage: /mabs-assess <the idea, in your own words>");
+      ctx.ui.notify(
+        `Assessing before recording: ${idea}\n\n` +
+        "You will get assumptions, prior art, cost of being wrong, and the cheapest test that could kill " +
+        "the idea. You will not get a verdict, and no brief is created until you ask for one.",
+        "info",
+      );
+      pi.sendUserMessage([
+        "Run the product-discovery assessment stage on this idea, and do not create a brief yet:",
+        idea,
+        "",
+        "Produce exactly the four sections the skill defines: what would have to be true, prior art,",
+        "cost of being wrong, and the cheapest disconfirming test. Mark each assumption as checkable now,",
+        "checkable after building, or unfalsifiable. Label prior art as recall from training data unless you",
+        "actually retrieved current sources in this session, and say so if you did.",
+        "",
+        "Do not give a go or no-go verdict. Do not state market size, pricing, funding, or adoption figures",
+        "unless they came from a source you retrieved here; say they are unavailable instead of estimating.",
+        "Ask me whether to record the result as a brief once you are done.",
+      ].join("\n"));
+    },
+  });
+
   pi.registerCommand("mabs-product", {
     description: "Show a product brief, its pending decisions, work, and next actions: /mabs-product <brief>",
     handler: async (args, ctx) => ctx.ui.notify(await run(["product", "show", ...words(args)]), "info"),
@@ -82,6 +116,202 @@ export default function mabsExtension(pi: ExtensionAPI) {
   pi.registerCommand("mabs-status", {
     description: "Show MABS projects, queue, approvals, and controller health",
     handler: async (_args, ctx) => ctx.ui.notify(await run(["status"]), "info"),
+  });
+
+  // --- Code surface -------------------------------------------------------
+  // Every route below goes through the same task/attempt/worktree/revision
+  // resolver as the CLI, so a picker selection and a typed command can never
+  // choose different worktrees for the same task.
+
+  interface Candidate { taskId: string; title: string; state: string; projectName: string }
+
+  /**
+   * Run a Code command, turning an ambiguous selection into a picker rather
+   * than a guess. Returns null when the user cancelled.
+   */
+  async function code(
+    args: string[],
+    ctx: { ui: { select(title: string, options: string[]): Promise<string | undefined>; notify(message: string, kind: "info" | "warning" | "error"): void } },
+    retryWithTask: (taskId: string) => string[],
+  ): Promise<Record<string, unknown> | null> {
+    const first = JSON.parse(await run(args)) as Record<string, unknown> & { kind?: string; candidates?: Candidate[]; reason?: string };
+    if (first.kind !== "selection-needed") return first;
+
+    const candidates = first.candidates ?? [];
+    const labels = candidates.map((candidate) => `${candidate.taskId}  ${candidate.title}  [${candidate.state}]`);
+    const chosen = await ctx.ui.select(first.reason ?? "Select a task", labels);
+    if (!chosen) {
+      ctx.ui.notify("No task selected; nothing was opened.", "info");
+      return null;
+    }
+    const index = labels.indexOf(chosen);
+    const taskId = candidates[index]?.taskId;
+    if (!taskId) throw new Error("The selected task could not be identified.");
+    return JSON.parse(await run(retryWithTask(taskId))) as Record<string, unknown>;
+  }
+
+  function reportUnavailable(result: Record<string, unknown>, ctx: { ui: { notify(message: string, kind: "info" | "warning" | "error"): void } }): boolean {
+    if (result.kind !== "not-found") return false;
+    ctx.ui.notify(String(result.reason ?? "The requested content is unavailable."), "warning");
+    return true;
+  }
+
+  pi.registerCommand("mabs-changes", {
+    description: "List a task's changed files with their worktree and revision context: /mabs-changes [task]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const result = await code(["changes", ...extra], ctx, (taskId) => ["changes", taskId, ...extra.slice(1)]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const files = (result.files ?? []) as { path: string; status: string; categories: string[] }[];
+      const lines = files.map((file) => `  ${file.status.padEnd(12)} ${file.categories.join(",").padEnd(26)} ${file.path}`);
+      ctx.ui.notify(
+        [String(result.context), `${files.length} changed file(s)`, ...lines].join("\n") ||
+        "No changed files.",
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("mabs-files", {
+    description: "Browse every file in a task worktree: /mabs-files [task] [--filter=src]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const result = await code(["files", ...extra], ctx, (taskId) => ["files", taskId, ...extra.slice(1)]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const files = (result.files ?? []) as string[];
+      ctx.ui.notify([String(result.context), `${files.length} file(s)`, ...files.map((file) => `  ${file}`)].join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("mabs-open", {
+    description: "Open a file from a task worktree in the Code surface: /mabs-open <task> <path> [--line=N]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-open <task> <path> [--line=N]");
+      const result = await code(["open", ...extra, "--view"], ctx, (taskId) => ["open", taskId, ...extra.slice(1), "--view"]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const viewer = result.viewer as { delivered?: boolean; reason?: string } | null;
+      const content = result.content as { text: string | null; unavailableReason: string | null; source: string };
+      ctx.ui.notify([
+        String(result.context),
+        `${String(result.relativePath)}${result.line ? `:${String(result.line)}` : ""} (${content.source})`,
+        result.viewReason ? String(result.viewReason) : "",
+        content.unavailableReason ? content.unavailableReason : "",
+        viewer?.delivered ? "Opened in the Code viewer." : String(viewer?.reason ?? ""),
+        `Command: ${String(result.command)}`,
+      ].filter(Boolean).join("\n"), content.unavailableReason ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-diff", {
+    description: "Diff a file against the task's recorded base revision: /mabs-diff <task> <path>",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-diff <task> <path>");
+      const result = await code(["diff", ...extra, "--view"], ctx, (taskId) => ["diff", taskId, ...extra.slice(1), "--view"]);
+      if (!result || reportUnavailable(result, ctx)) return;
+      const diff = result.diff as { text: string | null; from: string; to: string; unavailableReason: string | null };
+      ctx.ui.notify([
+        String(result.context),
+        `${String(result.relativePath)}: ${diff.from} → ${diff.to}`,
+        diff.unavailableReason ?? (diff.text === "" ? "No changes against the recorded base." : "Opened in the Code viewer."),
+        `Command: ${String(result.command)}`,
+      ].filter(Boolean).join("\n"), diff.unavailableReason ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-progress", {
+    description: "Read-only task, attempt, and recorded-step view: /mabs-progress [--project=<id>]",
+    handler: async (args, ctx) => {
+      // The dashboard never schedules work; this is a snapshot of what is recorded.
+      ctx.ui.notify(await run(["task", "watch", ...words(args), "--once"]), "info");
+    },
+  });
+
+  pi.registerCommand("mabs-steps", {
+    description: "Recorded implementation steps for one task: /mabs-steps <task>",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-steps <task>");
+      const detail = JSON.parse(await run(["task", "steps", ...extra])) as {
+        task: { state: string; steps: { kind: string; status: string; summary: string; attemptNumber: number | null }[]; stepGaps: string[]; delivery: string };
+        controller: { state: string; stale: boolean; reason: string };
+      };
+      const steps = detail.task.steps.map(
+        (step) => `  ${step.status.padEnd(10)} #${String(step.attemptNumber ?? "-")} ${step.kind.padEnd(24)} ${step.summary}`,
+      );
+      ctx.ui.notify([
+        `state ${detail.task.state} · delivery ${detail.task.delivery}`,
+        ...(steps.length > 0 ? steps : ["  No steps have been recorded for this task yet."]),
+        ...detail.task.stepGaps.map((gap) => `  unavailable: ${gap}`),
+        detail.controller.stale ? `  ⚠ ${detail.controller.reason}` : "",
+      ].filter(Boolean).join("\n"), detail.controller.stale ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-workspace", {
+    description: "Create or recover the Agent, Code, Tasks, and Logs surfaces: /mabs-workspace [open|status|close|viewer]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      const action = extra[0] ?? "open";
+      if (!["open", "status", "close", "viewer"].includes(action)) {
+        throw new Error("Usage: /mabs-workspace [open|status|close|viewer]");
+      }
+      // Viewer ownership is a property of the workspace surfaces, so it belongs
+      // here rather than in a command of its own.
+      if (action === "viewer") {
+        ctx.ui.notify(await run(["viewer", extra[1] ?? "status", ...extra.slice(2)]), "info");
+        return;
+      }
+      const output = await run(["workspace", action, ...extra.slice(1)]);
+      if (action === "status") { ctx.ui.notify(output, "info"); return; }
+      if (action === "close") {
+        const closed = JSON.parse(output) as { closed: string[]; kept: { surface: string; reason: string }[]; notes: string[] };
+        ctx.ui.notify([
+          closed.closed.length > 0 ? `Closed: ${closed.closed.join(", ")}` : "Nothing owned by MABS was open.",
+          ...closed.kept.map((entry) => `  kept ${entry.surface}: ${entry.reason}`),
+          ...closed.notes,
+        ].join("\n"), "info");
+        return;
+      }
+      const result = JSON.parse(output) as {
+        degraded: boolean; layout: string;
+        surfaces: { surface: string; action: string; paneId: string | null; reason: string }[];
+        notes: string[];
+      };
+      ctx.ui.notify([
+        result.degraded
+          ? "Herdr is not driving this session; every surface is available as a CLI command:"
+          : `Operator workspace (${result.layout} layout):`,
+        ...result.surfaces.map((surface) => `  ${surface.action.padEnd(9)} ${surface.surface.padEnd(6)} ${surface.paneId ?? ""}  ${surface.reason}`),
+        ...result.notes.map((note) => `  · ${note}`),
+      ].join("\n"), result.degraded ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("mabs-logs", {
+    description: "Open original task evidence: /mabs-logs <task> [--attempt=<id>] [--evidence=<id>] [--tail=200]",
+    handler: async (args, ctx) => {
+      const extra = words(args);
+      if (extra.length === 0) throw new Error("Usage: /mabs-logs <task> [--attempt=<id>] [--evidence=<id>]");
+      if (extra.some((word) => word.startsWith("--evidence"))) {
+        // Opening one record streams its bounded tail rather than the whole file.
+        ctx.ui.notify(await run(["logs", ...extra]), "info");
+        return;
+      }
+      const listing = JSON.parse(await run(["logs", ...extra])) as {
+        entries: { id: string; label: string; exists: boolean; kind: string; attemptNumber: number | null; sizeBytes: number | null }[];
+        notes: string[];
+      };
+      const rows = listing.entries.map((item) =>
+        `  ${item.exists ? " " : "✕"} ${String(item.attemptNumber ?? "-").padStart(2)} ${item.kind.padEnd(18)} ${item.label.padEnd(36)} ${item.id}`,
+      );
+      ctx.ui.notify([
+        `${listing.entries.length} evidence record(s). Open one with --evidence=<id>.`,
+        ...rows,
+        ...listing.notes.map((note) => `  ⚠ ${note}`),
+      ].join("\n"), "info");
+    },
   });
 
   pi.registerCommand("mabs-project", {
@@ -152,18 +382,42 @@ export default function mabsExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const adapter = args.trim() || "policy";
       if (!["policy", "codex", "claude"].includes(adapter)) throw new Error("Usage: /mabs-start [policy|codex|claude]");
+
+      // Starting a second controller used to be silent and permanent: the loser
+      // of the lease race failed every tick forever with its output discarded.
+      // Check first, and never spawn a twin.
+      const status = JSON.parse(await run(["status"])) as {
+        controller?: { liveness?: { state?: string; reason?: string; startWouldContend?: boolean } };
+      };
+      const liveness = status.controller?.liveness;
+      if (liveness?.startWouldContend) {
+        ctx.ui.notify(`${liveness.reason ?? "A controller is already running."}\nNot starting another.`, "warning");
+        return;
+      }
+      if (liveness?.state === "wedged") {
+        ctx.ui.notify(`${liveness.reason ?? ""}\nNot starting another; investigate that process first.`, "warning");
+        return;
+      }
+
       const adapterArgs = adapter === "policy" ? [] : [`--adapter=${adapter}`];
+      // Keep the output. Discarding it is what hid the lease contention.
+      const logPath = join(ROOT, "controller.log");
+      const log = openSync(logPath, "a");
       const child = spawn(process.execPath, [CLI, "controller", "run", ...adapterArgs, "--ui"], {
         cwd: ROOT,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", log, log],
       });
       child.unref();
-      ctx.ui.notify(`MABS controller started with ${adapter} routing (pid ${child.pid ?? "unknown"})`, "info");
+      closeSync(log);
+      ctx.ui.notify(
+        `MABS controller started with ${adapter} routing (pid ${child.pid ?? "unknown"})\nLog: ${logPath}`,
+        "info",
+      );
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_status",
     label: "MABS Status",
     description: "Read the durable MABS project, task, approval, and controller-health summary. Output is capped at 12KB.",
@@ -189,7 +443,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     executionReason: Type.String({ description: "Why this task runs that way" }),
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_create_brief",
     label: "Create MABS Product Brief",
     description: "Record a product idea durably before any repository or project exists. Returns the brief with its ID and version.",
@@ -214,7 +468,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_update_brief",
     label: "Update MABS Product Brief",
     description: "Record answers, assumptions, or a scope revision on a brief. Requires the brief version you last read, so concurrent edits cannot be lost.",
@@ -264,7 +518,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_ask_clarifications",
     label: "Record MABS Clarifications",
     description: "Persist only material questions for a product brief, including why each answer would change the plan.",
@@ -291,7 +545,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_answer_clarification",
     label: "Record MABS Clarification Answer",
     description: "Persist the user's answer to one material question, or an explicitly labeled assumption when no answer is available.",
@@ -316,7 +570,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_propose_plan",
     label: "Propose MABS Product Plan",
     description: "Persist a structured proposal with requirements, milestones, tasks, dependencies, scope, and rationale. The plan is validated before it can be presented.",
@@ -354,7 +608,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_accept_plan",
     label: "Record MABS Plan Acceptance",
     description: "Bind a decision the user actually made to one exact proposal version. Requires the proposal fingerprint and the name of the person who accepted.",
@@ -382,7 +636,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_get_operations",
     label: "Get MABS Operations",
     description: "Show effective CI, deployment, monitoring, scheduling, delivery, and cost settings. All are disabled/manual by default.",
@@ -393,7 +647,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_prepare_operation",
     label: "Prepare MABS Operation",
     description: "Return a dry-run plan for one optional capability. This never writes provider configuration or performs an external action.",
@@ -414,7 +668,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_bootstrap_project",
     label: "Bootstrap MABS Project",
     description: "Safely scaffold an accepted product in a user-selected local directory. Refuses unrelated non-empty directories, records every step, and resumes by bootstrap ID without duplicate projects.",
@@ -447,7 +701,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_submit_plan",
     label: "Submit Accepted MABS Plan",
     description: "Apply the accepted, validated plan to the registered project. No hand-written plan JSON is involved.",
@@ -467,7 +721,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_get_product",
     label: "Get MABS Product State",
     description: "Return the current brief, pending decisions, tasks, outputs, and next actions for a product, in a concise form.",
@@ -479,7 +733,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  registerCompactTool({
     name: "mabs_submit_task",
     label: "Submit MABS Task",
     description: "Submit a scoped task to an already registered MABS project. This does not approve push, merge, or deployment.",

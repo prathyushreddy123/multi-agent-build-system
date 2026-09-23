@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
-import { Controller } from "./controller/controller.ts";
+import { Controller, ControllerLeaseHeldError } from "./controller/controller.ts";
 import {
   analyzeProject,
   createProposal,
@@ -43,7 +43,7 @@ import {
   type ReviewMode,
   type ReviewPreset,
 } from "./review/policy.ts";
-import { createBackup, pruneArtifacts, RETENTION_POLICY } from "./maintenance/retention.ts";
+import { createBackup, pruneArtifacts, pruneWorktrees, RETENTION_POLICY } from "./maintenance/retention.ts";
 import { getOperationsConfig, operationsStatus, prepareOperation, prepareOperationsConfig, requestExternalCostApproval, setOperationsConfig } from "./operations/service.ts";
 import type { Capability, OperationsConfig } from "./operations/types.ts";
 import { resolveApplicationProfiles } from "./profiles/index.ts";
@@ -56,6 +56,16 @@ import {
   type ExperimentVariant,
 } from "./optimization/experiments.ts";
 import { routingOutcomes } from "./optimization/routing.ts";
+import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/capabilities.ts";
+import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
+import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
+import { buildProgressSnapshot, controllerFreshness } from "./operator/progress.ts";
+import { controllerLiveness } from "./operator/liveness.ts";
+import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
+import { closeWorkspace, openWorkspace, workspaceStatus } from "./operator/herdr.ts";
+import { parseOpenTarget } from "./operator/links.ts";
+import { readPreferences } from "./operator/preferences.ts";
+import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
 import { openRecords } from "./store/records.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
@@ -98,26 +108,21 @@ async function baseBranch(repoPath: string): Promise<string> {
 }
 
 function printHelp(): void {
+  // Tiered on purpose. A flat list of every command makes the eight you need
+  // daily as hard to find as the ones you may never run.
   console.log(`mabs — local multi-agent build controller
 
-Commands:
-  verify [--quick]                          Run Phase 0 subscription/access proof
-  baseline [--only=a,b] [--harness=codex]  Run task-class baseline
-  project add <name> <repo> [--goal=...] [--review=substantive]
-                                               Register a project and discover existing checks
-  project list                              List registered projects
-  project status <id|name> <active|paused|archived>
-  project review <id|name> [required|substantive|none]   Show or set the resolved review policy
-  project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
-  review decide <task>                         Explain the review decision for a task
-  review request <task>                        Record an explicit manual review request
-  project base <id|name> <branch>              Change target and invalidate open approvals
-  requirement add <project> <id> <text>
-  task add <project> <title> --objective=... [--class=small_implementation]
-  task list [--project=id] [--state=READY]
-  task show <id>
-  task retry <id> --version=<recordVersion>
-  task cancel <id> --version=<recordVersion>
+EVERYDAY
+  status                                    Queue, controller liveness, and health
+  controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
+  controller once [--adapter=codex]         Reconcile and dispatch one cycle
+  task list [--project=id] [--state=READY]  What is queued, running, or blocked
+  task show <id>                            One task with its evidence
+  changes [<task>]                          Changed files for a task, with categories
+  diff <task> <path> [--view]               Diff a file against the task's base revision
+  ui [--port=4317]                          Localhost workbench
+
+PRODUCTS AND PLANS
   brief create --payload='{"title":...}'        Start a product brief before any repository exists
   brief list | brief show <brief>
   brief update <brief> --version=N --summary=... --payload='{...}'
@@ -126,20 +131,50 @@ Commands:
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
-  brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript] [--package-manager=...]
-  bootstrap resume <id>                         Resume without duplicate projects or destructive cleanup
-  profile inspect <repo>                        Show components, checks, setup, and artifacts
-  ops status <project>                          Effective disabled/manual operational capabilities
-  ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval|--approval=<id>]
-  ops prepare <project> <capability>             Dry-run only; never executes an external action
-  ops runs <project>                             Recorded operation attempts and recovery state
+  brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript]
   product show <brief>                          Brief, pending decisions, work, outputs, next actions
-  plan validate <file>
-  plan apply <project> <file>
+  plan validate <file> | plan apply <project> <file>
   plan list [--project=id] | plan show <id>
+
+PROJECTS AND TASKS
+  project add <name> <repo> [--goal=...] [--review=substantive]
+  project list | project status <id|name> <active|paused|archived>
+  project review <id|name> [required|substantive|none]
+  project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
+  project base <id|name> <branch>              Change target and invalidate open approvals
+  requirement add <project> <id> <text>
+  task add <project> <title> --objective=... [--class=small_implementation]
+  task retry <id> --version=<recordVersion>
+  task cancel <id> --version=<recordVersion>
+  task watch [--project=<id>] [--interval=1000] [--json|--once]
+  task steps <task>                            Recorded implementation steps
+
+REVIEW, APPROVAL, FEEDBACK
+  review decide <task>                         Explain the review decision for a task
+  review request <task>                        Record an explicit manual review request
+  approval request <task> <action> <target> --reason=...
+  approval approve|reject <id> [--by=name]
   feedback add task|plan <id> <kind> --body=... --version=N
   feedback list [--project=id] | feedback answer <id> --response=...
+
+CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
+  files [<task>] [--filter=...] [--attempt=<id>]
+  open <task> <path> [--line=N] [--view] [--edit]
+  dispatch <mabs://open/...>                   Open a MABS link through the same resolver
+  logs <task> [--attempt=<id>]                 Evidence for a task and its attempts
+  logs <task> --evidence=<id> [--tail=200] [--follow]
+  workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
+  workspace status | workspace close
+  viewer serve [--surface=code] [--viewer=vim] | viewer status [--surface=code]
+
+MAINTENANCE
+  maintenance policy                           Retention and backup defaults
+  maintenance backup                           Consistent SQLite backup
+  maintenance prune [--only=artifacts|worktrees] [--apply]
+                                               Preview or apply retention. Branches are never removed.
   provider list | provider reset <name>
+
+OCCASIONAL — tuning and measurement
   curator analyze|snapshot|suggest <project>
   curator propose <project> <config.json> --title=... --rationale=...
   curator list [project] | curator show <proposal>
@@ -152,15 +187,17 @@ Commands:
   optimization list [project] | optimization show|complete <experiment>
   optimization record <experiment> <baseline|candidate> <case> <measurement.json>
   optimization routing [project]
-  controller once [--adapter=codex]          Reconcile and dispatch one cycle
-  controller run [--adapter=codex] [--ui]   Run controller loop
-  status                                    Show queue and controller health
-  approval request <task> <action> <target> --reason=...
-  approval approve|reject <id> [--by=name]
-  maintenance policy                         Show retention and backup defaults
-  maintenance backup                        Create a consistent SQLite backup
-  maintenance prune [--apply]                Preview or apply evidence retention
-  ui [--port=4317]                          Run the localhost workbench
+  ops status <project>                          Effective disabled/manual operational capabilities
+  ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval]
+  ops prepare <project> <capability>            Dry-run only; never executes an external action
+  ops runs <project>                            Recorded operation attempts and recovery state
+
+DIAGNOSTIC — when something is wrong or unproven
+  verify [--quick]                              Subscription and access proof
+  baseline [--only=a,b] [--harness=codex]       Task-class baseline; the evidence routing needs
+  operator probe [--json] [--repo=<path>]       Prove Pi, Herdr, viewer, and worktree capabilities
+  profile inspect <repo>                        Components, checks, setup, and artifacts
+  bootstrap resume <id>                         Resume without duplicate projects or cleanup
 `);
 }
 
@@ -198,10 +235,120 @@ async function main(): Promise<void> {
     await runBaseline({ only, harnesses });
     return;
   }
+  if (area === "operator" && action === "probe") {
+    const args = parseArgs(rest);
+    const capabilities = await probeOperatorCapabilities({ repoPath: textOption(args, "repo") });
+    console.log(args.options.has("json") ? JSON.stringify(capabilities, null, 2) : renderCapabilityReport(capabilities));
+    // Only the two narrow integration proofs gate the exit status. A missing
+    // optional capability is reported with its limitation, not treated as a failure.
+    const proofs = new Set(["OP0-10", "OP0-11"]);
+    if (capabilities.probes.some((probe) => proofs.has(probe.id) && probe.status !== "PASS")) process.exitCode = 1;
+    return;
+  }
+
+  if (area === "workspace") {
+    const args = parseArgs(rest);
+    if (action === "status") {
+      console.log(JSON.stringify(await workspaceStatus(), null, 2));
+      return;
+    }
+    if (action === "close") {
+      console.log(JSON.stringify(await closeWorkspace(), null, 2));
+      return;
+    }
+    if (action === "open") {
+      const layout = textOption(args, "layout", "tabs");
+      if (layout !== "tabs" && layout !== "split") throw new Error("--layout must be tabs or split");
+      const focus = textOption(args, "focus") ?? null;
+      if (focus && !["agent", "code", "tasks", "logs"].includes(focus)) {
+        throw new Error("--focus must be agent, code, tasks, or logs");
+      }
+      const result = await openWorkspace({
+        repoPath: resolve(textOption(args, "repo") ?? process.cwd()),
+        projectId: textOption(args, "project") ?? null,
+        layout,
+        focus: focus as never,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    throw new Error(`Usage: mabs workspace open|status|close`);
+  }
+  if (area === "viewer" && action === "serve") {
+    const args = parseArgs(rest);
+    const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;
+    if (!["code", "diff", "logs"].includes(surface)) throw new Error("--surface must be code, diff, or logs");
+    const viewer = textOption(args, "viewer") ?? readPreferences().viewer;
+    console.log(`Serving the ${surface} surface. Ctrl-C stops this viewer only; workers are unaffected.`);
+    await serveViewer({
+      surface,
+      viewer: viewer as never,
+      onEvent: (event) => console.log(`[${event.kind}] ${event.detail}`),
+    });
+    return;
+  }
+  if (area === "viewer" && action === "status") {
+    const args = parseArgs(rest);
+    const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;
+    console.log(JSON.stringify({ surface, viewer: readViewerState(surface) }, null, 2));
+    return;
+  }
 
   const records = openRecords();
   let keepOpen = false;
   try {
+    if (area === "files" || area === "changes" || area === "open" || area === "diff" || area === "dispatch") {
+      const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
+      const selector = {
+        attempt: textOption(args, "attempt"),
+        project: textOption(args, "project"),
+      };
+      const useViewer = args.options.has("view") || args.options.has("edit");
+      const mode = args.options.has("edit") ? "edit" as const : "read-only" as const;
+
+      if (area === "dispatch") {
+        const link = args.positionals[0];
+        if (!link) throw new Error("Usage: mabs dispatch <mabs://open/...>");
+        const target = parseOpenTarget(link);
+        // A link is routed through exactly the same resolver as the picker and
+        // the slash command, so it cannot select a different worktree.
+        const result = target.action === "diff"
+          ? await diffFile(records, target.path, { task: target.taskId, attempt: target.attemptId, project: target.projectId, revision: target.revision, useViewer, mode })
+          : await openFile(records, target.path, { task: target.taskId, attempt: target.attemptId, project: target.projectId, revision: target.revision, line: target.line, useViewer, mode });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      if (area === "files") {
+        const result = await taskFiles(records, {
+          ...selector, task: args.positionals[0], filter: textOption(args, "filter"),
+          limit: args.options.has("limit") ? numberOption(args, "limit", 2000) : undefined,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      if (area === "changes") {
+        const result = await taskChanges(records, { ...selector, task: args.positionals[0] });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.kind === "not-found") process.exitCode = 1;
+        return;
+      }
+      const [taskValue, path] = args.positionals;
+      if (!path) throw new Error(`Usage: mabs ${area} <task> <path> [--line=N] [--view]`);
+      const options = {
+        ...selector, task: taskValue,
+        line: args.options.has("line") ? numberOption(args, "line", 1) : null,
+        revision: textOption(args, "revision"),
+        useViewer, mode,
+      };
+      const result = area === "diff"
+        ? await diffFile(records, path, options)
+        : await openFile(records, path, options);
+      console.log(JSON.stringify(result, null, 2));
+      if (result.kind === "not-found") process.exitCode = 1;
+      return;
+    }
     if (area === "project" && action === "add") {
       const args = parseArgs(rest);
       const [name, repoArg] = args.positionals;
@@ -349,6 +496,99 @@ async function main(): Promise<void> {
         projectId: textOption(args, "project"),
         state: textOption(args, "state") as never,
       }), null, 2));
+      return;
+    }
+    if (area === "logs") {
+      const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
+      const taskValue = args.positionals[0];
+      if (!taskValue) throw new Error("Usage: mabs logs <task> [--attempt=<id>] [--evidence=<id>] [--follow]");
+      const task = records.getTask(taskValue) ?? records.listTasks().find((item) => item.id.startsWith(taskValue));
+      if (!task) throw new Error(`Unknown task ${taskValue}`);
+      const listing = listEvidence(records, { taskId: task.id, attemptId: textOption(args, "attempt") });
+
+      const evidenceId = textOption(args, "evidence");
+      if (!evidenceId) {
+        console.log(JSON.stringify(listing, null, 2));
+        return;
+      }
+      const selected = listing.entries.find((item) => item.id === evidenceId || item.id.endsWith(`:${evidenceId}`));
+      if (!selected) throw new Error(`No evidence ${evidenceId} for task ${task.id}. Run mabs logs ${task.id} to list it.`);
+      if (!selected.exists) {
+        console.log(JSON.stringify({ evidence: selected, unavailableReason: selected.unavailableReason }, null, 2));
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!args.options.has("follow")) {
+        const chunk = args.options.has("from")
+          ? readChunk(selected.path, { offset: numberOption(args, "from", 0) })
+          : readTail(selected.path, numberOption(args, "tail", 200));
+        console.log(`# ${selected.label} — ${selected.path}`);
+        if (selected.navigationNote) console.log(`# ${selected.navigationNote}`);
+        for (const line of chunk.lines) console.log(line);
+        console.log(`# offset ${chunk.to}${chunk.atEnd ? " (end of file)" : ""}`);
+        return;
+      }
+
+      keepOpen = true;
+      const stop = new AbortController();
+      console.log(`# following ${selected.label} — ${selected.path}`);
+      console.log("# Ctrl-C stops following only; the worker keeps running.");
+      const following = (async () => {
+        for await (const chunk of followLog(selected.path, {
+          fromOffset: 0,
+          signal: stop.signal,
+          // The attempt's own state decides when following can end.
+          isFinished: () => records.getAttempt(selected.attemptId ?? "")?.state !== "running",
+        })) {
+          if (chunk.rotated) console.log("# the evidence file was replaced or truncated; following the new file from its start");
+          if (chunk.unavailableReason) console.log(`# ${chunk.unavailableReason}`);
+          for (const line of chunk.lines) console.log(line);
+        }
+      })();
+      await Promise.race([following, waitForSignal(() => stop.abort())]);
+      await following.catch(() => undefined);
+      records.store.close();
+      return;
+    }
+    if (area === "task" && action === "watch") {
+      const args = parseArgs(rest);
+      const projectValue = textOption(args, "project");
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
+      const once = args.options.has("once") || args.options.has("json") || !process.stdout.isTTY;
+      if (once) {
+        // Non-interactive callers get one honest snapshot rather than a loop
+        // that would never repaint.
+        const snapshot = buildProgressSnapshot(records, { projectId: project?.id, withSteps: true });
+        if (args.options.has("json")) console.log(JSON.stringify(snapshot, null, 2));
+        else console.log(renderDashboard(snapshot, reconcileView(snapshot, { ...INITIAL_VIEW, pageSize: 50 })));
+        return;
+      }
+      keepOpen = true;
+      const stop = new AbortController();
+      const watching = watchTasks(records, {
+        projectId: project?.id,
+        intervalMs: numberOption(args, "interval", 1000),
+        signal: stop.signal,
+      });
+      // Ctrl-C stops this dashboard only. No worker or task is touched.
+      await Promise.race([watching, waitForSignal(() => stop.abort())]);
+      await watching.catch(() => undefined);
+      records.store.close();
+      return;
+    }
+    if (area === "task" && action === "steps") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      if (!id) throw new Error("Usage: mabs task steps <id>");
+      const snapshot = buildProgressSnapshot(records, { taskId: id, withSteps: true });
+      if (snapshot.tasks.length === 0) throw new Error(`Unknown task ${id}`);
+      console.log(JSON.stringify({
+        task: snapshot.tasks[0],
+        controller: snapshot.controller,
+        notes: snapshot.notes,
+      }, null, 2));
       return;
     }
     if (area === "task" && action === "show") {
@@ -785,6 +1025,10 @@ async function main(): Promise<void> {
         staleHeartbeatWorkers: records.staleHeartbeatAttempts(10 * 60_000).length,
         providers: records.listProviderCapacity(),
         operations: records.operationalMetrics(),
+        // The health row records what a controller last said. Freshness and
+        // liveness say whether that claim is still worth believing, which the
+        // raw row cannot: a killed controller leaves "running" behind forever.
+        controller: { ...controllerFreshness(records), liveness: controllerLiveness(records) },
         health: records.latestHealth() ?? null,
       }, null, 2));
       return;
@@ -800,8 +1044,25 @@ async function main(): Promise<void> {
     if (area === "maintenance" && action === "prune") {
       const args = parseArgs(rest);
       const applied = args.options.has("apply");
-      const candidates = pruneArtifacts(records, { apply: applied });
-      console.log(JSON.stringify({ applied, candidates }, null, 2));
+      // Worktrees can be reclaimed on their own, because they are the bulk of
+      // the disk cost and the only part with refusal conditions worth reading.
+      const only = textOption(args, "only");
+      if (only !== undefined && only !== "artifacts" && only !== "worktrees") {
+        throw new Error("--only must be artifacts or worktrees");
+      }
+      const artifacts = only === "worktrees" ? [] : pruneArtifacts(records, { apply: applied });
+      const worktrees = only === "artifacts" ? [] : await pruneWorktrees(records, { apply: applied });
+      const refused = worktrees.filter((candidate) => candidate.refusal !== null);
+      console.log(JSON.stringify({
+        applied,
+        artifacts,
+        worktrees: {
+          // Branches are never touched, so this can never lose a commit.
+          branchesRetained: true,
+          removable: worktrees.filter((candidate) => candidate.refusal === null),
+          refused,
+        },
+      }, null, 2));
       return;
     }
     if (area === "approval" && action === "request") {
@@ -891,6 +1152,18 @@ async function main(): Promise<void> {
       const args = parseArgs(rest);
       const adapter = textOption(args, "adapter") ?? process.env.MABS_ADAPTER;
       if (adapter !== undefined && adapter !== "claude" && adapter !== "codex") throw new Error("--adapter must be claude or codex");
+
+      // Refuse to become the second controller. Without this, the loser of the
+      // lease race runs forever, failing every tick and dispatching nothing.
+      // Exit 0 because "one is already running" is the desired end state.
+      const existing = controllerLiveness(records);
+      if (existing.startWouldContend && !args.options.has("force")) {
+        console.log(existing.reason);
+        console.log("Not starting a second controller. Use --force to override, or stop the running one first.");
+        return;
+      }
+      if (existing.state === "wedged" || existing.state === "crashed") console.warn(existing.reason);
+
       const controller = new Controller(records, {
         defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
@@ -911,18 +1184,35 @@ async function main(): Promise<void> {
         console.log("controller cycle complete");
         return;
       }
-      controller.start();
-      keepOpen = true;
       let workbench: ReturnType<typeof createWorkbench> | null = null;
+      const stopWorkbench = async () => {
+        if (workbench) await new Promise<void>((resolvePromise) => workbench?.server.close(() => resolvePromise()));
+      };
+      keepOpen = true;
       if (args.options.has("ui")) {
         workbench = createWorkbench(records, { controller, port: numberOption(args, "port", 4317) });
         const address = await workbench.listen();
         console.log(`workbench: http://${address.host}:${address.port}`);
       }
-      console.log(`controller ${controller.options.controllerId} running with ${adapter ?? controller.routingPolicy.version}; Ctrl-C to stop`);
+      // Losing the lease race mid-flight is not a retryable fault: stand down
+      // and exit rather than fail every tick for the life of the process.
+      controller.start({
+        onStepDown: (error: ControllerLeaseHeldError) => {
+          console.error(error.message);
+          void (async () => {
+            await controller.stop();
+            await stopWorkbench();
+            records.store.close();
+            process.exit(1);
+          })();
+        },
+      });
+      if (!controller.stepDownReason) {
+        console.log(`controller ${controller.options.controllerId} running with ${adapter ?? controller.routingPolicy.version}; Ctrl-C to stop`);
+      }
       await waitForSignal(async () => {
         await controller.stop();
-        if (workbench) await new Promise<void>((resolvePromise) => workbench?.server.close(() => resolvePromise()));
+        await stopWorkbench();
         records.store.close();
       });
       return;
