@@ -101,10 +101,22 @@ export async function integrateDependencyRevisions(path: string, revisions: stri
         "cherry-pick", commit,
       ], { cwd: path, timeoutMs: 120_000 });
       if (cherryPick.code !== 0) {
+        const output = cherryPick.stderr || cherryPick.stdout;
+        // A prior integration of this same dependency can already be present under a
+        // different commit hash (cherry-pick never reuses the source hash), so a later
+        // retry re-integrating the same dependency finds an empty patch here rather than
+        // a real conflict. Skip the now-redundant commit instead of treating already-
+        // integrated content as a failure; any other cherry-pick failure still aborts.
+        if (/previous cherry-pick is now empty/i.test(output) || /nothing to commit/i.test(output)) {
+          const skip = await exec("git", ["cherry-pick", "--skip"], { cwd: path, timeoutMs: 30_000 });
+          if (skip.code !== 0) {
+            throw new Error(`Could not skip the already-integrated dependency commit ${commit}: ${(skip.stderr || skip.stdout).trim()}`);
+          }
+          continue;
+        }
         await exec("git", ["cherry-pick", "--abort"], { cwd: path, timeoutMs: 30_000 });
         throw new Error(
-          `Could not integrate dependency revision ${revision} at commit ${commit}: ` +
-          (cherryPick.stderr || cherryPick.stdout).trim(),
+          `Could not integrate dependency revision ${revision} at commit ${commit}: ` + output.trim(),
         );
       }
     }

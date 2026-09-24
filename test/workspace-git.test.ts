@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { workspaceChangedFiles } from "../src/workspace/git.ts";
+import { integrateDependencyRevisions, workspaceChangedFiles } from "../src/workspace/git.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -30,4 +30,36 @@ test("workspaceChangedFiles expands a new untracked directory into its individua
   assert.ok(!changed.includes("plugins/"), `expected no collapsed directory entry, got: ${changed.join(", ")}`);
   assert.ok(changed.includes("plugins/herdr/README.md"), `expected individual file, got: ${changed.join(", ")}`);
   assert.ok(changed.includes("plugins/herdr/config.example.toml"), `expected individual file, got: ${changed.join(", ")}`);
+});
+
+test("integrateDependencyRevisions is idempotent when a dependency was already integrated under a different cherry-pick hash", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "mabs-workspace-git-deps-"));
+  writeFileSync(join(repo, "base.txt"), "base\n");
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@local", "add", "-A");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "initial");
+
+  // Simulate task 1's finished branch: one commit with its own result revision.
+  git(repo, "checkout", "-q", "-b", "task-1");
+  writeFileSync(join(repo, "dependency.txt"), "from task 1\n");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@local", "add", "-A");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "task 1 result");
+  const dependencyRevision = git(repo, "rev-parse", "HEAD");
+
+  // Task 2's branch starts from main, independent of task 1's branch.
+  git(repo, "checkout", "-q", "main");
+  git(repo, "checkout", "-q", "-b", "task-2");
+
+  // First dispatch: integrates cleanly, producing a new cherry-picked commit hash.
+  const firstIntegration = await integrateDependencyRevisions(repo, [dependencyRevision]);
+  assert.notEqual(firstIntegration, dependencyRevision, "cherry-pick should produce a new commit hash, not reuse the source hash");
+
+  // A retry re-integrates the same original dependency revision, as the controller
+  // does on every dispatch. The exact source hash is still not an ancestor of task-2's
+  // branch (only its cherry-picked equivalent is), so this must not fail.
+  const secondIntegration = await integrateDependencyRevisions(repo, [dependencyRevision]);
+  assert.equal(secondIntegration, firstIntegration, "re-integrating an already-applied dependency must be a no-op");
+
+  const status = git(repo, "status", "--porcelain");
+  assert.equal(status, "", "no cherry-pick sequencer state or stray changes should remain");
 });
