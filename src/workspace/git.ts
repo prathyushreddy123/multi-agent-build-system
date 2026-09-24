@@ -119,7 +119,10 @@ export async function workspaceDiff(path: string, baseRevision: string, revision
 
 export async function workspaceChangedFiles(path: string, baseRevision: string): Promise<string[]> {
   const committed = await git(path, ["diff", "--name-only", `${baseRevision}...HEAD`]);
-  const status = await git(path, ["status", "--porcelain"], 120_000, true);
+  // --untracked-files=all expands a brand-new directory into its individual files.
+  // Without it, git collapses e.g. "plugins/herdr/x" into a single "plugins/" line,
+  // which then fails an allowed-scope prefix check even when every actual file is in scope.
+  const status = await git(path, ["status", "--porcelain", "--untracked-files=all"], 120_000, true);
   const uncommitted = status
     .split("\n")
     .filter(Boolean)
