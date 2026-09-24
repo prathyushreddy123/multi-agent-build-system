@@ -67,6 +67,7 @@ import { buildLauncherScreen, dispatchLauncherAction, runLauncher, type Launcher
 import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
+import { serveToolView, type ToolViewSurface } from "./operator/workspace/tool-view.ts";
 import { openRecords } from "./store/records.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
@@ -251,6 +252,25 @@ async function main(): Promise<void> {
 
   if (area === "workspace") {
     const args = parseArgs(rest);
+    if (action === "view") {
+      const surface = textOption(args, "surface") as ToolViewSurface | undefined;
+      const workspaceId = textOption(args, "workspace");
+      if (!surface || !["tasks", "logs"].includes(surface) || !workspaceId) {
+        throw new Error("Usage: mabs workspace view --surface=tasks|logs --workspace=<herdr-workspace-id>");
+      }
+      const viewRecords = openRecords();
+      const stop = new AbortController();
+      try {
+        await Promise.race([
+          serveToolView(viewRecords, { workspaceId, surface, signal: stop.signal }),
+          waitForSignal(() => stop.abort()),
+        ]);
+      } finally {
+        stop.abort();
+        viewRecords.store.close();
+      }
+      return;
+    }
     if (action === "status") {
       console.log(JSON.stringify(await workspaceStatus(), null, 2));
       return;

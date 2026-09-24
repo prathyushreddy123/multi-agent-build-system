@@ -22,6 +22,7 @@ import { exec } from "../core/exec.ts";
 import { stateDir } from "../core/paths.ts";
 import { readPreferences, setOwnedSurface, updatePreferences, type OwnedSurface } from "./preferences.ts";
 import { readViewerState } from "./viewer.ts";
+import { requestToolView, type ToolViewSelection } from "./workspace/tool-view.ts";
 
 export type SurfaceName = "agent" | "code" | "tasks" | "logs";
 
@@ -50,15 +51,19 @@ export class HerdrError extends Error {}
 
 export type ScopedToolSurface = "tasks" | "logs";
 
+interface ScopedToolOwner {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  scopeKey: string;
+  command: string;
+}
+
 interface ScopedToolOwnership {
-  version: 1;
-  surfaces: Partial<Record<ScopedToolSurface, {
-    paneId: string;
-    tabId: string | null;
-    workspaceId: string | null;
-    scopeKey: string;
-    command: string;
-  }>>;
+  version: 2;
+  workspaces: Record<string, {
+    surfaces: Partial<Record<ScopedToolSurface, ScopedToolOwner>>;
+  }>;
 }
 
 function scopedToolOwnershipPath(): string {
@@ -67,12 +72,46 @@ function scopedToolOwnershipPath(): string {
 
 function readScopedToolOwnership(): ScopedToolOwnership {
   const path = scopedToolOwnershipPath();
-  if (!existsSync(path)) return { version: 1, surfaces: {} };
+  if (!existsSync(path)) return { version: 2, workspaces: {} };
   try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as ScopedToolOwnership;
-    return value.version === 1 && value.surfaces ? value : { version: 1, surfaces: {} };
+    const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (value && typeof value === "object" && (value as Partial<ScopedToolOwnership>).version === 2) {
+      const rawWorkspaces = (value as Partial<ScopedToolOwnership>).workspaces;
+      const normalized: ScopedToolOwnership = { version: 2, workspaces: {} };
+      if (rawWorkspaces && typeof rawWorkspaces === "object" && !Array.isArray(rawWorkspaces)) {
+        for (const [workspaceId, rawWorkspace] of Object.entries(rawWorkspaces)) {
+          if (!rawWorkspace || typeof rawWorkspace !== "object") continue;
+          const rawSurfaces = (rawWorkspace as { surfaces?: unknown }).surfaces;
+          if (!rawSurfaces || typeof rawSurfaces !== "object" || Array.isArray(rawSurfaces)) continue;
+          const surfaces: Partial<Record<ScopedToolSurface, ScopedToolOwner>> = {};
+          for (const surface of ["tasks", "logs"] as const) {
+            const owner = (rawSurfaces as Partial<Record<ScopedToolSurface, Partial<ScopedToolOwner>>>)[surface];
+            if (!owner || owner.workspaceId !== workspaceId || typeof owner.paneId !== "string"
+              || typeof owner.tabId !== "string" || typeof owner.scopeKey !== "string" || typeof owner.command !== "string") continue;
+            surfaces[surface] = owner as ScopedToolOwner;
+          }
+          normalized.workspaces[workspaceId] = { surfaces };
+        }
+      }
+      return normalized;
+    }
+    // Version 1 stored one global owner per surface. Migrate only entries that
+    // carry both exact IDs; anything ambiguous is safer to forget than adopt.
+    const legacy = value as { version?: number; surfaces?: Partial<Record<ScopedToolSurface, Partial<ScopedToolOwner>>> };
+    const migrated: ScopedToolOwnership = { version: 2, workspaces: {} };
+    if (legacy.version === 1 && legacy.surfaces) {
+      for (const surface of ["tasks", "logs"] as const) {
+        const owner = legacy.surfaces[surface];
+        if (!owner || typeof owner.workspaceId !== "string" || typeof owner.paneId !== "string"
+          || typeof owner.tabId !== "string" || typeof owner.scopeKey !== "string" || typeof owner.command !== "string") continue;
+        const workspace = migrated.workspaces[owner.workspaceId] ?? { surfaces: {} };
+        workspace.surfaces[surface] = owner as ScopedToolOwner;
+        migrated.workspaces[owner.workspaceId] = workspace;
+      }
+    }
+    return migrated;
   } catch {
-    return { version: 1, surfaces: {} };
+    return { version: 2, workspaces: {} };
   }
 }
 
@@ -377,7 +416,9 @@ export interface OpenScopedToolTabOptions {
   /** Stable IDs only (for example `project:prj_…` or `task:tsk_…`). */
   scopeKey: string;
   repoPath: string;
+  /** Fixed command that serves this tab. It must not contain project/task scope. */
   command: string;
+  selection: ToolViewSelection;
   cliAlternative: string;
   session?: HerdrSession;
 }
@@ -437,8 +478,9 @@ async function discardCreatedPane(paneId: string): Promise<string> {
 /**
  * Open one explicitly scoped Tasks or Logs tab.
  *
- * Ownership includes the stable project/task scope. A tab displaying another
- * scope is never adopted or overwritten, even when its label happens to match.
+ * Ownership is proved by exact workspace, tab, and pane IDs. Its selection may
+ * change only through the scoped control channel; other tabs are never adopted
+ * or overwritten, even when their labels happen to match.
  */
 export async function openScopedToolTab(options: OpenScopedToolTabOptions): Promise<ScopedToolTabResult> {
   const session = options.session ?? await herdrSession();
@@ -453,39 +495,47 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
   }
 
   const ownership = readScopedToolOwnership();
-  const saved = ownership.surfaces[options.surface];
-  if (
-    saved
-    && saved.workspaceId === session.workspaceId
-    && saved.scopeKey === options.scopeKey
-    && saved.command === options.command
-  ) {
+  const workspaceOwners = ownership.workspaces[session.workspaceId] ?? { surfaces: {} };
+  const saved = workspaceOwners.surfaces[options.surface];
+  if (saved && saved.workspaceId === session.workspaceId && saved.command === options.command) {
     const pane = await getPane(saved.paneId);
-    if (pane?.workspaceId === session.workspaceId && pane.tabId) {
-      await focusScopedToolTab(pane.tabId, options);
+    // Both IDs must still match. A moved pane can remain in the same workspace
+    // under a different tab; it is no longer this owned full-tab surface.
+    if (pane?.workspaceId === session.workspaceId && pane.tabId === saved.tabId) {
+      try {
+        requestToolView(session.workspaceId, options.surface, options.selection);
+        saved.scopeKey = options.scopeKey;
+        workspaceOwners.surfaces[options.surface] = saved;
+        ownership.workspaces[session.workspaceId] = workspaceOwners;
+        writeScopedToolOwnership(ownership);
+      } catch (error) {
+        return degradedScopedToolResult(
+          options,
+          `Could not update the workspace-scoped ${options.surface} view: ${error instanceof Error ? error.message : String(error)}.`,
+        );
+      }
+      await focusScopedToolTab(saved.tabId, options);
       return {
         surface: options.surface,
         action: "reused",
         paneId: pane.paneId,
-        tabId: pane.tabId,
+        tabId: saved.tabId,
         reason: `Focused the verified MABS ${options.surface} tab for ${options.scopeKey}; its command was not restarted.`,
         cliAlternative: options.cliAlternative,
       };
     }
   }
 
-  // A different scope must not inherit a watcher or evidence listing for the
-  // previous one. Close only the still-verified launcher-owned pane, then
-  // replace it. Never send Ctrl-C or a command into an existing terminal.
-  if (
-    saved
-    && saved.workspaceId === session.workspaceId
-    && (saved.scopeKey !== options.scopeKey || saved.command !== options.command)
-  ) {
-    const pane = await getPane(saved.paneId);
-    if (pane?.workspaceId === session.workspaceId) {
-      await herdrRun(["pane", "close", saved.paneId]);
-    }
+  // A missing, moved, or otherwise stale owner is never adopted or closed.
+  // This explicit open action creates a replacement and overwrites only our
+  // ownership record after the replacement is fully running.
+  try {
+    requestToolView(session.workspaceId, options.surface, options.selection);
+  } catch (error) {
+    return degradedScopedToolResult(
+      options,
+      `Could not initialize the workspace-scoped ${options.surface} view: ${error instanceof Error ? error.message : String(error)}.`,
+    );
   }
 
   let created: { paneId: string; tabId: string | null };
@@ -514,13 +564,14 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
       `${error instanceof Error ? error.message : String(error)}. ${cleanup}`,
     );
   }
-  ownership.surfaces[options.surface] = {
+  workspaceOwners.surfaces[options.surface] = {
     paneId: created.paneId,
     tabId: created.tabId,
     workspaceId: session.workspaceId,
     scopeKey: options.scopeKey,
     command: options.command,
   };
+  ownership.workspaces[session.workspaceId] = workspaceOwners;
   try {
     writeScopedToolOwnership(ownership);
   } catch (error) {

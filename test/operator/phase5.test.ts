@@ -43,10 +43,10 @@ const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(callLog)}, JSON.stringify(args) + "\\n");
 const panes = JSON.parse(readFileSync(${JSON.stringify(paneFile)}, "utf8"));
 const save = () => writeFileSync(${JSON.stringify(paneFile)}, JSON.stringify(panes));
-const out = (value) => { process.stdout.write(JSON.stringify(value)); process.exit(0); };
+const out = (value) => { writeFileSync(1, JSON.stringify(value)); process.exit(0); };
 const fail = (message) => { process.stderr.write(message); process.exit(1); };
 
-if (args[0] === "--version") { process.stdout.write("herdr 0.9.1\\n"); process.exit(0); }
+if (args[0] === "--version") { writeFileSync(1, "herdr 0.9.1\\n"); process.exit(0); }
 if (args[0] === "pane" && args[1] === "get") {
   const pane = panes[args[2]];
   if (!pane) fail("pane not found");

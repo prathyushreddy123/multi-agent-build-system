@@ -275,15 +275,19 @@ export async function dispatchLauncherAction(
     };
   }
 
-  const command = action === "tasks"
+  const scopedCommand = action === "tasks"
     ? `${cli} task watch --project=${project.id}`
     : `${cli} logs ${(task as Task).id}`;
-  const alternative = `\`${command}\``;
+  const alternative = `\`${scopedCommand}\``;
+  // The tab runs one stable renderer. Project/task changes are delivered over
+  // its workspace-scoped control file, never by reinjecting shell commands.
+  const command = `${cli} workspace view --surface=${action} --workspace="$HERDR_WORKSPACE_ID"`;
   const tab = await openScopedToolTab({
     surface: action,
     scopeKey: action === "tasks" ? `project:${project.id}` : `task:${(task as Task).id}`,
     repoPath: project.repoPath,
     command,
+    selection: { projectId: project.id, taskId: task?.id ?? null },
     cliAlternative: alternative,
   });
   return {

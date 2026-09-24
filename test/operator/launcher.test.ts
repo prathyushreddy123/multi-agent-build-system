@@ -11,6 +11,12 @@ import {
   dispatchLauncherAction,
 } from "../../src/operator/launcher.ts";
 import { openScopedToolTab, type HerdrSession } from "../../src/operator/herdr.ts";
+import {
+  readToolViewRequest,
+  renderToolView,
+  requestToolView,
+  toolViewRequestPath,
+} from "../../src/operator/workspace/tool-view.ts";
 import { openRecords, type Records } from "../../src/store/records.ts";
 
 interface Fixture {
@@ -40,7 +46,12 @@ function fixture(): Fixture {
   };
 }
 
-function fakeHerdr(root: string, options: { failRun?: boolean } = {}): { calls: () => string[][]; restore: () => void } {
+function fakeHerdr(root: string, options: { failRun?: boolean } = {}): {
+  calls: () => string[][];
+  panes: () => Record<string, { workspace_id: string; tab_id: string }>;
+  setPanes: (value: Record<string, { workspace_id: string; tab_id: string }>) => void;
+  restore: () => void;
+} {
   const bin = join(root, "bin");
   const calls = join(root, "herdr-calls.jsonl");
   const panes = join(root, "herdr-panes.json");
@@ -55,12 +66,18 @@ const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");
 const panes = JSON.parse(readFileSync(${JSON.stringify(panes)}, "utf8"));
 const output = value => writeFileSync(1, JSON.stringify(value));
+if (args[0] === "--version") {
+  writeFileSync(1, "herdr 0.9.1\\n");
+  process.exit(0);
+}
 if (args[0] === "tab" && args[1] === "create") {
-  const n = Object.keys(panes).length + 1;
-  const paneId = "w1:p" + n;
-  panes[paneId] = { workspace_id: "w1", tab_id: "w1:t" + n };
+  const n = readFileSync(${JSON.stringify(calls)}, "utf8").split("\\n").filter(Boolean).map(JSON.parse)
+    .filter(call => call[0] === "tab" && call[1] === "create").length;
+  const workspaceId = args.includes("--workspace") ? args[args.indexOf("--workspace") + 1] : "w1";
+  const paneId = workspaceId + ":p" + n;
+  panes[paneId] = { workspace_id: workspaceId, tab_id: workspaceId + ":t" + n };
   writeFileSync(${JSON.stringify(panes)}, JSON.stringify(panes));
-  output({ result: { tab: { tab_id: "w1:t" + n }, root_pane: { pane_id: paneId } } });
+  output({ result: { tab: { tab_id: workspaceId + ":t" + n }, root_pane: { pane_id: paneId } } });
   process.exit(0);
 }
 if (args[0] === "pane" && args[1] === "get") {
@@ -82,6 +99,8 @@ process.exit(2);
   process.env.PATH = `${bin}:${previousPath ?? ""}`;
   return {
     calls: () => readFileSync(calls, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as string[]),
+    panes: () => JSON.parse(readFileSync(panes, "utf8")) as Record<string, { workspace_id: string; tab_id: string }>,
+    setPanes: (value) => writeFileSync(panes, JSON.stringify(value)),
     restore: () => {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -221,15 +240,18 @@ test("explicit scoped tab dispatch reuses the verified pane without restarting i
       scopeKey: "project:prj_exact",
       repoPath: value.root,
       command: "node src/cli.ts task watch --project=prj_exact",
+      selection: { projectId: "prj_exact", taskId: null },
       cliAlternative: "`node src/cli.ts task watch --project=prj_exact`",
       session: LIVE,
     };
     const first = await openScopedToolTab(options);
+    const firstRequest = readToolViewRequest("w1", "tasks");
     const runCount = fake.calls().filter((call) => call[1] === "run").length;
     const second = await openScopedToolTab(options);
     assert.equal(first.action, "created");
     assert.equal(second.action, "reused");
     assert.equal(second.paneId, first.paneId);
+    assert.deepEqual(readToolViewRequest("w1", "tasks"), firstRequest);
     assert.equal(fake.calls().filter((call) => call[1] === "run").length, runCount);
     assert.equal(fake.calls().filter((call) => call[0] === "tab" && call[1] === "create").length, 1);
     assert.deepEqual(fake.calls().filter((call) => call[0] === "tab" && call[1] === "focus").at(-1), [
@@ -239,13 +261,163 @@ test("explicit scoped tab dispatch reuses the verified pane without restarting i
     const changed = await openScopedToolTab({
       ...options,
       scopeKey: "project:prj_other",
-      command: "node src/cli.ts task watch --project=prj_other",
+      selection: { projectId: "prj_other", taskId: null },
     });
-    assert.equal(changed.action, "created");
-    assert.equal(fake.calls().filter((call) => call[1] === "close").length, 1);
+    assert.equal(changed.action, "reused");
+    assert.equal(changed.paneId, first.paneId);
+    assert.equal(fake.calls().filter((call) => call[1] === "close").length, 0);
+    assert.equal(fake.calls().filter((call) => call[0] === "tab" && call[1] === "create").length, 1);
+    assert.equal(readToolViewRequest("w1", "tasks")?.projectId, "prj_other");
+  } finally {
+    fake.restore();
+    value.close();
+  }
+});
+
+test("Tasks and Logs own separate rail-free tabs in the invoking workspace", async () => {
+  const value = fixture();
+  const fake = fakeHerdr(value.root);
+  const previousHerdr = {
+    env: process.env.HERDR_ENV,
+    workspace: process.env.HERDR_WORKSPACE_ID,
+    tab: process.env.HERDR_TAB_ID,
+    pane: process.env.HERDR_PANE_ID,
+  };
+  try {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_WORKSPACE_ID = "w1";
+    process.env.HERDR_TAB_ID = "w1:t0";
+    process.env.HERDR_PANE_ID = "w1:p0";
+    const project = value.records.createProject({ name: "project", repoPath: value.root });
+    const task = value.records.createTask({ projectId: project.id, title: "selected", objective: "test" });
+    const before = JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) });
+    const tasks = await dispatchLauncherAction(
+      value.records,
+      buildLauncherScreen(value.records, { action: "tasks", projectId: project.id }),
+    );
+    const logs = await dispatchLauncherAction(
+      value.records,
+      buildLauncherScreen(value.records, { action: "logs", projectId: project.id, taskId: task.id }),
+    );
+
+    assert.equal(tasks.tab?.action, "created");
+    assert.equal(logs.tab?.action, "created");
+    assert.notEqual(tasks.tab?.tabId, logs.tab?.tabId);
+    assert.notEqual(tasks.tab?.paneId, logs.tab?.paneId);
+    assert.equal(fake.calls().filter((call) => call[0] === "pane" && call[1] === "split").length, 0);
+    assert.equal(fake.calls().filter((call) => call[0] === "tab" && call[1] === "create").length, 2);
+
+    const tasksFrame = renderToolView(value.records, readToolViewRequest("w1", "tasks")!);
+    const logsFrame = renderToolView(value.records, readToolViewRequest("w1", "logs")!);
+    assert.match(tasksFrame, /^MABS tasks/);
+    assert.doesNotMatch(tasksFrame, /MABS logs/);
+    assert.match(logsFrame, /^MABS logs/);
+    assert.doesNotMatch(logsFrame, /MABS tasks/);
+    assert.equal(JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) }), before);
+  } finally {
+    if (previousHerdr.env === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previousHerdr.env;
+    if (previousHerdr.workspace === undefined) delete process.env.HERDR_WORKSPACE_ID; else process.env.HERDR_WORKSPACE_ID = previousHerdr.workspace;
+    if (previousHerdr.tab === undefined) delete process.env.HERDR_TAB_ID; else process.env.HERDR_TAB_ID = previousHerdr.tab;
+    if (previousHerdr.pane === undefined) delete process.env.HERDR_PANE_ID; else process.env.HERDR_PANE_ID = previousHerdr.pane;
+    fake.restore();
+    value.close();
+  }
+});
+
+test("closed tabs are recreated only by an explicit open and moved tabs are never adopted or closed", async () => {
+  const value = fixture();
+  const fake = fakeHerdr(value.root);
+  try {
+    const options = {
+      surface: "tasks" as const,
+      scopeKey: "project:prj_exact",
+      repoPath: value.root,
+      command: "node src/cli.ts workspace view --surface=tasks --workspace=\"$HERDR_WORKSPACE_ID\"",
+      selection: { projectId: "prj_exact", taskId: null },
+      cliAlternative: "task watch",
+      session: LIVE,
+    };
+    const first = await openScopedToolTab(options);
+    const panes = fake.panes();
+    panes[first.paneId as string]!.tab_id = "w1:t-manual";
+    fake.setPanes(panes);
+
+    const replacement = await openScopedToolTab(options);
+    assert.equal(replacement.action, "created");
+    assert.notEqual(replacement.paneId, first.paneId);
+    assert.equal(fake.calls().filter((call) => call[1] === "close").length, 0);
+    assert.equal(fake.panes()[first.paneId as string]?.tab_id, "w1:t-manual");
+
+    const afterMoveCalls = fake.calls().length;
+    const closed = fake.panes();
+    delete closed[replacement.paneId as string];
+    fake.setPanes(closed);
+    // Channel updates never create UI by themselves.
+    requestToolView("w1", "tasks", { projectId: "prj_other", taskId: null });
+    assert.equal(fake.calls().length, afterMoveCalls);
+    const recreated = await openScopedToolTab({
+      ...options,
+      scopeKey: "project:prj_other",
+      selection: { projectId: "prj_other", taskId: null },
+    });
+    assert.equal(recreated.action, "created");
+  } finally {
+    fake.restore();
+    value.close();
+  }
+});
+
+test("tool ownership and control requests do not leak across workspaces", async () => {
+  const value = fixture();
+  const fake = fakeHerdr(value.root);
+  try {
+    const base = {
+      surface: "tasks" as const,
+      repoPath: value.root,
+      command: "node src/cli.ts workspace view --surface=tasks --workspace=\"$HERDR_WORKSPACE_ID\"",
+      cliAlternative: "task watch",
+    };
+    const one = await openScopedToolTab({
+      ...base, scopeKey: "project:prj_one", selection: { projectId: "prj_one", taskId: null }, session: LIVE,
+    });
+    const two = await openScopedToolTab({
+      ...base, scopeKey: "project:prj_two", selection: { projectId: "prj_two", taskId: null },
+      session: { ...LIVE, workspaceId: "w2", tabId: "w2:t0", paneId: "w2:p0" },
+    });
+    const oneAgain = await openScopedToolTab({
+      ...base, scopeKey: "project:prj_one", selection: { projectId: "prj_one", taskId: null }, session: LIVE,
+    });
+    assert.equal(oneAgain.action, "reused");
+    assert.equal(oneAgain.paneId, one.paneId);
+    assert.notEqual(two.paneId, one.paneId);
+    assert.equal(readToolViewRequest("w1", "tasks")?.projectId, "prj_one");
+    assert.equal(readToolViewRequest("w2", "tasks")?.projectId, "prj_two");
     assert.equal(fake.calls().filter((call) => call[0] === "tab" && call[1] === "create").length, 2);
   } finally {
     fake.restore();
+    value.close();
+  }
+});
+
+test("stale or cross-workspace control data is rejected", () => {
+  const value = fixture();
+  try {
+    const one = value.records.createProject({ name: "one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ name: "two", repoPath: join(value.root, "two") });
+    const otherTask = value.records.createTask({ projectId: two.id, title: "private to two", objective: "test" });
+    const mismatched = requestToolView("w1", "logs", { projectId: one.id, taskId: otherTask.id }).request;
+    const frame = renderToolView(value.records, mismatched);
+    assert.match(frame, /does not belong/);
+    assert.doesNotMatch(frame, /No evidence has been recorded/);
+
+    requestToolView("w1", "tasks", { projectId: "prj_one", taskId: null });
+    const path = toolViewRequestPath("w1", "tasks");
+    const stale = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    stale.workspaceId = "w2";
+    writeFileSync(path, JSON.stringify(stale));
+    assert.equal(readToolViewRequest("w1", "tasks"), null);
+    assert.equal(readToolViewRequest("w2", "tasks"), null);
+  } finally {
     value.close();
   }
 });
@@ -258,6 +430,7 @@ test("unsupported Herdr environments return the exact scoped CLI alternative", a
       scopeKey: "task:tsk_exact",
       repoPath: value.root,
       command: "node src/cli.ts logs tsk_exact",
+      selection: { projectId: "prj_exact", taskId: "tsk_exact" },
       cliAlternative: "`node src/cli.ts logs tsk_exact`",
       session: { ...LIVE, available: false, inSession: false, workspaceId: null, reason: "herdr is unavailable" },
     });
@@ -277,6 +450,7 @@ test("failed command startup removes its owned partial tab and reports the CLI a
       scopeKey: "task:tsk_exact",
       repoPath: value.root,
       command: "node src/cli.ts logs tsk_exact",
+      selection: { projectId: "prj_exact", taskId: "tsk_exact" },
       cliAlternative: "`node src/cli.ts logs tsk_exact`",
       session: LIVE,
     });
@@ -300,6 +474,7 @@ test("older Herdr versions degrade without touching tabs and name the supported 
       scopeKey: "project:prj_exact",
       repoPath: value.root,
       command: "node src/cli.ts task watch --project=prj_exact",
+      selection: { projectId: "prj_exact", taskId: null },
       cliAlternative: "`node src/cli.ts task watch --project=prj_exact`",
       session: { ...LIVE, version: "herdr 0.8.9" },
     });
