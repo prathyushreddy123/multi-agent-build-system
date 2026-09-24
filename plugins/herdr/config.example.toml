@@ -1,0 +1,9 @@
+# Merge this block into ~/.config/herdr/config.toml. Replace the command with
+# the absolute path to this checkout; Herdr popup commands do not resolve paths
+# relative to a plugin directory.
+[[keys.command]]
+key = "prefix+m"
+type = "popup"
+command = "/absolute/path/to/mabs/plugins/herdr/mabs-launcher"
+width = "82%"
+height = "72%"

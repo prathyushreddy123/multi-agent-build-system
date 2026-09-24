@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+plugin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$plugin_dir/../.." && pwd)
+exec node "$repo_dir/src/cli.ts" launcher

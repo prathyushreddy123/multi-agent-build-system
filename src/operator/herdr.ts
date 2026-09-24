@@ -15,7 +15,11 @@
  *
  * Outside Herdr nothing fails: the plan degrades to the equivalent CLI commands.
  */
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 import { exec } from "../core/exec.ts";
+import { stateDir } from "../core/paths.ts";
 import { readPreferences, setOwnedSurface, updatePreferences, type OwnedSurface } from "./preferences.ts";
 import { readViewerState } from "./viewer.ts";
 
@@ -43,6 +47,42 @@ export interface PaneInfo {
 }
 
 export class HerdrError extends Error {}
+
+export type ScopedToolSurface = "tasks" | "logs";
+
+interface ScopedToolOwnership {
+  version: 1;
+  surfaces: Partial<Record<ScopedToolSurface, {
+    paneId: string;
+    tabId: string | null;
+    workspaceId: string | null;
+    scopeKey: string;
+    command: string;
+  }>>;
+}
+
+function scopedToolOwnershipPath(): string {
+  return join(stateDir(), "operator", "launcher-tabs.json");
+}
+
+function readScopedToolOwnership(): ScopedToolOwnership {
+  const path = scopedToolOwnershipPath();
+  if (!existsSync(path)) return { version: 1, surfaces: {} };
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as ScopedToolOwnership;
+    return value.version === 1 && value.surfaces ? value : { version: 1, surfaces: {} };
+  } catch {
+    return { version: 1, surfaces: {} };
+  }
+}
+
+function writeScopedToolOwnership(value: ScopedToolOwnership): void {
+  const path = scopedToolOwnershipPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+}
 
 /**
  * Environment a created pane must inherit.
@@ -330,6 +370,176 @@ async function createTab(session: HerdrSession, cwd: string, surface: SurfaceNam
   const paneId = response.result?.root_pane?.pane_id;
   if (typeof paneId !== "string") throw new HerdrError("tab create did not return a root pane ID");
   return { paneId, tabId: (response.result?.tab?.tab_id as string | undefined) ?? null };
+}
+
+export interface OpenScopedToolTabOptions {
+  surface: ScopedToolSurface;
+  /** Stable IDs only (for example `project:prj_…` or `task:tsk_…`). */
+  scopeKey: string;
+  repoPath: string;
+  command: string;
+  cliAlternative: string;
+  session?: HerdrSession;
+}
+
+export interface ScopedToolTabResult {
+  surface: ScopedToolSurface;
+  action: "created" | "reused" | "degraded";
+  paneId: string | null;
+  tabId: string | null;
+  reason: string;
+  cliAlternative: string;
+}
+
+function supportsScopedToolTabs(session: HerdrSession): boolean {
+  const match = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\s|$)/.exec(session.version ?? "");
+  if (!match) return false;
+  const version = match.slice(1).map(Number) as [number, number, number];
+  const minimum: [number, number, number] = [0, 9, 1];
+  return version[0] > minimum[0]
+    || (version[0] === minimum[0] && version[1] > minimum[1])
+    || (version[0] === minimum[0] && version[1] === minimum[1] && version[2] >= minimum[2]);
+}
+
+function degradedScopedToolResult(options: OpenScopedToolTabOptions, reason: string): ScopedToolTabResult {
+  return {
+    surface: options.surface,
+    action: "degraded",
+    paneId: null,
+    tabId: null,
+    reason: `${reason} Run ${options.cliAlternative}`,
+    cliAlternative: options.cliAlternative,
+  };
+}
+
+async function focusScopedToolTab(tabId: string, options: OpenScopedToolTabOptions): Promise<void> {
+  try {
+    // A scoped tool owns the whole tab, so focusing its stable tab ID is exact.
+    // `pane focus` is directional and cannot select a pane by ID.
+    await herdrRun(["tab", "focus", tabId]);
+  } catch (error) {
+    throw new HerdrError(
+      `Could not focus the MABS ${options.surface} tab ${tabId}: ` +
+      `${error instanceof Error ? error.message : String(error)}. Run ${options.cliAlternative}`,
+    );
+  }
+}
+
+async function discardCreatedPane(paneId: string): Promise<string> {
+  try {
+    await herdrRun(["pane", "close", paneId]);
+    return `The incomplete pane ${paneId} was closed.`;
+  } catch (error) {
+    return `The incomplete pane ${paneId} could not be closed: ${error instanceof Error ? error.message : String(error)}.`;
+  }
+}
+
+/**
+ * Open one explicitly scoped Tasks or Logs tab.
+ *
+ * Ownership includes the stable project/task scope. A tab displaying another
+ * scope is never adopted or overwritten, even when its label happens to match.
+ */
+export async function openScopedToolTab(options: OpenScopedToolTabOptions): Promise<ScopedToolTabResult> {
+  const session = options.session ?? await herdrSession();
+  if (!session.available || !session.inSession || !session.workspaceId) {
+    return degradedScopedToolResult(options, session.reason ?? "Herdr session context is unavailable.");
+  }
+  if (!supportsScopedToolTabs(session)) {
+    return degradedScopedToolResult(
+      options,
+      `Herdr ${session.version ?? "with an unknown version"} is not supported by the popup adapter; Herdr 0.9.1 or newer is required.`,
+    );
+  }
+
+  const ownership = readScopedToolOwnership();
+  const saved = ownership.surfaces[options.surface];
+  if (
+    saved
+    && saved.workspaceId === session.workspaceId
+    && saved.scopeKey === options.scopeKey
+    && saved.command === options.command
+  ) {
+    const pane = await getPane(saved.paneId);
+    if (pane?.workspaceId === session.workspaceId && pane.tabId) {
+      await focusScopedToolTab(pane.tabId, options);
+      return {
+        surface: options.surface,
+        action: "reused",
+        paneId: pane.paneId,
+        tabId: pane.tabId,
+        reason: `Focused the verified MABS ${options.surface} tab for ${options.scopeKey}; its command was not restarted.`,
+        cliAlternative: options.cliAlternative,
+      };
+    }
+  }
+
+  // A different scope must not inherit a watcher or evidence listing for the
+  // previous one. Close only the still-verified launcher-owned pane, then
+  // replace it. Never send Ctrl-C or a command into an existing terminal.
+  if (
+    saved
+    && saved.workspaceId === session.workspaceId
+    && (saved.scopeKey !== options.scopeKey || saved.command !== options.command)
+  ) {
+    const pane = await getPane(saved.paneId);
+    if (pane?.workspaceId === session.workspaceId) {
+      await herdrRun(["pane", "close", saved.paneId]);
+    }
+  }
+
+  let created: { paneId: string; tabId: string | null };
+  try {
+    created = await createTab(session, options.repoPath, options.surface);
+  } catch (error) {
+    return degradedScopedToolResult(
+      options,
+      `Herdr could not create the ${options.surface} tab: ${error instanceof Error ? error.message : String(error)}.`,
+    );
+  }
+  if (!created.tabId) {
+    const cleanup = await discardCreatedPane(created.paneId);
+    return degradedScopedToolResult(
+      options,
+      `Herdr created pane ${created.paneId} without returning a tab ID, so MABS cannot safely refocus it. ${cleanup}`,
+    );
+  }
+  try {
+    await herdrRun(["pane", "run", created.paneId, options.command]);
+  } catch (error) {
+    const cleanup = await discardCreatedPane(created.paneId);
+    return degradedScopedToolResult(
+      options,
+      `Created ${options.surface} pane ${created.paneId}, but could not start it: ` +
+      `${error instanceof Error ? error.message : String(error)}. ${cleanup}`,
+    );
+  }
+  ownership.surfaces[options.surface] = {
+    paneId: created.paneId,
+    tabId: created.tabId,
+    workspaceId: session.workspaceId,
+    scopeKey: options.scopeKey,
+    command: options.command,
+  };
+  try {
+    writeScopedToolOwnership(ownership);
+  } catch (error) {
+    const cleanup = await discardCreatedPane(created.paneId);
+    return degradedScopedToolResult(
+      options,
+      `Could not record ownership for ${options.surface} pane ${created.paneId}: ` +
+      `${error instanceof Error ? error.message : String(error)}. ${cleanup}`,
+    );
+  }
+  await focusScopedToolTab(created.tabId, options);
+  return {
+    surface: options.surface,
+    action: "created",
+    paneId: created.paneId,
+    tabId: created.tabId,
+    reason: `Created and focused a MABS ${options.surface} tab for ${options.scopeKey}.`,
+    cliAlternative: options.cliAlternative,
+  };
 }
 
 async function splitPane(session: HerdrSession, cwd: string): Promise<{ paneId: string; tabId: string | null }> {

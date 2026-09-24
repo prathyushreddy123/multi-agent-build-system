@@ -63,6 +63,7 @@ import { buildProgressSnapshot, controllerFreshness } from "./operator/progress.
 import { controllerLiveness } from "./operator/liveness.ts";
 import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
 import { closeWorkspace, openWorkspace, workspaceStatus } from "./operator/herdr.ts";
+import { buildLauncherScreen, dispatchLauncherAction, runLauncher, type LauncherAction } from "./operator/launcher.ts";
 import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
@@ -165,6 +166,8 @@ CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
   logs <task> --evidence=<id> [--tail=200] [--follow]
   workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
   workspace status | workspace close
+  launcher [--action=code|tasks|logs] [--project=<id>] [--task=<id>]
+           [--dispatch|--json]                  Stock-Herdr popup and scoped CLI fallback
   viewer serve [--surface=code] [--viewer=vim] | viewer status [--surface=code]
 
 MAINTENANCE
@@ -297,6 +300,30 @@ async function main(): Promise<void> {
   const records = openRecords();
   let keepOpen = false;
   try {
+    if (area === "launcher") {
+      const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
+      const requestedAction = textOption(args, "action") as LauncherAction | undefined;
+      if (requestedAction && !["code", "tasks", "logs"].includes(requestedAction)) {
+        throw new Error("--action must be code, tasks, or logs");
+      }
+      const screen = buildLauncherScreen(records, {
+        action: requestedAction,
+        projectId: textOption(args, "project"),
+        taskId: textOption(args, "task"),
+      });
+      if (args.options.has("dispatch")) {
+        const result = await dispatchLauncherAction(records, screen);
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      if (args.options.has("json") || !process.stdin.isTTY || !process.stdout.isTTY) {
+        console.log(JSON.stringify(screen, null, 2));
+        return;
+      }
+      const result = await runLauncher(records, screen.selection);
+      if (result) console.log(JSON.stringify(result, null, 2));
+      return;
+    }
     if (area === "files" || area === "changes" || area === "open" || area === "diff" || area === "dispatch") {
       const args = parseArgs([action, ...rest].filter((value): value is string => Boolean(value)));
       const selector = {
