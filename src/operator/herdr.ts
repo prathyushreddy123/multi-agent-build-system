@@ -416,8 +416,17 @@ export interface OpenScopedToolTabOptions {
   /** Stable IDs only (for example `project:prj_…` or `task:tsk_…`). */
   scopeKey: string;
   repoPath: string;
-  /** Fixed command that serves this tab. It must not contain project/task scope. */
-  command: string;
+  /**
+   * Build the fixed command that serves this tab, given the workspace ID this
+   * call verified. The command must not carry project or task scope: selection
+   * travels over the control channel, so the command stays identical across
+   * repeated opens and can be compared for ownership.
+   *
+   * The workspace ID is passed in rather than expanded by the new pane's shell,
+   * because a pane that starts without `HERDR_WORKSPACE_ID` would otherwise
+   * serve an empty workspace and show a usage error instead of the surface.
+   */
+  command: (workspaceId: string) => string;
   selection: ToolViewSelection;
   cliAlternative: string;
   session?: HerdrSession;
@@ -428,6 +437,8 @@ export interface ScopedToolTabResult {
   action: "created" | "reused" | "degraded";
   paneId: string | null;
   tabId: string | null;
+  /** Whether focus actually moved to this tab. A created tab is still usable when it did not. */
+  focused: boolean;
   reason: string;
   cliAlternative: string;
 }
@@ -448,21 +459,28 @@ function degradedScopedToolResult(options: OpenScopedToolTabOptions, reason: str
     action: "degraded",
     paneId: null,
     tabId: null,
+    focused: false,
     reason: `${reason} Run ${options.cliAlternative}`,
     cliAlternative: options.cliAlternative,
   };
 }
 
-async function focusScopedToolTab(tabId: string, options: OpenScopedToolTabOptions): Promise<void> {
+/**
+ * Focus the owned tab, reporting a failure instead of throwing.
+ *
+ * A tab that exists and shows the right selection is a successful open even when
+ * focus could not move, so a focus failure must not be reported as if nothing
+ * had opened.
+ */
+async function focusScopedToolTab(tabId: string, surface: ScopedToolSurface): Promise<string | null> {
   try {
     // A scoped tool owns the whole tab, so focusing its stable tab ID is exact.
     // `pane focus` is directional and cannot select a pane by ID.
     await herdrRun(["tab", "focus", tabId]);
+    return null;
   } catch (error) {
-    throw new HerdrError(
-      `Could not focus the MABS ${options.surface} tab ${tabId}: ` +
-      `${error instanceof Error ? error.message : String(error)}. Run ${options.cliAlternative}`,
-    );
+    return `Focus could not move to the MABS ${surface} tab ${tabId} `
+      + `(${error instanceof Error ? error.message : String(error)}); switch to it by hand.`;
   }
 }
 
@@ -494,10 +512,16 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
     );
   }
 
+  const command = options.command(session.workspaceId);
   const ownership = readScopedToolOwnership();
   const workspaceOwners = ownership.workspaces[session.workspaceId] ?? { surfaces: {} };
   const saved = workspaceOwners.surfaces[options.surface];
-  if (saved && saved.workspaceId === session.workspaceId && saved.command === options.command) {
+  let stalePredecessor: string | null = null;
+  if (saved && saved.workspaceId === session.workspaceId && saved.command !== command) {
+    // A recorded pane serving a different command is still someone's live view.
+    // It is dropped from our record rather than closed or reused.
+    stalePredecessor = `The previously owned pane ${saved.paneId} runs an older tool-view command and was left running.`;
+  } else if (saved && saved.workspaceId === session.workspaceId) {
     const pane = await getPane(saved.paneId);
     // Both IDs must still match. A moved pane can remain in the same workspace
     // under a different tab; it is no longer this owned full-tab surface.
@@ -514,16 +538,21 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
           `Could not update the workspace-scoped ${options.surface} view: ${error instanceof Error ? error.message : String(error)}.`,
         );
       }
-      await focusScopedToolTab(saved.tabId, options);
+      const focusFailure = await focusScopedToolTab(saved.tabId, options.surface);
       return {
         surface: options.surface,
         action: "reused",
         paneId: pane.paneId,
         tabId: saved.tabId,
-        reason: `Focused the verified MABS ${options.surface} tab for ${options.scopeKey}; its command was not restarted.`,
+        focused: focusFailure === null,
+        reason: focusFailure
+          ?? `Focused the verified MABS ${options.surface} tab for ${options.scopeKey}; its command was not restarted.`,
         cliAlternative: options.cliAlternative,
       };
     }
+    stalePredecessor = pane
+      ? `The previously owned pane ${saved.paneId} now sits in another tab and was left untouched.`
+      : `The previously owned pane ${saved.paneId} is gone.`;
   }
 
   // A missing, moved, or otherwise stale owner is never adopted or closed.
@@ -555,7 +584,7 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
     );
   }
   try {
-    await herdrRun(["pane", "run", created.paneId, options.command]);
+    await herdrRun(["pane", "run", created.paneId, command]);
   } catch (error) {
     const cleanup = await discardCreatedPane(created.paneId);
     return degradedScopedToolResult(
@@ -569,7 +598,7 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
     tabId: created.tabId,
     workspaceId: session.workspaceId,
     scopeKey: options.scopeKey,
-    command: options.command,
+    command,
   };
   ownership.workspaces[session.workspaceId] = workspaceOwners;
   try {
@@ -582,13 +611,17 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
       `${error instanceof Error ? error.message : String(error)}. ${cleanup}`,
     );
   }
-  await focusScopedToolTab(created.tabId, options);
+  const focusFailure = await focusScopedToolTab(created.tabId, options.surface);
+  const predecessor = stalePredecessor ? ` ${stalePredecessor}` : "";
   return {
     surface: options.surface,
     action: "created",
     paneId: created.paneId,
     tabId: created.tabId,
-    reason: `Created and focused a MABS ${options.surface} tab for ${options.scopeKey}.`,
+    focused: focusFailure === null,
+    reason: focusFailure
+      ? `Created a MABS ${options.surface} tab for ${options.scopeKey}. ${focusFailure}${predecessor}`
+      : `Created and focused a MABS ${options.surface} tab for ${options.scopeKey}.${predecessor}`,
     cliAlternative: options.cliAlternative,
   };
 }

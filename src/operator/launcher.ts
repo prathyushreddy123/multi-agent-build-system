@@ -206,6 +206,16 @@ function directoryExists(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
 }
 
+/**
+ * Quote a value for the login shell that runs a tab's command.
+ *
+ * A Herdr workspace ID is normally a plain token, but it reaches a shell, so it
+ * is quoted rather than trusted to contain nothing the shell would act on.
+ */
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export interface CodeOpenInvocation {
   executable: string;
   args: string[];
@@ -279,14 +289,15 @@ export async function dispatchLauncherAction(
     ? `${cli} task watch --project=${project.id}`
     : `${cli} logs ${(task as Task).id}`;
   const alternative = `\`${scopedCommand}\``;
-  // The tab runs one stable renderer. Project/task changes are delivered over
-  // its workspace-scoped control file, never by reinjecting shell commands.
-  const command = `${cli} workspace view --surface=${action} --workspace="$HERDR_WORKSPACE_ID"`;
   const tab = await openScopedToolTab({
     surface: action,
     scopeKey: action === "tasks" ? `project:${project.id}` : `task:${(task as Task).id}`,
     repoPath: project.repoPath,
-    command,
+    // The tab runs one stable renderer, scoped to its workspace and nothing
+    // else. Project/task changes are delivered over its workspace-scoped
+    // control file, never by reinjecting shell commands, so this command is
+    // identical on every repeated open.
+    command: (workspaceId) => `${cli} workspace view --surface=${action} --workspace=${shellArgument(workspaceId)}`,
     selection: { projectId: project.id, taskId: task?.id ?? null },
     cliAlternative: alternative,
   });

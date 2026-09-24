@@ -104,6 +104,15 @@ export function requestToolView(
   return { request, changed: true };
 }
 
+/**
+ * The footer every tool view ends with.
+ *
+ * A tool view navigates nothing but itself: the frame redraws on its own
+ * interval, so no refresh key is advertised, and the only key it honours is the
+ * one that closes this view. Quitting ends a view, not a worker.
+ */
+const VIEW_FOOTER = "q quit (closes this view only)";
+
 function renderEvidence(listing: EvidenceListing): string {
   const lines = [`MABS logs — ${listing.taskId}`, ""];
   if (listing.entries.length === 0) lines.push("No evidence has been recorded for this task.");
@@ -115,25 +124,40 @@ function renderEvidence(listing: EvidenceListing): string {
     lines.push("");
     for (const note of listing.notes) lines.push(`⚠ ${note}`);
   }
-  lines.push("", "r refresh   q quit (closes this view only)");
+  lines.push("", `  ${VIEW_FOOTER}`);
   return lines.join("\n");
+}
+
+/**
+ * The shared dashboard renderer ends with its own interactive key hints, which
+ * offer selection, expansion, and filtering this tab deliberately does not
+ * provide. They are dropped by matching the line itself rather than by
+ * anchoring to the end of the frame, so a future trailing line cannot silently
+ * leave a rail behind.
+ */
+const INTERACTIVE_HINT = /^\s*↑\/↓\s/;
+
+function railFree(frame: string, footer: string): string {
+  const lines = frame.split("\n").filter((line) => !INTERACTIVE_HINT.test(line));
+  while (lines.length > 0 && lines[lines.length - 1]?.trim() === "") lines.pop();
+  return [...lines, "", `  ${footer}`].join("\n");
 }
 
 /** Render exactly one selected surface. There is deliberately no internal navigation rail. */
 export function renderToolView(records: Records, request: ToolViewRequest): string {
   const project = records.getProject(request.projectId);
   if (!project) {
-    return `MABS ${request.surface}\n\nSelection ${request.projectId} is stale; reopen the launcher to select a project.\n\nq quit (closes this view only)`;
+    return `MABS ${request.surface}\n\nSelection ${request.projectId} is stale; reopen the launcher to select a project.\n\n  ${VIEW_FOOTER}`;
   }
   if (request.surface === "tasks") {
     const snapshot = buildProgressSnapshot(records, { projectId: project.id, withSteps: true });
-    return renderDashboard(snapshot, reconcileView(snapshot, { ...INITIAL_VIEW, pageSize: 50 }))
-      .replace(/\n  ↑\/↓ select.*$/, "\n  q quit (closes this view only)");
+    const frame = renderDashboard(snapshot, reconcileView(snapshot, { ...INITIAL_VIEW, pageSize: 50 }));
+    return railFree(frame, VIEW_FOOTER);
   }
-  if (!request.taskId) return "MABS logs\n\nNo task is selected.\n\nr refresh   q quit (closes this view only)";
+  if (!request.taskId) return `MABS logs\n\nNo task is selected.\n\n  ${VIEW_FOOTER}`;
   const task = records.getTask(request.taskId);
   if (!task || task.projectId !== project.id) {
-    return `MABS logs\n\nSelection ${request.taskId} is stale or does not belong to ${project.id}; reopen the launcher to select a task.\n\nq quit (closes this view only)`;
+    return `MABS logs\n\nSelection ${request.taskId} is stale or does not belong to ${project.id}; reopen the launcher to select a task.\n\n  ${VIEW_FOOTER}`;
   }
   return renderEvidence(listEvidence(records, { taskId: task.id }));
 }
@@ -154,7 +178,13 @@ export async function serveToolView(records: Records, options: ServeToolViewOpti
   const isTty = Boolean(input.isTTY) && Boolean(process.stdout.isTTY);
   const write = options.write ?? ((frame: string) => process.stdout.write(`\u001b[H\u001b[2J${frame}\n`));
   let stopped = false;
-  const stop = () => { stopped = true; };
+  // Quitting must not wait out the refresh interval, so the sleep is woken
+  // rather than merely flagged.
+  let wake: (() => void) | null = null;
+  const stop = () => {
+    stopped = true;
+    wake?.();
+  };
   const onKey = (key: string) => {
     if (key === "q" || key === "\u001b" || key === "\u0003") stop();
   };
@@ -171,10 +201,16 @@ export async function serveToolView(records: Records, options: ServeToolViewOpti
       const request = readToolViewRequest(options.workspaceId, options.surface);
       write(request
         ? renderToolView(records, request)
-        : `MABS ${options.surface}\n\nWaiting for a workspace-scoped selection.`);
-      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, intervalMs));
+        : `MABS ${options.surface}\n\nWaiting for a workspace-scoped selection.\n\n  ${VIEW_FOOTER}`);
+      if (stopped) break;
+      await new Promise<void>((resolveDelay) => {
+        const timer = setTimeout(resolveDelay, intervalMs);
+        wake = () => { clearTimeout(timer); resolveDelay(); };
+      });
+      wake = null;
     }
   } finally {
+    wake = null;
     options.signal?.removeEventListener("abort", stop);
     if (isTty) {
       input.off("data", onKey);

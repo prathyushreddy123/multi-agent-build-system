@@ -239,7 +239,7 @@ test("explicit scoped tab dispatch reuses the verified pane without restarting i
       surface: "tasks" as const,
       scopeKey: "project:prj_exact",
       repoPath: value.root,
-      command: "node src/cli.ts task watch --project=prj_exact",
+      command: () => "node src/cli.ts task watch --project=prj_exact",
       selection: { projectId: "prj_exact", taskId: null },
       cliAlternative: "`node src/cli.ts task watch --project=prj_exact`",
       session: LIVE,
@@ -306,6 +306,13 @@ test("Tasks and Logs own separate rail-free tabs in the invoking workspace", asy
     assert.notEqual(tasks.tab?.paneId, logs.tab?.paneId);
     assert.equal(fake.calls().filter((call) => call[0] === "pane" && call[1] === "split").length, 0);
     assert.equal(fake.calls().filter((call) => call[0] === "tab" && call[1] === "create").length, 2);
+    // Neither tab may be told to work out its own workspace: an unset variable
+    // in the new pane's shell would silently serve the wrong scope or none.
+    const runs = fake.calls().filter((call) => call[0] === "pane" && call[1] === "run").map((call) => call[3] as string);
+    assert.equal(runs.length, 2);
+    assert.ok(runs.every((run) => run.includes("--workspace='w1'")), runs.join(" | "));
+    assert.ok(runs.every((run) => !run.includes("HERDR_WORKSPACE_ID")), runs.join(" | "));
+    assert.deepEqual(runs.map((run) => /--surface=(\w+)/.exec(run)?.[1]).sort(), ["logs", "tasks"]);
 
     const tasksFrame = renderToolView(value.records, readToolViewRequest("w1", "tasks")!);
     const logsFrame = renderToolView(value.records, readToolViewRequest("w1", "logs")!);
@@ -313,6 +320,15 @@ test("Tasks and Logs own separate rail-free tabs in the invoking workspace", asy
     assert.doesNotMatch(tasksFrame, /MABS logs/);
     assert.match(logsFrame, /^MABS logs/);
     assert.doesNotMatch(logsFrame, /MABS tasks/);
+    // Rail-free: each frame offers no in-view navigation, filtering, or a route
+    // to the other surface. Its only key closes the view.
+    for (const frame of [tasksFrame, logsFrame]) {
+      assert.doesNotMatch(frame, /↑\/↓/);
+      assert.doesNotMatch(frame, /enter steps/);
+      assert.doesNotMatch(frame, /f filter/);
+      assert.doesNotMatch(frame, /r refresh/);
+      assert.match(frame.trimEnd(), /q quit \(closes this view only\)$/);
+    }
     assert.equal(JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) }), before);
   } finally {
     if (previousHerdr.env === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previousHerdr.env;
@@ -332,7 +348,7 @@ test("closed tabs are recreated only by an explicit open and moved tabs are neve
       surface: "tasks" as const,
       scopeKey: "project:prj_exact",
       repoPath: value.root,
-      command: "node src/cli.ts workspace view --surface=tasks --workspace=\"$HERDR_WORKSPACE_ID\"",
+      command: (workspaceId: string) => `node src/cli.ts workspace view --surface=tasks --workspace='${workspaceId}'`,
       selection: { projectId: "prj_exact", taskId: null },
       cliAlternative: "task watch",
       session: LIVE,
@@ -374,7 +390,7 @@ test("tool ownership and control requests do not leak across workspaces", async 
     const base = {
       surface: "tasks" as const,
       repoPath: value.root,
-      command: "node src/cli.ts workspace view --surface=tasks --workspace=\"$HERDR_WORKSPACE_ID\"",
+      command: (workspaceId: string) => `node src/cli.ts workspace view --surface=tasks --workspace='${workspaceId}'`,
       cliAlternative: "task watch",
     };
     const one = await openScopedToolTab({
@@ -429,7 +445,7 @@ test("unsupported Herdr environments return the exact scoped CLI alternative", a
       surface: "logs",
       scopeKey: "task:tsk_exact",
       repoPath: value.root,
-      command: "node src/cli.ts logs tsk_exact",
+      command: () => "node src/cli.ts logs tsk_exact",
       selection: { projectId: "prj_exact", taskId: "tsk_exact" },
       cliAlternative: "`node src/cli.ts logs tsk_exact`",
       session: { ...LIVE, available: false, inSession: false, workspaceId: null, reason: "herdr is unavailable" },
@@ -449,7 +465,7 @@ test("failed command startup removes its owned partial tab and reports the CLI a
       surface: "logs",
       scopeKey: "task:tsk_exact",
       repoPath: value.root,
-      command: "node src/cli.ts logs tsk_exact",
+      command: () => "node src/cli.ts logs tsk_exact",
       selection: { projectId: "prj_exact", taskId: "tsk_exact" },
       cliAlternative: "`node src/cli.ts logs tsk_exact`",
       session: LIVE,
@@ -473,7 +489,7 @@ test("older Herdr versions degrade without touching tabs and name the supported 
       surface: "tasks",
       scopeKey: "project:prj_exact",
       repoPath: value.root,
-      command: "node src/cli.ts task watch --project=prj_exact",
+      command: () => "node src/cli.ts task watch --project=prj_exact",
       selection: { projectId: "prj_exact", taskId: null },
       cliAlternative: "`node src/cli.ts task watch --project=prj_exact`",
       session: { ...LIVE, version: "herdr 0.8.9" },

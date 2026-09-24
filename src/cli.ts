@@ -167,6 +167,10 @@ CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
   logs <task> --evidence=<id> [--tail=200] [--follow]
   workspace open [--project=<id>] [--layout=tabs|split] [--focus=code]
   workspace status | workspace close
+  workspace view --surface=tasks|logs --workspace=<id>
+                                               One rail-free surface in its own tab. The
+                                               launcher starts this; scope arrives over the
+                                               workspace's control channel, not as a command.
   launcher [--action=code|tasks|logs] [--project=<id>] [--task=<id>]
            [--dispatch|--json]                  Stock-Herdr popup and scoped CLI fallback
   viewer serve [--surface=code] [--viewer=vim] | viewer status [--surface=code]
@@ -295,7 +299,7 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    throw new Error(`Usage: mabs workspace open|status|close`);
+    throw new Error(`Usage: mabs workspace open|status|close|view`);
   }
   if (area === "viewer" && action === "serve") {
     const args = parseArgs(rest);
