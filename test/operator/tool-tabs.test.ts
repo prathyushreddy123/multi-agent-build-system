@@ -304,10 +304,16 @@ test("a running view follows the control channel without any command being reinj
     });
 
     assert.equal(frames.length, 2);
-    assert.ok(frames[0]?.includes("only in one"), frames[0]);
-    assert.ok(!frames[0]?.includes("only in two"), frames[0]);
-    assert.ok(frames[1]?.includes("only in two"), frames[1]);
-    assert.ok(!frames[1]?.includes("only in one"), frames[1]);
+    // Each frame shows exactly the project the channel had selected when it was
+    // drawn, so the second frame must have dropped the first project entirely.
+    assert.deepEqual(
+      frames.map((frame) => ({
+        one: frame.includes("only in one"),
+        two: frame.includes("only in two"),
+      })),
+      [{ one: true, two: false }, { one: false, two: true }],
+      frames.join("\n--- next frame ---\n"),
+    );
     // Scope changed through the channel alone: no herdr call, no shell command.
     assert.equal(fake.calls().length, herdrCallsBefore);
     assert.equal(readToolViewRequest("w1", "tasks")?.sequence, 2);
