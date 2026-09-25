@@ -166,6 +166,8 @@ export interface ServeToolViewOptions {
   workspaceId: string;
   surface: ToolViewSurface;
   intervalMs?: number;
+  /** Render one frame and return; used by diagnostics without a live terminal. */
+  once?: boolean;
   signal?: AbortSignal;
   input?: NodeJS.ReadStream;
   write?: (frame: string) => void;
@@ -202,7 +204,7 @@ export async function serveToolView(records: Records, options: ServeToolViewOpti
       write(request
         ? renderToolView(records, request)
         : `MABS ${options.surface}\n\nWaiting for a workspace-scoped selection.\n\n  ${VIEW_FOOTER}`);
-      if (stopped) break;
+      if (stopped || options.once) break;
       await new Promise<void>((resolveDelay) => {
         const timer = setTimeout(resolveDelay, intervalMs);
         wake = () => { clearTimeout(timer); resolveDelay(); };

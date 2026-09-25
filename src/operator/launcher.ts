@@ -6,6 +6,7 @@
  * separate, explicit step reached by activating a fully scoped action.
  */
 import { statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { exec } from "../core/exec.ts";
 import type { Project, Records, Task } from "../store/records.ts";
@@ -261,6 +262,11 @@ export async function dispatchLauncherAction(
 ): Promise<LauncherDispatchResult> {
   const { project, task, action } = requireReady(records, screen);
   const cli = options.cliCommand ?? "node src/cli.ts";
+  // Herdr starts the view in the selected project's checkout, not in the MABS
+  // checkout. Use this module's absolute sibling path so an unrelated project
+  // cannot shadow (or fail to contain) src/cli.ts.
+  const runtimeCli = options.cliCommand
+    ?? `node ${shellArgument(fileURLToPath(new URL("../cli.ts", import.meta.url)))}`;
 
   if (action === "code") {
     const context = buildTaskContext(records, task as Task, null);
@@ -297,7 +303,7 @@ export async function dispatchLauncherAction(
     // else. Project/task changes are delivered over its workspace-scoped
     // control file, never by reinjecting shell commands, so this command is
     // identical on every repeated open.
-    command: (workspaceId) => `${cli} workspace view --surface=${action} --workspace=${shellArgument(workspaceId)}`,
+    command: (workspaceId) => `${runtimeCli} workspace view --surface=${action} --workspace=${shellArgument(workspaceId)}`,
     selection: { projectId: project.id, taskId: task?.id ?? null },
     cliAlternative: alternative,
   });

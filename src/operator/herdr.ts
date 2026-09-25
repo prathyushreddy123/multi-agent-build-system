@@ -15,7 +15,18 @@
  *
  * Outside Herdr nothing fails: the plan degrades to the equivalent CLI commands.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import { exec } from "../core/exec.ts";
@@ -68,6 +79,90 @@ interface ScopedToolOwnership {
 
 function scopedToolOwnershipPath(): string {
   return join(stateDir(), "operator", "launcher-tabs.json");
+}
+
+function scopedToolOwnershipLockPath(): string {
+  return join(stateDir(), "operator", "launcher-tabs.lock");
+}
+
+interface ScopedToolLockRecord {
+  token: string;
+  pid: number;
+  createdAt: number;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function lockCanBeRecovered(path: string): boolean {
+  try {
+    const record = JSON.parse(readFileSync(path, "utf8")) as Partial<ScopedToolLockRecord>;
+    if (typeof record.pid === "number" && Number.isSafeInteger(record.pid) && record.pid > 0) {
+      return !processIsAlive(record.pid);
+    }
+    // Give a process that has just exclusively created the file time to write
+    // its record. Only abandoned malformed files are recoverable.
+    return Date.now() - statSync(path).mtimeMs > 5_000;
+  } catch {
+    try { return Date.now() - statSync(path).mtimeMs > 5_000; } catch { return false; }
+  }
+}
+
+/**
+ * Serialize the ownership read/check/create/write transaction across popup
+ * processes. Atomic rename protects JSON readers, but only this exclusive lock
+ * prevents two launchers from both observing "missing" and creating tabs.
+ */
+async function withScopedToolOwnershipLock<T>(operation: () => Promise<T>): Promise<T> {
+  const path = scopedToolOwnershipLockPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const record: ScopedToolLockRecord = { token: randomUUID(), pid: process.pid, createdAt: Date.now() };
+  // One creator can legitimately spend up to three 30-second Herdr calls on
+  // create, run, and focus. A waiter must outlast that bounded transaction.
+  const deadline = Date.now() + 95_000;
+  for (;;) {
+    let descriptor: number | null = null;
+    try {
+      descriptor = openSync(path, "wx", 0o600);
+      writeFileSync(descriptor, `${JSON.stringify(record)}\n`);
+      closeSync(descriptor);
+      descriptor = null;
+      break;
+    } catch (error) {
+      const createdThisLock = descriptor !== null;
+      if (descriptor !== null) closeSync(descriptor);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        if (createdThisLock) {
+          try { unlinkSync(path); } catch { /* retain the original failure */ }
+        }
+        throw error;
+      }
+      if (lockCanBeRecovered(path)) {
+        try { unlinkSync(path); } catch { /* another waiter recovered it */ }
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error("timed out waiting for another MABS tool-tab action to finish");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    // Never remove a successor's lock if recovery raced with process teardown.
+    try {
+      const current = JSON.parse(readFileSync(path, "utf8")) as Partial<ScopedToolLockRecord>;
+      if (current.token === record.token) unlinkSync(path);
+    } catch {
+      // A missing lock is already released; cleanup must not hide the result.
+    }
+  }
 }
 
 function readScopedToolOwnership(): ScopedToolOwnership {
@@ -512,6 +607,23 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
     );
   }
 
+  try {
+    return await withScopedToolOwnershipLock(() => openScopedToolTabLocked(
+      options,
+      session as HerdrSession & { workspaceId: string },
+    ));
+  } catch (error) {
+    return degradedScopedToolResult(
+      options,
+      `Could not coordinate ownership for the workspace-scoped ${options.surface} view: ${error instanceof Error ? error.message : String(error)}.`,
+    );
+  }
+}
+
+async function openScopedToolTabLocked(
+  options: OpenScopedToolTabOptions,
+  session: HerdrSession & { workspaceId: string },
+): Promise<ScopedToolTabResult> {
   const command = options.command(session.workspaceId);
   const ownership = readScopedToolOwnership();
   const workspaceOwners = ownership.workspaces[session.workspaceId] ?? { surfaces: {} };
@@ -551,7 +663,7 @@ export async function openScopedToolTab(options: OpenScopedToolTabOptions): Prom
       };
     }
     stalePredecessor = pane
-      ? `The previously owned pane ${saved.paneId} now sits in another tab and was left untouched.`
+      ? `The previously owned pane ${saved.paneId} now sits in another tab and was left untouched; close that moved tab manually to stop its older viewer.`
       : `The previously owned pane ${saved.paneId} is gone.`;
   }
 

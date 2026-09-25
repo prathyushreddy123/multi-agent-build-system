@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { exec } from "../../src/core/exec.ts";
 import {
   activateLauncherChoice,
   buildLauncherScreen,
@@ -117,6 +118,19 @@ const LIVE: HerdrSession = {
   paneId: "w1:p1",
   reason: null,
 };
+
+async function firstToolFrame(command: string, cwd: string): Promise<string> {
+  assert.match(command, /^node '[^']+' workspace view /);
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const outputPath = join(cwd, "tool-view-frame.txt");
+  const quotedOutput = `'${outputPath.replaceAll("'", "'\\''")}'`;
+  const result = await exec("bash", ["-c", `${command} --once > ${quotedOutput}`], {
+    cwd, env, timeoutMs: 5_000,
+  });
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  return readFileSync(outputPath, "utf8");
+}
 
 test("empty stores explain that no scope is available without dispatching anything", () => {
   const value = fixture();
@@ -330,6 +344,50 @@ test("Tasks and Logs own separate rail-free tabs in the invoking workspace", asy
       assert.match(frame.trimEnd(), /q quit \(closes this view only\)$/);
     }
     assert.equal(JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) }), before);
+  } finally {
+    if (previousHerdr.env === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previousHerdr.env;
+    if (previousHerdr.workspace === undefined) delete process.env.HERDR_WORKSPACE_ID; else process.env.HERDR_WORKSPACE_ID = previousHerdr.workspace;
+    if (previousHerdr.tab === undefined) delete process.env.HERDR_TAB_ID; else process.env.HERDR_TAB_ID = previousHerdr.tab;
+    if (previousHerdr.pane === undefined) delete process.env.HERDR_PANE_ID; else process.env.HERDR_PANE_ID = previousHerdr.pane;
+    fake.restore();
+    value.close();
+  }
+});
+
+test("a generated tool-view command starts from a distinct project checkout", async () => {
+  const value = fixture();
+  const fake = fakeHerdr(value.root);
+  const previousHerdr = {
+    env: process.env.HERDR_ENV,
+    workspace: process.env.HERDR_WORKSPACE_ID,
+    tab: process.env.HERDR_TAB_ID,
+    pane: process.env.HERDR_PANE_ID,
+  };
+  try {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_WORKSPACE_ID = "w1";
+    process.env.HERDR_TAB_ID = "w1:t0";
+    process.env.HERDR_PANE_ID = "w1:p0";
+    const projectRepo = join(value.root, "unrelated-project");
+    mkdirSync(projectRepo, { recursive: true });
+    const project = value.records.createProject({ name: "other checkout", repoPath: projectRepo });
+    value.records.createTask({ projectId: project.id, title: "visible from absolute CLI", objective: "test" });
+
+    const opened = await dispatchLauncherAction(
+      value.records,
+      buildLauncherScreen(value.records, { action: "tasks", projectId: project.id }),
+    );
+    assert.equal(opened.tab?.action, "created");
+    const run = fake.calls().find((call) => call[0] === "pane" && call[1] === "run");
+    const command = run?.[3];
+    assert.ok(command);
+    assert.doesNotMatch(command, /^node src\/cli\.ts/);
+    assert.match(command, /\/src\/cli\.ts' workspace view --surface=tasks/);
+
+    const frame = await firstToolFrame(command, projectRepo);
+    assert.match(frame, /^\u001b\[H\u001b\[2JMABS tasks/);
+    assert.match(frame, /visible from absolute CLI/);
+    assert.doesNotMatch(frame, /MODULE_NOT_FOUND/);
   } finally {
     if (previousHerdr.env === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previousHerdr.env;
     if (previousHerdr.workspace === undefined) delete process.env.HERDR_WORKSPACE_ID; else process.env.HERDR_WORKSPACE_ID = previousHerdr.workspace;

@@ -266,7 +266,7 @@ async function main(): Promise<void> {
       const stop = new AbortController();
       try {
         await Promise.race([
-          serveToolView(viewRecords, { workspaceId, surface, signal: stop.signal }),
+          serveToolView(viewRecords, { workspaceId, surface, signal: stop.signal, once: args.options.has("once") }),
           waitForSignal(() => stop.abort()),
         ]);
       } finally {

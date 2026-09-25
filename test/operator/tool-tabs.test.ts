@@ -205,6 +205,39 @@ test("repeated opens of both surfaces focus the owned tabs without starting a se
   }
 });
 
+test("simultaneous opens serialize ownership and retain one process per surface", async () => {
+  const value = fixture();
+  const fake = fakeHerdr(value.root);
+  try {
+    const sameSurface = await Promise.all([
+      openScopedToolTab(tasksTab(value.root, "prj_one")),
+      openScopedToolTab(tasksTab(value.root, "prj_one")),
+      openScopedToolTab(tasksTab(value.root, "prj_one")),
+    ]);
+    assert.equal(sameSurface.filter((result) => result.action === "created").length, 1);
+    assert.equal(new Set(sameSurface.map((result) => result.paneId)).size, 1);
+
+    const [tasks, logs] = await Promise.all([
+      openScopedToolTab(tasksTab(value.root, "prj_two")),
+      openScopedToolTab(logsTab(value.root, "prj_two", "tsk_two")),
+    ]);
+    assert.equal(tasks.action, "reused");
+    assert.equal(logs.action, "created");
+
+    const ownership = JSON.parse(
+      readFileSync(join(value.root, "state", "operator", "launcher-tabs.json"), "utf8"),
+    ) as { workspaces: Record<string, { surfaces: Record<string, { paneId: string }> }> };
+    assert.equal(ownership.workspaces.w1?.surfaces.tasks?.paneId, sameSurface[0]?.paneId);
+    assert.equal(ownership.workspaces.w1?.surfaces.logs?.paneId, logs.paneId);
+    const calls = fake.calls();
+    assert.equal(calls.filter((call) => call[0] === "tab" && call[1] === "create").length, 2);
+    assert.equal(calls.filter((call) => call[0] === "pane" && call[1] === "run").length, 2);
+  } finally {
+    fake.restore();
+    value.close();
+  }
+});
+
 test("ownership is recorded as exact IDs, so a lookalike tab is neither adopted nor closed", async () => {
   const value = fixture();
   const fake = fakeHerdr(value.root);
@@ -235,7 +268,7 @@ test("ownership is recorded as exact IDs, so a lookalike tab is neither adopted 
   }
 });
 
-test("a pane moved into another tab is left alone and explains the replacement", async () => {
+test("a pane moved into another tab is left alone and explains manual viewer cleanup", async () => {
   const value = fixture();
   const fake = fakeHerdr(value.root);
   try {
@@ -248,6 +281,7 @@ test("a pane moved into another tab is left alone and explains the replacement",
     assert.equal(replacement.action, "created");
     assert.notEqual(replacement.paneId, owned.paneId);
     assert.match(replacement.reason, /left untouched/);
+    assert.match(replacement.reason, /close that moved tab manually/);
     assert.equal(fake.calls().filter((call) => call[1] === "close").length, 0);
     assert.equal(fake.panes()[owned.paneId as string]?.tab_id, "w1:t-moved");
   } finally {
