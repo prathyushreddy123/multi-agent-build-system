@@ -17,7 +17,7 @@ import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.t
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, Project, Records, Task } from "../store/records.ts";
-import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
+import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceContainsRevision, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
 
 /** Marks a task whose only outstanding work is a review the controller can retry. */
 export const REVIEW_PENDING_PREFIX = "Review pending:";
@@ -984,6 +984,23 @@ export class Controller {
       return dependency.resultRevision;
     });
     if (revisions.length === 0) return workspace;
+    if (!workspace.needsDependencyIntegration) {
+      for (const event of this.records.listEvents(task.id)) {
+        if (event.kind !== "task.dependencies_integrated" || typeof event.data !== "string") continue;
+        try {
+          const prior = JSON.parse(event.data) as { revisions?: unknown; baseRevision?: unknown };
+          const sameRevisions = Array.isArray(prior.revisions) &&
+            prior.revisions.length === revisions.length &&
+            prior.revisions.every((revision, index) => revision === revisions[index]);
+          if (sameRevisions && typeof prior.baseRevision === "string" &&
+              await workspaceContainsRevision(workspace.path, prior.baseRevision)) {
+            return { ...workspace, baseRevision: prior.baseRevision };
+          }
+        } catch {
+          // Ignore malformed historical evidence and safely attempt integration.
+        }
+      }
+    }
     const baseRevision = await integrateDependencyRevisions(workspace.path, revisions);
     this.records.recordEvent({
       kind: "task.dependencies_integrated",

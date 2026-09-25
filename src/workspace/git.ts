@@ -11,6 +11,11 @@ export interface Workspace {
   baseRevision: string;
 }
 
+export interface PreparedWorkspace extends Workspace {
+  /** True only when this call created the task branch from its base revision. */
+  needsDependencyIntegration: boolean;
+}
+
 async function git(cwd: string, args: string[], timeoutMs = 120_000, preserveLeadingWhitespace = false): Promise<string> {
   const result = await exec("git", args, { cwd, timeoutMs });
   if (result.code !== 0) {
@@ -24,7 +29,7 @@ function branchName(task: Task): string {
 }
 
 /** Create or reconcile the isolated worktree assigned to one coding task. */
-export async function prepareWorkspace(project: Project, task: Task): Promise<Workspace> {
+export async function prepareWorkspace(project: Project, task: Task): Promise<PreparedWorkspace> {
   const repoPath = resolve(project.repoPath);
   await git(repoPath, ["rev-parse", "--is-inside-work-tree"]);
   const baseRevision = task.baseRevision ?? (await git(repoPath, ["rev-parse", project.baseBranch]));
@@ -36,18 +41,30 @@ export async function prepareWorkspace(project: Project, task: Task): Promise<Wo
     const actualBranch = await git(path, ["branch", "--show-current"]);
     if (resolve(actualRepo) !== resolve(path)) throw new Error(`Workspace ${path} is not a worktree root`);
     if (actualBranch !== branch) throw new Error(`Workspace ${path} is on ${actualBranch}, expected ${branch}`);
-    return { path, branch, baseRevision };
+    return { path, branch, baseRevision, needsDependencyIntegration: false };
   }
 
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const branchExists = await exec("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repoPath });
-  if (branchExists.code === 0) await git(repoPath, ["worktree", "add", path, branch]);
-  else await git(repoPath, ["worktree", "add", "-b", branch, path, baseRevision]);
-  return { path, branch, baseRevision };
+  if (branchExists.code === 0) {
+    // Retention removes only the worktree directory and deliberately preserves
+    // its branch. Recreating that directory must not replay dependencies that
+    // were already integrated into the retained branch.
+    await git(repoPath, ["worktree", "add", path, branch]);
+    return { path, branch, baseRevision, needsDependencyIntegration: false };
+  }
+  await git(repoPath, ["worktree", "add", "-b", branch, path, baseRevision]);
+  return { path, branch, baseRevision, needsDependencyIntegration: true };
 }
 
 export async function workspaceRevision(path: string): Promise<string> {
   return git(path, ["rev-parse", "HEAD"]);
+}
+
+/** Whether a recorded integration point is still present on this task branch. */
+export async function workspaceContainsRevision(path: string, revision: string): Promise<boolean> {
+  const result = await exec("git", ["merge-base", "--is-ancestor", revision, "HEAD"], { cwd: path, timeoutMs: 30_000 });
+  return result.code === 0;
 }
 
 /** Whether a worktree still holds changes that exist nowhere else. */
