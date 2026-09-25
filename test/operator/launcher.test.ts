@@ -601,6 +601,62 @@ test("Code opens only the selected live worktree and never substitutes the proje
   }
 });
 
+test("Code routes an ambiguous multi-project selection only to the chosen live worktree", async () => {
+  const value = fixture();
+  try {
+    const editorCalls = join(value.root, "selected-editor-args.json");
+    const editor = join(value.root, "configured-editor");
+    writeFileSync(editor, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(editorCalls)}, JSON.stringify(process.argv.slice(2)));\n`);
+    chmodSync(editor, 0o755);
+
+    const projects = ["one", "two"].map((name) => {
+      const repoPath = join(value.root, `${name}-project-checkout`);
+      const worktreePath = join(value.root, `${name}-live-worktree`);
+      mkdirSync(repoPath);
+      mkdirSync(worktreePath);
+      writeFileSync(join(worktreePath, ".git"), `gitdir: /tmp/${name}\n`);
+      const project = value.records.createProject({ name: `duplicate label ${name}`, repoPath });
+      const task = value.records.createTask({ projectId: project.id, title: "duplicate task", objective: name });
+      value.records.updateTaskFields(task.id, { worktree_path: worktreePath });
+      return { project, task, repoPath, worktreePath };
+    });
+    const [one, two] = projects as [typeof projects[number], typeof projects[number]];
+
+    const picker = buildLauncherScreen(value.records, { action: "code" });
+    assert.equal(picker.step, "project");
+    assert.deepEqual(
+      picker.choices.map((choice) => choice.id).sort(),
+      projects.map(({ project }) => `project:${project.id}`).sort(),
+    );
+    const before = JSON.stringify(projects.map(({ project, task }) => ({
+      task: value.records.getTask(task.id),
+      attempts: value.records.listAttempts(task.id),
+      events: value.records.listEvents(task.id),
+      projectTasks: value.records.listTasks({ projectId: project.id }),
+    })));
+
+    const screen = buildLauncherScreen(value.records, {
+      action: "code", projectId: two.project.id, taskId: two.task.id,
+    });
+    const result = await dispatchLauncherAction(value.records, screen, { vscodeExecutable: editor });
+
+    assert.equal(result.status, "launch-requested");
+    assert.deepEqual(JSON.parse(readFileSync(editorCalls, "utf8")), ["--new-window", two.worktreePath]);
+    assert.notEqual(two.worktreePath, one.worktreePath);
+    assert.ok(!readFileSync(editorCalls, "utf8").includes(one.worktreePath));
+    assert.ok(!readFileSync(editorCalls, "utf8").includes(one.repoPath));
+    assert.ok(!readFileSync(editorCalls, "utf8").includes(two.repoPath));
+    assert.equal(JSON.stringify(projects.map(({ project, task }) => ({
+      task: value.records.getTask(task.id),
+      attempts: value.records.listAttempts(task.id),
+      events: value.records.listEvents(task.id),
+      projectTasks: value.records.listTasks({ projectId: project.id }),
+    }))), before);
+  } finally {
+    value.close();
+  }
+});
+
 test("Windows-hosted VS Code receives an explicit WSL remote address", () => {
   const invocation = codeOpenInvocation(
     "/mnt/c/Users/example/AppData/Local/Programs/Microsoft VS Code/bin/code",

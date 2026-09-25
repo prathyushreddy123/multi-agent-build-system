@@ -430,6 +430,7 @@ test("opening, following, and closing a tool view changes no task record", async
       task: value.records.getTask(task.id),
       events: value.records.listEvents(task.id),
       tasks: value.records.listTasks({ projectId: project.id }),
+      attempts: value.records.listAttempts(task.id),
     });
 
     await openScopedToolTab(logsTab(value.root, project.id, task.id));
@@ -447,6 +448,7 @@ test("opening, following, and closing a tool view changes no task record", async
       task: value.records.getTask(task.id),
       events: value.records.listEvents(task.id),
       tasks: value.records.listTasks({ projectId: project.id }),
+      attempts: value.records.listAttempts(task.id),
     }), before);
     // Closing a view is not a cancellation: nothing was asked of any worker.
     assert.equal(fake.calls().filter((call) => call[0] === "pane" && call[1] === "close").length, 0);
