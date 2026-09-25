@@ -174,6 +174,7 @@ test("multi-project scope is an explicit stable-ID choice rather than a label in
     assert.equal(screen.step, "project");
     assert.deepEqual(screen.choices.map((choice) => choice.id).sort(), [`project:${one.id}`, `project:${two.id}`].sort());
     assert.ok(screen.choices.every((choice) => choice.label.includes("same label") && choice.label.includes("prj_")));
+    assert.ok(screen.choices.every((choice) => choice.detail.includes("project checkout (not a task worktree)")));
   } finally {
     value.close();
   }
@@ -586,7 +587,9 @@ test("Code opens only the selected live worktree and never substitutes the proje
 
     const screen = buildLauncherScreen(value.records, { action: "code", projectId: project.id, taskId: task.id });
     const result = await dispatchLauncherAction(value.records, screen);
-    assert.equal(result.status, "opened");
+    assert.equal(result.status, "launch-requested");
+    assert.equal(result.guiVerified, false);
+    assert.match(result.reason, /GUI display was not verified/);
     const invocation = readFileSync(calls, "utf8");
     assert.match(invocation, /--new-window/);
     assert.ok(invocation.includes(worktree));
@@ -626,6 +629,109 @@ test("Code reports a missing live worktree instead of opening a revision or base
     });
     const screen = buildLauncherScreen(value.records, { action: "code", projectId: project.id, taskId: task.id });
     await assert.rejects(() => dispatchLauncherAction(value.records, screen), /no live worktree.*recorded revision/is);
+  } finally {
+    value.close();
+  }
+});
+
+test("Code binds the selected attempt worktree and passes a Unicode file as one argument", async () => {
+  const value = fixture();
+  try {
+    const projectRepo = join(value.root, "project checkout");
+    const taskWorktree = join(value.root, "task worktree");
+    const attemptWorktree = join(value.root, "attempt worktree 任务");
+    for (const directory of [projectRepo, taskWorktree, attemptWorktree]) mkdirSync(directory, { recursive: true });
+    writeFileSync(join(taskWorktree, ".git"), "gitdir: /tmp/task\n");
+    writeFileSync(join(attemptWorktree, ".git"), "gitdir: /tmp/attempt\n");
+    const relative = "src/file name 世界.ts";
+    mkdirSync(join(attemptWorktree, "src"));
+    writeFileSync(join(attemptWorktree, relative), "const unchanged = true;\n");
+
+    const project = value.records.createProject({ name: "project", repoPath: projectRepo });
+    const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
+    value.records.updateTaskFields(task.id, { worktree_path: taskWorktree });
+    const attempt = value.records.startAttempt({
+      id: "att_selected", taskId: task.id, launchId: "launch-selected", kind: "initial", adapter: "test",
+      worktreePath: attemptWorktree,
+    });
+
+    const calls = join(value.root, "vscode-args.json");
+    const editor = join(value.root, "configured VS Code");
+    writeFileSync(editor, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)));\n`);
+    chmodSync(editor, 0o755);
+    const before = JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) });
+
+    const screen = buildLauncherScreen(value.records, { action: "code", projectId: project.id, taskId: task.id });
+    assert.equal(screen.selection.attemptId, attempt.id);
+    assert.match(screen.message, /Project checkout is separate/);
+    const result = await dispatchLauncherAction(value.records, screen, {
+      vscodeExecutable: editor,
+      codePath: relative,
+      line: 7,
+    });
+
+    assert.equal(result.status, "launch-requested");
+    assert.deepEqual(JSON.parse(readFileSync(calls, "utf8")), [
+      "--new-window", "--goto", `${join(attemptWorktree, relative)}:7`,
+    ]);
+    assert.equal(readFileSync(join(attemptWorktree, relative), "utf8"), "const unchanged = true;\n");
+    assert.equal(JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) }), before);
+  } finally {
+    value.close();
+  }
+});
+
+test("Code rejects paths outside the selected live worktree before launching", async () => {
+  const value = fixture();
+  try {
+    const worktree = join(value.root, "worktree");
+    mkdirSync(worktree);
+    writeFileSync(join(worktree, ".git"), "gitdir: /tmp/example\n");
+    const project = value.records.createProject({ name: "project", repoPath: join(value.root, "project") });
+    const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
+    value.records.updateTaskFields(task.id, { worktree_path: worktree });
+    const screen = buildLauncherScreen(value.records, { action: "code", projectId: project.id, taskId: task.id });
+    await assert.rejects(
+      () => dispatchLauncherAction(value.records, screen, {
+        vscodeExecutable: join(value.root, "must-not-run"),
+        codePath: "../outside.ts",
+      }),
+      /only plain paths inside|outside the selected worktree/,
+    );
+  } finally {
+    value.close();
+  }
+});
+
+test("a removed selected attempt never falls back to the task or project checkout", async () => {
+  const value = fixture();
+  try {
+    const projectRepo = join(value.root, "project");
+    const taskWorktree = join(value.root, "task-live");
+    mkdirSync(projectRepo);
+    mkdirSync(taskWorktree);
+    writeFileSync(join(taskWorktree, ".git"), "gitdir: /tmp/task\n");
+    const project = value.records.createProject({ name: "project", repoPath: projectRepo });
+    const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
+    value.records.updateTaskFields(task.id, { worktree_path: taskWorktree });
+    const attempt = value.records.startAttempt({
+      id: "att_removed", taskId: task.id, launchId: "launch-removed", kind: "initial", adapter: "test",
+      worktreePath: join(value.root, "removed-attempt"),
+      baseRevision: "base-revision",
+    });
+    const screen = buildLauncherScreen(value.records, {
+      action: "code", projectId: project.id, taskId: task.id, attemptId: attempt.id,
+    });
+    await assert.rejects(
+      () => dispatchLauncherAction(value.records, screen, { vscodeExecutable: join(value.root, "must-not-run") }),
+      (error: unknown) => {
+        const message = String(error);
+        assert.match(message, /removed-attempt/);
+        assert.doesNotMatch(message, new RegExp(`open ${taskWorktree.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+        assert.doesNotMatch(message, new RegExp(`open ${projectRepo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+        return true;
+      },
+    );
   } finally {
     value.close();
   }

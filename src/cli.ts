@@ -172,6 +172,8 @@ CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
                                                launcher starts this; scope arrives over the
                                                workspace's control channel, not as a command.
   launcher [--action=code|tasks|logs] [--project=<id>] [--task=<id>]
+           [--attempt=<id>] [--path=<relative>] [--line=N] [--column=N]
+           [--vscode=<executable>]
            [--dispatch|--json]                  Stock-Herdr popup and scoped CLI fallback
   viewer serve [--surface=code] [--viewer=vim] | viewer status [--surface=code]
 
@@ -334,9 +336,15 @@ async function main(): Promise<void> {
         action: requestedAction,
         projectId: textOption(args, "project"),
         taskId: textOption(args, "task"),
+        attemptId: textOption(args, "attempt"),
       });
       if (args.options.has("dispatch")) {
-        const result = await dispatchLauncherAction(records, screen);
+        const result = await dispatchLauncherAction(records, screen, {
+          vscodeExecutable: textOption(args, "vscode"),
+          codePath: textOption(args, "path"),
+          line: args.options.has("line") ? numberOption(args, "line", 1) : null,
+          column: args.options.has("column") ? numberOption(args, "column", 1) : null,
+        });
         console.log(JSON.stringify(result, null, 2));
         return;
       }

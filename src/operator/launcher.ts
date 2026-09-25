@@ -8,10 +8,13 @@
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { exec } from "../core/exec.ts";
 import type { Project, Records, Task } from "../store/records.ts";
 import { buildTaskContext } from "./context.ts";
+import { resolveWorktreePath } from "./files.ts";
 import { openScopedToolTab, type ScopedToolTabResult } from "./herdr.ts";
+import { launchVsCode } from "./vscode.ts";
+
+export { codeOpenInvocation } from "./vscode.ts";
 
 export type LauncherAction = "code" | "tasks" | "logs";
 export type LauncherInputSource = "keyboard" | "mouse";
@@ -22,6 +25,8 @@ export interface LauncherSelection {
   projectId?: string | null;
   /** Stable task ID. Titles are deliberately not selectors. */
   taskId?: string | null;
+  /** Exact attempt bound when Code reaches its ready screen. */
+  attemptId?: string | null;
 }
 
 export interface LauncherChoice {
@@ -58,19 +63,23 @@ function projectChoices(projects: Project[]): LauncherChoice[] {
     id: `project:${project.id}`,
     kind: "project",
     label: `${project.name}  [${project.id}]`,
-    detail: `${project.status} · ${project.repoPath}`,
+    detail: `${project.status} · project checkout (not a task worktree): ${project.repoPath}`,
   }));
 }
 
-function taskChoices(tasks: Task[]): LauncherChoice[] {
+function taskChoices(records: Records, tasks: Task[]): LauncherChoice[] {
   return [...tasks]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))
-    .map((task) => ({
-      id: `task:${task.id}`,
-      kind: "task",
-      label: `${task.title}  [${task.id}]`,
-      detail: `${task.state}${task.worktreePath ? ` · ${task.worktreePath}` : " · no live worktree"}`,
-    }));
+    .map((task) => {
+      const attempt = records.listAttempts(task.id).at(-1) ?? null;
+      const context = buildTaskContext(records, task, attempt);
+      return {
+        id: `task:${task.id}`,
+        kind: "task",
+        label: `${task.title}  [${task.id}]`,
+        detail: `${task.state}${context.worktreeAvailable ? ` · live ${attempt ? `attempt ${attempt.attemptNumber} ` : "task "}worktree: ${context.worktreePath}` : " · no live task/attempt worktree"}`,
+      };
+    });
 }
 
 /** Build a screen from records and stable IDs, without causing side effects. */
@@ -151,21 +160,52 @@ export function buildLauncherScreen(records: Records, selection: LauncherSelecti
       title: `${actionLabel(selection.action)} · choose task`,
       message: `${stale}Select a task by its stable ID; titles are display-only.`,
       selection: { action: selection.action, projectId: project.id },
-      choices: taskChoices(tasks),
+      choices: taskChoices(records, tasks),
     };
   }
 
+  const selectedAttempt = selection.action === "code"
+    ? selection.attemptId
+      ? records.getAttempt(selection.attemptId)
+      : records.listAttempts(task.id).at(-1) ?? null
+    : null;
+  if (selection.action === "code" && selectedAttempt && selectedAttempt.taskId !== task.id) {
+    return {
+      step: "task",
+      title: "Code · choose task",
+      message: `Attempt ${selectedAttempt.id} does not belong to ${task.id}. Select a task by its stable ID.`,
+      selection: { action: "code", projectId: project.id },
+      choices: taskChoices(records, tasks),
+    };
+  }
+  if (selection.action === "code" && selection.attemptId && !selectedAttempt) {
+    return {
+      step: "task",
+      title: "Code · choose task",
+      message: `Attempt ${selection.attemptId} is stale or unknown. Select a live task again.`,
+      selection: { action: "code", projectId: project.id },
+      choices: taskChoices(records, tasks),
+    };
+  }
+  const context = selection.action === "code" ? buildTaskContext(records, task, selectedAttempt) : null;
   return {
     step: "ready",
     title: actionLabel(selection.action),
-    message: `${project.name} [${project.id}] · ${task.title} [${task.id}]`,
-    selection: { action: selection.action, projectId: project.id, taskId: task.id },
+    message: selection.action === "code"
+      ? `${project.name} [${project.id}] · ${task.title} [${task.id}] · ${selectedAttempt ? `attempt ${selectedAttempt.attemptNumber} [${selectedAttempt.id}]` : "task worktree"}. Project checkout is separate and will not be opened.`
+      : `${project.name} [${project.id}] · ${task.title} [${task.id}]`,
+    selection: {
+      action: selection.action,
+      projectId: project.id,
+      taskId: task.id,
+      ...(selection.action === "code" && selectedAttempt ? { attemptId: selectedAttempt.id } : {}),
+    },
     choices: [{
       id: `dispatch:${selection.action}`,
       kind: "dispatch",
       label: `Open ${actionLabel(selection.action)}`,
       detail: selection.action === "code"
-        ? task.worktreePath ?? "No live worktree is recorded"
+        ? context?.worktreePath ?? "No live task/attempt worktree is recorded"
         : `node src/cli.ts logs ${task.id}`,
     }],
   };
@@ -195,12 +235,14 @@ export function activateLauncherChoice(
 
 export interface LauncherDispatchResult {
   action: LauncherAction;
-  status: "opened" | "degraded";
+  status: "opened" | "degraded" | "launch-requested";
   projectId: string;
   taskId: string | null;
   reason: string;
   cliAlternative: string;
   tab?: ScopedToolTabResult;
+  /** False for Code: a CLI exit status does not verify GUI rendering. */
+  guiVerified?: false;
 }
 
 function directoryExists(path: string): boolean {
@@ -215,30 +257,6 @@ function directoryExists(path: string): boolean {
  */
 function shellArgument(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-export interface CodeOpenInvocation {
-  executable: string;
-  args: string[];
-  remote: string | null;
-}
-
-/** Build an explicit WSL remote address when `code` is the Windows-hosted CLI. */
-export function codeOpenInvocation(
-  executable: string,
-  worktreePath: string,
-  wslDistro: string | null = process.env.WSL_DISTRO_NAME ?? null,
-): CodeOpenInvocation {
-  const windowsHosted = /^\/mnt\/[a-z]\//i.test(executable);
-  if (windowsHosted && !wslDistro) {
-    throw new Error("VS Code is Windows-hosted but WSL_DISTRO_NAME is unset; cannot address the selected Linux worktree safely.");
-  }
-  const remote = windowsHosted ? `wsl+${wslDistro as string}` : null;
-  return {
-    executable,
-    args: [...(remote ? ["--remote", remote] : []), "--new-window", worktreePath],
-    remote,
-  };
 }
 
 function requireReady(records: Records, screen: LauncherScreen): { project: Project; task: Task | null; action: LauncherAction } {
@@ -258,7 +276,13 @@ function requireReady(records: Records, screen: LauncherScreen): { project: Proj
 export async function dispatchLauncherAction(
   records: Records,
   screen: LauncherScreen,
-  options: { cliCommand?: string } = {},
+  options: {
+    cliCommand?: string;
+    vscodeExecutable?: string;
+    codePath?: string;
+    line?: number | null;
+    column?: number | null;
+  } = {},
 ): Promise<LauncherDispatchResult> {
   const { project, task, action } = requireReady(records, screen);
   const cli = options.cliCommand ?? "node src/cli.ts";
@@ -269,25 +293,52 @@ export async function dispatchLauncherAction(
     ?? `node ${shellArgument(fileURLToPath(new URL("../cli.ts", import.meta.url)))}`;
 
   if (action === "code") {
-    const context = buildTaskContext(records, task as Task, null);
-    const alternative = `${cli} launcher --action=code --project=${project.id} --task=${(task as Task).id} --dispatch`;
+    const selectedAttempt = screen.selection.attemptId ? records.getAttempt(screen.selection.attemptId) : null;
+    if (screen.selection.attemptId && (!selectedAttempt || selectedAttempt.taskId !== (task as Task).id)) {
+      throw new Error(`Attempt ${screen.selection.attemptId} became stale; reopen the launcher and select the task again`);
+    }
+    const context = buildTaskContext(records, task as Task, selectedAttempt);
+    const alternative = [
+      `${cli} launcher --action=code --project=${project.id} --task=${(task as Task).id}`,
+      ...(selectedAttempt ? [`--attempt=${selectedAttempt.id}`] : []),
+      ...(options.codePath !== undefined ? [`--path=${shellArgument(options.codePath)}`] : []),
+      ...(options.line !== null && options.line !== undefined ? [`--line=${options.line}`] : []),
+      ...(options.column !== null && options.column !== undefined ? [`--column=${options.column}`] : []),
+      ...(options.vscodeExecutable ? [`--vscode=${shellArgument(options.vscodeExecutable)}`] : []),
+      "--dispatch",
+    ].join(" ");
     if (!context.worktreePath || !context.worktreeAvailable || !directoryExists(context.worktreePath)) {
       throw new Error(
         `Task ${(task as Task).id} has no live worktree to open. ${context.viewReason ?? "A recorded revision is not a writable checkout."} ` +
-        `Inspect it with: ${cli} files ${(task as Task).id}`,
+        `Inspect it with: ${cli} files ${(task as Task).id}${selectedAttempt ? ` --attempt=${selectedAttempt.id}` : ""}`,
       );
     }
-    const located = await exec("bash", ["-lc", "command -v code"], { timeoutMs: 15_000 });
-    if (located.code !== 0 || !located.stdout.trim()) {
-      throw new Error(`VS Code CLI 'code' is unavailable. Install it or run: code --new-window ${context.worktreePath}`);
+    let target: Parameters<typeof launchVsCode>[0] = { kind: "folder", path: context.worktreePath };
+    if (options.codePath !== undefined) {
+      const selected = resolveWorktreePath(context.worktreePath, options.codePath);
+      if (directoryExists(selected.absolutePath)) {
+        if (
+          (options.line !== null && options.line !== undefined)
+          || (options.column !== null && options.column !== undefined)
+        ) {
+          throw new Error("--line/--column can only be used with a file target");
+        }
+        target = { kind: "folder", path: selected.absolutePath };
+      } else {
+        try {
+          if (!statSync(selected.absolutePath).isFile()) throw new Error("not a file");
+        } catch {
+          throw new Error(`VS Code target ${options.codePath} is unavailable inside live worktree ${context.worktreePath}`);
+        }
+        target = { kind: "file", path: selected.absolutePath, line: options.line, column: options.column };
+      }
     }
-    const invocation = codeOpenInvocation(located.stdout.trim(), context.worktreePath);
-    const opened = await exec(invocation.executable, invocation.args, { timeoutMs: 30_000 });
-    if (opened.code !== 0) throw new Error(`VS Code could not open ${context.worktreePath}: ${(opened.stderr || opened.stdout).trim()}`);
+    const launched = await launchVsCode(target, { configuredExecutable: options.vscodeExecutable });
     return {
-      action, status: "opened", projectId: project.id, taskId: (task as Task).id,
-      reason: `Opened the live worktree ${context.worktreePath} in VS Code${invocation.remote ? ` through ${invocation.remote}` : ""}.`,
+      action, status: "launch-requested", projectId: project.id, taskId: (task as Task).id,
+      reason: `VS Code CLI accepted a request for ${target.path}${launched.remote ? ` through ${launched.remote}` : ""}. GUI display was not verified.`,
       cliAlternative: alternative,
+      guiVerified: false,
     };
   }
 
