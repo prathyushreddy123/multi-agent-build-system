@@ -1,0 +1,8 @@
+{
+  "initial_state": "BLOCKED",
+  "failure_domain": "dependency",
+  "prerequisite_state_after_recovery": "DONE",
+  "expected_action": "re-evaluate readiness without consuming a code repair",
+  "historical_task_outcome_rewritten": false,
+  "sanitized": true
+}

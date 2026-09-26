@@ -1,0 +1,36 @@
+{
+  "fixture_version": "1",
+  "source_schema": "14",
+  "source_observed_at": "2026-09-25T09:57:19.347631+00:00",
+  "sanitization": "Minimal structured facts only. No transcripts, credentials, repository paths, personal destinations, or live database copy are included.",
+  "provenance": {
+    "task_ids": [
+      "tsk_01M2XJXQYX7XMBTQGQTC7YR4NH",
+      "tsk_01M2XJXQYXT5FD2S9T3HNJ1AQY",
+      "tsk_01M2XJXQYYKNT105TJVGKXNWPF",
+      "tsk_01M2XJXQYYAY0EA9CMBRTNH705",
+      "tsk_01M2XQKVHW2QHKNEF17M4KZWFN",
+      "tsk_01M3A915GRHN8A1VE6AH7V8QAE",
+      "tsk_01M3A915GRJPGY0KT99K6EXJ5N",
+      "tsk_01M3A915GS5HCR3ME8XX9Y4QBD",
+      "tsk_01M3A915GS53XEK9RJKCQPX4T6"
+    ],
+    "attempt_ids": [
+      "att_01M3A91MCWXPE4AE13NXXMB9KX",
+      "att_01M3AC43D3CN6V5NDERB18ZEY5",
+      "att_01M3ATD35EDRBG83MGE5ZFSAGT",
+      "att_01M3ATD90N0SSYNZQYXV0PA178"
+    ],
+    "review_ids": ["rev_01M2XKZDVS0J2JXG46XJ7J19WD"]
+  },
+  "files": {
+    "cohort-summary.json": "Expected aggregate baseline and per-task linkage counts.",
+    "codex-usage-cached-subset.json": "Codex cache subset semantics.",
+    "claude-usage-separate-cache.json": "Claude separate cache-event semantics.",
+    "repair-quota-reroute.json": "Operational fallback must retain repair obligations.",
+    "reviewer-binary-missing.json": "Missing reviewer executable is operational, not a code defect.",
+    "missing-tsc-gate.json": "Missing compiler gate evidence remains an environment error.",
+    "advisory-clarification-review.json": "Advisory question is not rewritten as a blocking defect.",
+    "dependency-recovered.json": "Dependency-only blockage can be reconsidered after recovery."
+  }
+}

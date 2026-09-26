@@ -1,0 +1,6 @@
+{
+  "adapter": "claude",
+  "usage_json": { "input_tokens": 20000000, "cache_read_input_tokens": 6000000, "cache_creation_input_tokens": 335484, "output_tokens": 308383 },
+  "expected": { "known_input_events": 26335484, "known_output_tokens": 308383 },
+  "note": "Claude cache-read and cache-creation fields are separate reported input events"
+}
