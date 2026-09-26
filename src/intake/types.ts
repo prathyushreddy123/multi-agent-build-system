@@ -1,6 +1,7 @@
 import type { ExecutionPlan } from "../domain/plan.ts";
 import type { ReviewPreset } from "../review/policy.ts";
 import type { ArtifactPlan, EnvironmentPlan, ProfileResolution } from "../profiles/types.ts";
+import type { ProjectType, ReviewChoice } from "../domain/project-policy.ts";
 
 /**
  * Product intake lifecycle. Deliberately separate from task execution states:
@@ -69,6 +70,10 @@ export interface ProductBrief {
   operationalPreferences: OperationalPreferences;
   targetPath: string | null;
   projectId: string | null;
+  projectType: ProjectType | null;
+  reviewChoice: ReviewChoice | null;
+  governanceDecisionId: string | null;
+  governanceVersion: number;
   version: number;
   createdBy: string;
   createdAt: string;
@@ -78,6 +83,7 @@ export interface ProductBrief {
 export type BriefFieldPatch = Partial<Pick<ProductBrief,
   | "title" | "purpose" | "audience" | "objective" | "constraints" | "unknowns" | "assumptions"
   | "proposedStack" | "acceptanceCriteria" | "qualitySettings" | "operationalPreferences" | "targetPath"
+  | "projectType" | "reviewChoice"
 >>;
 
 export interface ClarificationItem {
