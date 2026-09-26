@@ -13,6 +13,8 @@ import type { ExecutionPlan } from "../domain/plan.ts";
 import { REVIEW_PRESETS, type ReviewPreset } from "../review/policy.ts";
 import { fromJson, nowIso, toJson, type Row } from "../store/db.ts";
 import type { Records } from "../store/records.ts";
+import type { ProjectType, ReviewChoice } from "../domain/project-policy.ts";
+import { PROJECT_TYPES, REVIEW_CHOICES } from "../domain/project-policy.ts";
 import {
   BRIEF_STATES,
   BRIEF_TRANSITIONS,
@@ -67,6 +69,10 @@ function toBrief(row: Row): ProductBrief {
     operationalPreferences: { ...DEFAULT_OPERATIONS, ...fromJson<Partial<OperationalPreferences>>(row.operational_preferences, {}) },
     targetPath: (row.target_path as string) ?? null,
     projectId: (row.project_id as string) ?? null,
+    projectType: (row.project_type as ProjectType) ?? null,
+    reviewChoice: (row.review_choice as ReviewChoice) ?? null,
+    governanceDecisionId: (row.governance_decision_id as string) ?? null,
+    governanceVersion: Number(row.governance_version ?? 0),
     version: Number(row.version ?? 1),
     createdBy: row.created_by as string,
     createdAt: row.created_at as string,
@@ -257,6 +263,8 @@ export function createBrief(records: Records, input: {
   qualitySettings?: Partial<QualitySettings>;
   operationalPreferences?: Partial<OperationalPreferences>;
   targetPath?: string | null;
+  projectType?: ProjectType | null;
+  reviewChoice?: ReviewChoice | null;
   createdBy?: string;
 }): ProductBrief {
   const title = text(input.title);
@@ -267,19 +275,26 @@ export function createBrief(records: Records, input: {
   }
   const id = ids.brief();
   const at = nowIso();
+  if (input.projectType !== undefined && input.projectType !== null && !PROJECT_TYPES.includes(input.projectType)) {
+    throw new Error(`Unknown project type: ${String(input.projectType)}`);
+  }
+  if (input.reviewChoice !== undefined && input.reviewChoice !== null && !REVIEW_CHOICES.includes(input.reviewChoice)) {
+    throw new Error(`Unknown review choice: ${String(input.reviewChoice)}`);
+  }
   return records.store.tx(() => {
     records.store.run(
       `INSERT INTO product_briefs(id, title, state, purpose, audience, objective, constraints, unknowns,
          assumptions, proposed_stack, acceptance_criteria, quality_settings, operational_preferences,
-         target_path, project_id, version, created_by, created_at, updated_at)
-       VALUES(?,?,'DRAFT',?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`,
+         target_path, project_id, project_type, review_choice, version, created_by, created_at, updated_at)
+       VALUES(?,?,'DRAFT',?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,1,?,?,?)`,
       id, title, text(input.purpose), text(input.audience), text(input.objective),
       toJson(list(input.constraints)), toJson(list(input.unknowns)), toJson(list(input.assumptions)),
       toJson({ ...DEFAULT_STACK, ...(input.proposedStack ?? {}) }),
       toJson(list(input.acceptanceCriteria)),
       toJson({ ...DEFAULT_QUALITY, ...(input.qualitySettings ?? {}) }),
       toJson({ ...DEFAULT_OPERATIONS, ...(input.operationalPreferences ?? {}) }),
-      text(input.targetPath ?? null), input.createdBy ?? "local", at, at,
+      text(input.targetPath ?? null), input.projectType ?? null, input.reviewChoice ?? null,
+      input.createdBy ?? "local", at, at,
     );
     const brief = getBrief(records, id) as ProductBrief;
     writeRevision(records, brief, input.createdBy ?? "local", "Brief created.", ["*"]);
@@ -339,6 +354,14 @@ export function updateBrief(records: Records, input: {
     const value = text(patch[field] as string);
     if (field === "title" && value === null) throw new Error("A product brief needs a non-empty title.");
     columns[field] = { column, value };
+  }
+  if (patch.projectType !== undefined) {
+    if (patch.projectType !== null && !PROJECT_TYPES.includes(patch.projectType)) throw new Error(`Unknown project type: ${String(patch.projectType)}`);
+    columns.projectType = { column: "project_type", value: patch.projectType };
+  }
+  if (patch.reviewChoice !== undefined) {
+    if (patch.reviewChoice !== null && !REVIEW_CHOICES.includes(patch.reviewChoice)) throw new Error(`Unknown review choice: ${String(patch.reviewChoice)}`);
+    columns.reviewChoice = { column: "review_choice", value: patch.reviewChoice };
   }
   const arrays: [keyof BriefFieldPatch, string][] = [
     ["constraints", "constraints"], ["unknowns", "unknowns"], ["assumptions", "assumptions"], ["acceptanceCriteria", "acceptance_criteria"],

@@ -4,7 +4,7 @@ import { Store, nowIso, toJson, fromJson } from "./db.ts";
 import type { ConfigActivation, CuratorEvaluation, CuratorProposal, EvaluationCase, EvaluationMetrics, ProposalStatus } from "../curator/types.ts";
 import type { Row } from "./db.ts";
 import { ids } from "../core/ids.ts";
-import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, validateProjectConfig } from "../domain/config.ts";
+import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, projectConfigSnapshot, validateProjectConfig } from "../domain/config.ts";
 import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
 import { assertTransition } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
@@ -27,6 +27,33 @@ import { QUALITY_COVERAGE_GATE } from "../gates/runner.ts";
 import type { FailureClass } from "../core/failure.ts";
 import { TASK_CLASSES } from "../routing/router.ts";
 import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
+import {
+  assertGovernanceDecision,
+  evaluateProjectReadiness,
+  PROJECT_POLICY_VERSION,
+  unresolvedGovernance,
+} from "../domain/project-policy.ts";
+import type {
+  ProjectGovernance,
+  ProjectPolicyDecision,
+  ProjectReadiness,
+  ProjectType,
+  ReviewChoice,
+} from "../domain/project-policy.ts";
+import { EXECUTION_STAGES, OBLIGATION_KINDS, taskStateForStage } from "../domain/execution.ts";
+import type {
+  Continuation,
+  EnvironmentCheck,
+  ExecutionEpisode,
+  ExecutionStage,
+  ObligationState,
+  StageRun,
+  StageState,
+  TaskObligation,
+} from "../domain/execution.ts";
+import { USAGE_COVERAGE, type UsageProjection } from "../usage/types.ts";
+import type { Incident, IncidentOccurrence } from "../incidents/types.ts";
+import type { AdmissionLease } from "../scheduling/types.ts";
 
 export type ProjectStatus = "active" | "paused" | "archived";
 
@@ -57,6 +84,7 @@ export interface Project {
   checkCommands: GateSpec[];
   configVersion: string;
   goal: string | null;
+  governance: ProjectGovernance;
   createdAt: string;
   updatedAt: string;
 }
@@ -128,6 +156,19 @@ export interface Attempt {
   startedAt: string;
   heartbeatAt: string | null;
   endedAt: string | null;
+  stageRunId: string | null;
+  parentAttemptId: string | null;
+  parentSessionId: string | null;
+  requestedModel: string | null;
+  configuredModel: string | null;
+  reportedModel: string | null;
+  requestedEffort: string | null;
+  configuredEffort: string | null;
+  reportedEffort: string | null;
+  engineVersion: string | null;
+  cliVersion: string | null;
+  lastProgressAt: string | null;
+  usageStatus: string | null;
 }
 
 export type GateStatus = "PASS" | "FAIL" | "ERROR" | "SKIPPED";
@@ -276,6 +317,14 @@ function toProject(row: Row): Project {
     checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
     configVersion: row.config_version as string,
     goal: (row.goal as string) ?? null,
+    governance: {
+      ...unresolvedGovernance(),
+      projectType: (row.project_type as ProjectType) ?? null,
+      reviewChoice: (row.review_choice as ReviewChoice) ?? null,
+      decisionState: row.governance_decision_id ? "confirmed" : "unresolved",
+      decisionId: (row.governance_decision_id as string) ?? null,
+      version: Number(row.governance_version ?? 0),
+    },
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -351,6 +400,182 @@ function toAttempt(row: Row): Attempt {
     startedAt: row.started_at as string,
     heartbeatAt: (row.heartbeat_at as string) ?? null,
     endedAt: (row.ended_at as string) ?? null,
+    stageRunId: (row.stage_run_id as string) ?? null,
+    parentAttemptId: (row.parent_attempt_id as string) ?? null,
+    parentSessionId: (row.parent_session_id as string) ?? null,
+    requestedModel: (row.requested_model as string) ?? null,
+    configuredModel: (row.configured_model as string) ?? null,
+    reportedModel: (row.reported_model as string) ?? null,
+    requestedEffort: (row.requested_effort as string) ?? null,
+    configuredEffort: (row.configured_effort as string) ?? null,
+    reportedEffort: (row.reported_effort as string) ?? null,
+    engineVersion: (row.engine_version as string) ?? null,
+    cliVersion: (row.cli_version as string) ?? null,
+    lastProgressAt: (row.last_progress_at as string) ?? null,
+    usageStatus: (row.usage_status as string) ?? null,
+  };
+}
+
+function toPolicyDecision(row: Row): ProjectPolicyDecision {
+  return {
+    id: row.id as string,
+    projectId: (row.project_id as string) ?? null,
+    briefId: (row.brief_id as string) ?? null,
+    expectedVersion: Number(row.expected_version),
+    projectType: row.project_type as ProjectType,
+    reviewChoice: row.review_choice as ReviewChoice,
+    resolvedPolicy: fromJson<Record<string, unknown>>(row.resolved_policy, {}),
+    actor: row.actor as string,
+    source: row.source as string,
+    sourceRef: (row.source_ref as string) ?? null,
+    createdAt: row.created_at as string,
+  };
+}
+
+function toEpisode(row: Row): ExecutionEpisode {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    episodeNumber: Number(row.episode_number),
+    authorizingDecision: (row.authorizing_decision as string) ?? null,
+    status: row.status as ExecutionEpisode["status"],
+    repairLimit: Number(row.repair_limit),
+    repairsConsumed: Number(row.repairs_consumed),
+    recoveryLimit: Number(row.recovery_limit),
+    recoveriesConsumed: Number(row.recoveries_consumed),
+    startedAt: row.started_at as string,
+    endedAt: (row.ended_at as string) ?? null,
+  };
+}
+
+function toStageRun(row: Row): StageRun {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    episodeId: row.episode_id as string,
+    stage: row.stage as ExecutionStage,
+    ordinal: Number(row.ordinal),
+    state: row.state as StageState,
+    attemptId: (row.attempt_id as string) ?? null,
+    gateId: (row.gate_id as string) ?? null,
+    launchKey: row.launch_key as string,
+    inputFingerprint: row.input_fingerprint as string,
+    revision: (row.revision as string) ?? null,
+    environmentFingerprint: (row.environment_fingerprint as string) ?? null,
+    engineRevision: row.engine_revision as string,
+    fencingToken: row.fencing_token as string,
+    reservedAt: row.reserved_at as string,
+    startedAt: (row.started_at as string) ?? null,
+    lastProgressAt: (row.last_progress_at as string) ?? null,
+    finishedAt: (row.finished_at as string) ?? null,
+    failureClass: (row.failure_class as FailureClass) ?? null,
+    failureDetail: (row.failure_detail as string) ?? null,
+  };
+}
+
+function toObligation(row: Row): TaskObligation {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    kind: row.kind as TaskObligation["kind"],
+    severity: row.severity as string,
+    blocking: Number(row.blocking) === 1,
+    sourceReviewId: (row.source_review_id as string) ?? null,
+    sourceGateId: (row.source_gate_id as string) ?? null,
+    sourceDecisionId: (row.source_decision_id as string) ?? null,
+    sourceKey: row.source_key as string,
+    state: row.state as ObligationState,
+    summary: row.summary as string,
+    introducedRevision: (row.introduced_revision as string) ?? null,
+    resolvedRevision: (row.resolved_revision as string) ?? null,
+    evidenceRefs: fromJson<string[]>(row.evidence_refs, []),
+    resolutionEvidence: fromJson<string[]>(row.resolution_evidence, []),
+    clarificationId: (row.clarification_id as string) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toUsageProjection(row: Row): UsageProjection {
+  return {
+    attemptId: row.attempt_id as string,
+    normalizerVersion: row.normalizer_version as string,
+    normalized: fromJson<UsageProjection["normalized"]>(row.normalized, {}),
+    sourceArtifactHash: row.source_artifact_hash as string,
+    sourceOffset: row.source_offset === null || row.source_offset === undefined ? null : Number(row.source_offset),
+    coverage: row.coverage as UsageProjection["coverage"],
+    sourceSemantics: row.source_semantics as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toIncident(row: Row): Incident {
+  return {
+    id: row.id as string,
+    signature: row.signature as string,
+    classifierVersion: row.classifier_version as string,
+    category: row.category as string,
+    layer: row.layer as string,
+    symptom: row.symptom as string,
+    hypothesis: (row.hypothesis as string) ?? null,
+    confirmedCause: (row.confirmed_cause as string) ?? null,
+    confidence: row.confidence as Incident["confidence"],
+    lifecycle: row.lifecycle as Incident["lifecycle"],
+    affectedVersionStart: (row.affected_version_start as string) ?? null,
+    affectedVersionEnd: (row.affected_version_end as string) ?? null,
+    lessonRefs: fromJson<string[]>(row.lesson_refs, []),
+    fixRefs: fromJson<string[]>(row.fix_refs, []),
+    testRefs: fromJson<string[]>(row.test_refs, []),
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function toIncidentOccurrence(row: Row): IncidentOccurrence {
+  return {
+    id: row.id as string,
+    incidentId: row.incident_id as string,
+    sourceKey: row.source_key as string,
+    taskId: (row.task_id as string) ?? null,
+    stageRunId: (row.stage_run_id as string) ?? null,
+    attemptId: (row.attempt_id as string) ?? null,
+    revision: (row.revision as string) ?? null,
+    evidenceRefs: fromJson<string[]>(row.evidence_refs, []),
+    observedAt: row.observed_at as string,
+  };
+}
+
+function toEnvironmentCheck(row: Row): EnvironmentCheck {
+  return {
+    id: row.id as string,
+    taskId: row.task_id as string,
+    stageRunId: (row.stage_run_id as string) ?? null,
+    component: row.component as string,
+    profile: row.profile as string,
+    revision: (row.revision as string) ?? null,
+    runtimeFingerprint: (row.runtime_fingerprint as string) ?? null,
+    lockfileFingerprint: (row.lockfile_fingerprint as string) ?? null,
+    outcome: row.outcome as EnvironmentCheck["outcome"],
+    evidenceRefs: fromJson<string[]>(row.evidence_refs, []),
+    setupActionRequired: (row.setup_action_required as string) ?? null,
+    checkedAt: row.checked_at as string,
+  };
+}
+
+function toAdmissionLease(row: Row): AdmissionLease {
+  return {
+    id: row.id as string,
+    stageRunId: row.stage_run_id as string,
+    controllerId: row.controller_id as string,
+    fencingToken: row.fencing_token as string,
+    provider: (row.provider as string) ?? null,
+    quotaDomain: (row.quota_domain as string) ?? null,
+    projectId: row.project_id as string,
+    resources: fromJson<string[]>(row.resources, []),
+    status: row.status as AdmissionLease["status"],
+    grantedAt: row.granted_at as string,
+    releasedAt: (row.released_at as string) ?? null,
+    releaseReason: (row.release_reason as string) ?? null,
   };
 }
 
@@ -668,15 +893,7 @@ export class Records {
         at,
       );
       const project = this.getProject(id) as Project;
-      const initialConfig: ProjectConfigSnapshot = {
-        routingProfile: project.routingProfile,
-        routingOverrides: project.routingOverrides,
-        approvalPolicy: project.approvalPolicy,
-        reviewPolicy: project.reviewPolicy,
-        checkCommands: project.checkCommands,
-        promptProfile: project.promptProfile,
-        controllerSettings: project.controllerSettings,
-      };
+      const initialConfig = projectConfigSnapshot(project);
       this.store.run(
         `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
          VALUES(?,?,NULL,'project-registration','snapshot',?,1,?)`,
@@ -711,15 +928,7 @@ export class Records {
     const project = this.getProject(projectId);
     if (!project) throw new Error(`Unknown project ${projectId}`);
     const parentExists = parentId && this.store.get("SELECT id FROM config_versions WHERE id = ?", parentId) ? parentId : null;
-    const payload: ProjectConfigSnapshot = {
-      routingProfile: project.routingProfile,
-      routingOverrides: project.routingOverrides,
-      approvalPolicy: project.approvalPolicy,
-      reviewPolicy: project.reviewPolicy,
-      checkCommands: project.checkCommands,
-      promptProfile: project.promptProfile,
-      controllerSettings: project.controllerSettings,
-    };
+    const payload = projectConfigSnapshot(project);
     this.store.run("UPDATE config_versions SET active = 0 WHERE project_id = ?", projectId);
     this.store.run(
       `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, active, created_at)
@@ -859,6 +1068,105 @@ export class Records {
     return this.store
       .all("SELECT id, text, mandatory FROM requirements WHERE project_id = ? ORDER BY id", projectId)
       .map((row) => ({ id: row.id as string, text: row.text as string, mandatory: Number(row.mandatory) === 1 }));
+  }
+
+  // --- governance --------------------------------------------------------
+
+  readProjectReadiness(subject: { projectId: string } | { briefId: string } | string): ProjectReadiness {
+    if (typeof subject === "string" || "projectId" in subject) {
+      const projectId = typeof subject === "string" ? subject : subject.projectId;
+      const project = this.getProject(projectId);
+      if (!project) throw new Error(`Unknown project ${projectId}`);
+      return evaluateProjectReadiness(project.governance);
+    }
+    const row = this.store.get(
+      "SELECT project_type, review_choice, governance_decision_id, governance_version FROM product_briefs WHERE id = ?",
+      subject.briefId,
+    );
+    if (!row) throw new Error(`Unknown brief ${subject.briefId}`);
+    return evaluateProjectReadiness({
+      ...unresolvedGovernance(),
+      projectType: (row.project_type as ProjectType) ?? null,
+      reviewChoice: (row.review_choice as ReviewChoice) ?? null,
+      decisionState: row.governance_decision_id ? "confirmed" : "unresolved",
+      decisionId: (row.governance_decision_id as string) ?? null,
+      version: Number(row.governance_version ?? 0),
+    });
+  }
+
+  recordProjectDecision(input: {
+    projectId?: string;
+    briefId?: string;
+    projectType: ProjectType;
+    reviewChoice: ReviewChoice;
+    resolvedPolicy?: Record<string, unknown>;
+    actor: string;
+    source: string;
+    sourceRef?: string | null;
+  }, expectedVersion: number): ProjectPolicyDecision {
+    if ((input.projectId ? 1 : 0) + (input.briefId ? 1 : 0) !== 1) {
+      throw new Error("A governance decision requires exactly one project or brief subject.");
+    }
+    assertGovernanceDecision(input.projectType, input.reviewChoice);
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw new Error("Expected governance version must be a non-negative integer.");
+    if (!input.actor.trim() || !input.source.trim()) throw new Error("A governance decision requires actor and source provenance.");
+    const id = ids.policyDecision();
+    const at = nowIso();
+    return this.store.tx(() => {
+      const table = input.projectId ? "projects" : "product_briefs";
+      const subjectId = input.projectId ?? input.briefId as string;
+      const current = this.store.get(`SELECT governance_version FROM ${table} WHERE id = ?`, subjectId);
+      if (!current) throw new Error(`Unknown ${input.projectId ? "project" : "brief"} ${subjectId}`);
+      const currentVersion = Number(current.governance_version ?? 0);
+      if (currentVersion !== expectedVersion) {
+        throw new Error(`Governance changed since version ${expectedVersion}; current version is ${currentVersion}.`);
+      }
+      const resolvedPolicy = input.resolvedPolicy ?? {
+        policyVersion: PROJECT_POLICY_VERSION,
+        projectType: input.projectType,
+        reviewChoice: input.reviewChoice,
+      };
+      this.store.run(
+        `INSERT INTO project_policy_decisions(
+           id, project_id, brief_id, expected_version, project_type, review_choice,
+           resolved_policy, actor, source, source_ref, created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        id, input.projectId ?? null, input.briefId ?? null, expectedVersion,
+        input.projectType, input.reviewChoice, toJson(resolvedPolicy), input.actor, input.source,
+        input.sourceRef ?? null, at,
+      );
+      const nextVersion = expectedVersion + 1;
+      const result = this.store.db.prepare(
+        `UPDATE ${table} SET project_type = ?, review_choice = ?, governance_decision_id = ?,
+           governance_version = ?, updated_at = ? WHERE id = ? AND governance_version = ?`,
+      ).run(input.projectType, input.reviewChoice, id, nextVersion, at, subjectId, expectedVersion);
+      if (Number(result.changes) !== 1) throw new Error(`Concurrent governance update for ${subjectId}.`);
+
+      let configVersion: string | null = null;
+      if (input.projectId) {
+        const project = this.getProject(input.projectId) as Project;
+        const parentId = project.configVersion;
+        configVersion = ids.config();
+        this.store.run("UPDATE projects SET config_version = ? WHERE id = ?", configVersion, input.projectId);
+        this.invalidateProjectApprovals(input.projectId, "Project governance changed.");
+        this.recordCurrentProjectConfig(input.projectId, configVersion, "governance-decision", parentId);
+      }
+      this.recordEvent({
+        kind: "governance.decision_recorded",
+        projectId: input.projectId ?? null,
+        data: {
+          briefId: input.briefId ?? null, decisionId: id, expectedVersion, version: nextVersion,
+          projectType: input.projectType, reviewChoice: input.reviewChoice, policyVersion: PROJECT_POLICY_VERSION,
+          configVersion,
+        },
+      });
+      return toPolicyDecision(this.store.get("SELECT * FROM project_policy_decisions WHERE id = ?", id) as Row);
+    });
+  }
+
+  getProjectDecision(id: string): ProjectPolicyDecision | null {
+    const row = this.store.get("SELECT * FROM project_policy_decisions WHERE id = ?", id);
+    return row ? toPolicyDecision(row) : null;
   }
 
   // --- tasks --------------------------------------------------------------
@@ -1088,6 +1396,373 @@ export class Records {
     });
   }
 
+  // --- durable execution -------------------------------------------------
+
+  createExecutionEpisode(input: {
+    taskId: string;
+    expectedTaskVersion: number;
+    authorizingDecision?: string | null;
+    repairLimit?: number;
+    recoveryLimit?: number;
+  }): ExecutionEpisode {
+    const id = ids.episode();
+    return this.store.tx(() => {
+      const task = this.getTask(input.taskId);
+      if (!task) throw new Error(`Unknown task ${input.taskId}`);
+      if (task.recordVersion !== input.expectedTaskVersion) {
+        throw new Error(`Task ${task.id} changed since version ${input.expectedTaskVersion}; current version is ${task.recordVersion}`);
+      }
+      if (["DONE", "CANCELLED"].includes(task.state)) {
+        throw new Error(`Task ${task.id} is ${task.state}; completed work cannot be reopened by creating an episode.`);
+      }
+      if (this.store.get("SELECT id FROM execution_episodes WHERE task_id = ? AND status = 'active'", task.id)) {
+        throw new Error(`Task ${task.id} already has an active execution episode.`);
+      }
+      const next = Number(this.store.get("SELECT COALESCE(MAX(episode_number), 0) + 1 AS n FROM execution_episodes WHERE task_id = ?", task.id)?.n ?? 1);
+      const repairLimit = input.repairLimit ?? task.repairLimit;
+      const recoveryLimit = input.recoveryLimit ?? 2;
+      if (!Number.isSafeInteger(repairLimit) || repairLimit < 0 || !Number.isSafeInteger(recoveryLimit) || recoveryLimit < 0) {
+        throw new Error("Episode retry limits must be non-negative integers.");
+      }
+      const at = nowIso();
+      this.store.run(
+        `INSERT INTO execution_episodes(
+           id, task_id, episode_number, authorizing_decision, status, repair_limit, recovery_limit, started_at
+         ) VALUES(?,?,?,?,'active',?,?,?)`,
+        id, task.id, next, input.authorizingDecision ?? null, repairLimit, recoveryLimit, at,
+      );
+      const updated = this.store.db.prepare(
+        "UPDATE tasks SET record_version = record_version + 1, updated_at = ? WHERE id = ? AND record_version = ?",
+      ).run(at, task.id, input.expectedTaskVersion);
+      if (Number(updated.changes) !== 1) throw new Error(`Concurrent task update for ${task.id}.`);
+      this.recordEvent({
+        kind: "execution.episode_started", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, episodeId: id, episodeNumber: next, repairLimit, recoveryLimit },
+      });
+      return toEpisode(this.store.get("SELECT * FROM execution_episodes WHERE id = ?", id) as Row);
+    });
+  }
+
+  getContinuation(taskId: string): Continuation {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Unknown task ${taskId}`);
+    const episodeRow = this.store.get(
+      "SELECT * FROM execution_episodes WHERE task_id = ? ORDER BY (status = 'active') DESC, episode_number DESC LIMIT 1",
+      taskId,
+    );
+    const stageRow = episodeRow ? this.store.get(
+      `SELECT * FROM stage_runs WHERE episode_id = ?
+       ORDER BY CASE WHEN state IN ('reserved','launching','running','waiting','unknown') THEN 0 ELSE 1 END, ordinal DESC, rowid DESC LIMIT 1`,
+      episodeRow.id,
+    ) : undefined;
+    return {
+      taskId,
+      taskState: task.state,
+      taskVersion: task.recordVersion,
+      episode: episodeRow ? toEpisode(episodeRow) : null,
+      currentStage: stageRow ? toStageRun(stageRow) : null,
+      openObligations: this.store.all(
+        "SELECT * FROM task_obligations WHERE task_id = ? AND state IN ('open','addressed_pending_validation') ORDER BY created_at, rowid",
+        taskId,
+      ).map(toObligation),
+    };
+  }
+
+  reserveStage(input: {
+    taskId: string;
+    episodeId: string;
+    stage: ExecutionStage;
+    ordinal: number;
+    launchKey: string;
+    inputFingerprint: string;
+    revision?: string | null;
+    environmentFingerprint?: string | null;
+    engineRevision: string;
+    expectedTaskVersion: number;
+    fencingToken?: string;
+  }): StageRun {
+    if (!EXECUTION_STAGES.includes(input.stage)) throw new Error(`Unknown execution stage: ${input.stage}`);
+    if (!Number.isSafeInteger(input.ordinal) || input.ordinal < 1) throw new Error("Stage ordinal must be a positive integer.");
+    if (!input.launchKey.trim() || !input.inputFingerprint.trim() || !input.engineRevision.trim()) {
+      throw new Error("Stage reservation requires launch, input, and engine provenance.");
+    }
+    const id = ids.stage();
+    const fencingToken = input.fencingToken ?? ids.launch();
+    return this.store.tx(() => {
+      const task = this.getTask(input.taskId);
+      if (!task) throw new Error(`Unknown task ${input.taskId}`);
+      if (task.recordVersion !== input.expectedTaskVersion) {
+        throw new Error(`Task ${task.id} changed since version ${input.expectedTaskVersion}; current version is ${task.recordVersion}`);
+      }
+      if (["DONE", "CANCELLED"].includes(task.state)) throw new Error(`Task ${task.id} is ${task.state}; no stage can be reserved.`);
+      const episode = this.store.get("SELECT * FROM execution_episodes WHERE id = ? AND task_id = ?", input.episodeId, task.id);
+      if (!episode || episode.status !== "active") throw new Error(`Execution episode ${input.episodeId} is not active for task ${task.id}.`);
+      if (input.stage === "repair") {
+        if (Number(episode.repairs_consumed) >= Number(episode.repair_limit)) throw new Error(`Repair limit reached for episode ${input.episodeId}.`);
+        this.store.run("UPDATE execution_episodes SET repairs_consumed = repairs_consumed + 1 WHERE id = ?", input.episodeId);
+      }
+      const taskState = taskStateForStage(input.stage);
+      if (task.state !== taskState) assertTransition(task.state, taskState);
+      const at = nowIso();
+      this.store.run(
+        `INSERT INTO stage_runs(
+           id, task_id, episode_id, stage, ordinal, state, launch_key, input_fingerprint,
+           revision, environment_fingerprint, engine_revision, fencing_token, reserved_at
+         ) VALUES(?,?,?,?,?,'reserved',?,?,?,?,?,?,?)`,
+        id, task.id, input.episodeId, input.stage, input.ordinal, input.launchKey, input.inputFingerprint,
+        input.revision ?? null, input.environmentFingerprint ?? null, input.engineRevision, fencingToken, at,
+      );
+      const updated = this.store.db.prepare(
+        "UPDATE tasks SET state = ?, record_version = record_version + 1, updated_at = ? WHERE id = ? AND record_version = ?",
+      ).run(taskState, at, task.id, input.expectedTaskVersion);
+      if (Number(updated.changes) !== 1) throw new Error(`Concurrent task update for ${task.id}.`);
+      this.recordEvent({
+        kind: "stage.reserved", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, stageRunId: id, episodeId: input.episodeId, stage: input.stage, ordinal: input.ordinal, launchKey: input.launchKey },
+      });
+      return toStageRun(this.store.get("SELECT * FROM stage_runs WHERE id = ?", id) as Row);
+    });
+  }
+
+  recordLaunchStarted(stageId: string, fencingToken: string, handle: {
+    attemptId?: string | null;
+    gateId?: string | null;
+  } = {}): StageRun {
+    return this.store.tx(() => {
+      const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", stageId);
+      if (!stage) throw new Error(`Unknown stage ${stageId}`);
+      if (stage.fencing_token !== fencingToken) throw new Error(`Stale fencing token for stage ${stageId}.`);
+      if (stage.state !== "reserved" && stage.state !== "launching") {
+        throw new Error(`Stage ${stageId} is ${String(stage.state)}; launch has already been claimed or finished.`);
+      }
+      const at = nowIso();
+      const updated = this.store.db.prepare(
+        `UPDATE stage_runs SET state = 'running', attempt_id = ?, gate_id = ?,
+           started_at = COALESCE(started_at, ?), last_progress_at = ?
+         WHERE id = ? AND fencing_token = ? AND state IN ('reserved','launching')`,
+      ).run(handle.attemptId ?? null, handle.gateId ?? null, at, at, stageId, fencingToken);
+      if (Number(updated.changes) !== 1) throw new Error(`Stage ${stageId} launch was fenced by another owner.`);
+      const task = this.getTask(stage.task_id as string) as Task;
+      this.store.run("UPDATE tasks SET record_version = record_version + 1, updated_at = ? WHERE id = ?", at, task.id);
+      this.recordEvent({
+        kind: "stage.launch_started", projectId: task.projectId, taskId: task.id,
+        attemptId: handle.attemptId ?? null,
+        data: { schemaVersion: 1, stageRunId: stageId, gateId: handle.gateId ?? null },
+      });
+      return toStageRun(this.store.get("SELECT * FROM stage_runs WHERE id = ?", stageId) as Row);
+    });
+  }
+
+  finishStage(stageId: string, fencingToken: string, outcome: {
+    state: Extract<StageState, "succeeded" | "failed" | "waiting" | "cancelled" | "unknown">;
+    failureClass?: FailureClass | null;
+    failureDetail?: string | null;
+    taskState?: TaskState;
+  }): StageRun {
+    return this.store.tx(() => {
+      const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", stageId);
+      if (!stage) throw new Error(`Unknown stage ${stageId}`);
+      if (stage.fencing_token !== fencingToken) throw new Error(`Stale fencing token for stage ${stageId}.`);
+      if (!["reserved", "launching", "running", "waiting", "unknown"].includes(String(stage.state))) {
+        throw new Error(`Stage ${stageId} is already terminal (${String(stage.state)}).`);
+      }
+      const task = this.getTask(stage.task_id as string) as Task;
+      let nextTaskState = outcome.taskState ?? task.state;
+      if (outcome.taskState === undefined) {
+        if (outcome.state === "cancelled") nextTaskState = "CANCELLED";
+        else if (["failed", "waiting", "unknown"].includes(outcome.state)) nextTaskState = "BLOCKED";
+        else if (stage.stage === "accept") nextTaskState = "DONE";
+      }
+      if (task.state !== nextTaskState) assertTransition(task.state, nextTaskState);
+      const at = nowIso();
+      const updated = this.store.db.prepare(
+        `UPDATE stage_runs SET state = ?, failure_class = ?, failure_detail = ?,
+           last_progress_at = ?, finished_at = ?
+         WHERE id = ? AND fencing_token = ? AND state IN ('reserved','launching','running','waiting','unknown')`,
+      ).run(outcome.state, outcome.failureClass ?? null, outcome.failureDetail ?? null, at, at, stageId, fencingToken);
+      if (Number(updated.changes) !== 1) throw new Error(`Stage ${stageId} completion was fenced by another owner.`);
+      this.store.run(
+        "UPDATE tasks SET state = ?, record_version = record_version + 1, updated_at = ?, blocked_reason = ? WHERE id = ?",
+        nextTaskState, at, nextTaskState === "BLOCKED" ? outcome.failureDetail ?? null : null, task.id,
+      );
+      if (stage.stage === "accept" && outcome.state === "succeeded") {
+        this.store.run("UPDATE execution_episodes SET status = 'completed', ended_at = ? WHERE id = ?", at, stage.episode_id);
+      } else if (outcome.state === "cancelled") {
+        this.store.run("UPDATE execution_episodes SET status = 'cancelled', ended_at = ? WHERE id = ?", at, stage.episode_id);
+      }
+      this.recordEvent({
+        kind: "stage.finished", projectId: task.projectId, taskId: task.id,
+        attemptId: (stage.attempt_id as string) ?? null,
+        data: { schemaVersion: 1, stageRunId: stageId, stage: stage.stage, state: outcome.state, taskState: nextTaskState, failureClass: outcome.failureClass ?? null },
+      });
+      return toStageRun(this.store.get("SELECT * FROM stage_runs WHERE id = ?", stageId) as Row);
+    });
+  }
+
+  recordObligation(input: {
+    taskId: string;
+    kind: TaskObligation["kind"];
+    severity: string;
+    blocking: boolean;
+    sourceKey: string;
+    summary: string;
+    sourceReviewId?: string | null;
+    sourceGateId?: string | null;
+    sourceDecisionId?: string | null;
+    introducedRevision?: string | null;
+    evidenceRefs?: string[];
+    clarificationId?: string | null;
+  }): TaskObligation {
+    if (!OBLIGATION_KINDS.includes(input.kind)) throw new Error(`Unknown obligation kind: ${input.kind}`);
+    if (!input.sourceKey.trim() || !input.summary.trim() || !input.severity.trim()) throw new Error("An obligation requires a stable source key, severity, and summary.");
+    const task = this.getTask(input.taskId);
+    if (!task) throw new Error(`Unknown task ${input.taskId}`);
+    const id = ids.obligation();
+    const at = nowIso();
+    return this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO task_obligations(
+           id, task_id, kind, severity, blocking, source_review_id, source_gate_id, source_decision_id,
+           source_key, state, summary, introduced_revision, evidence_refs, clarification_id, created_at, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,?)`,
+        id, input.taskId, input.kind, input.severity, input.blocking ? 1 : 0,
+        input.sourceReviewId ?? null, input.sourceGateId ?? null, input.sourceDecisionId ?? null,
+        input.sourceKey, input.summary, input.introducedRevision ?? null, toJson(input.evidenceRefs ?? []),
+        input.clarificationId ?? null, at, at,
+      );
+      this.recordEvent({
+        kind: "obligation.recorded", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, obligationId: id, kind: input.kind, sourceKey: input.sourceKey, blocking: input.blocking },
+      });
+      return toObligation(this.store.get("SELECT * FROM task_obligations WHERE id = ?", id) as Row);
+    });
+  }
+
+  resolveObligation(input: {
+    obligationId: string;
+    state: Exclude<ObligationState, "open">;
+    resolvedRevision?: string | null;
+  }, evidence: string[]): TaskObligation {
+    if (input.state === "resolved" && evidence.length === 0) throw new Error("Resolving an obligation requires validation or decision evidence.");
+    return this.store.tx(() => {
+      const current = this.store.get("SELECT * FROM task_obligations WHERE id = ?", input.obligationId);
+      if (!current) throw new Error(`Unknown obligation ${input.obligationId}`);
+      if (!["open", "addressed_pending_validation"].includes(String(current.state))) {
+        throw new Error(`Obligation ${input.obligationId} is already ${String(current.state)}.`);
+      }
+      const at = nowIso();
+      this.store.run(
+        `UPDATE task_obligations SET state = ?, resolved_revision = ?, resolution_evidence = ?, updated_at = ? WHERE id = ?`,
+        input.state, input.resolvedRevision ?? null, toJson(evidence), at, input.obligationId,
+      );
+      const task = this.getTask(current.task_id as string) as Task;
+      this.recordEvent({
+        kind: "obligation.updated", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, obligationId: input.obligationId, state: input.state, evidence },
+      });
+      return toObligation(this.store.get("SELECT * FROM task_obligations WHERE id = ?", input.obligationId) as Row);
+    });
+  }
+
+  recordEnvironmentCheck(input: Omit<EnvironmentCheck, "id" | "checkedAt">): EnvironmentCheck {
+    const task = this.getTask(input.taskId);
+    if (!task) throw new Error(`Unknown task ${input.taskId}`);
+    const id = ids.environmentCheck();
+    const at = nowIso();
+    return this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO environment_checks(
+           id, task_id, stage_run_id, component, profile, revision, runtime_fingerprint,
+           lockfile_fingerprint, outcome, evidence_refs, setup_action_required, checked_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id, input.taskId, input.stageRunId, input.component, input.profile, input.revision,
+        input.runtimeFingerprint, input.lockfileFingerprint, input.outcome, toJson(input.evidenceRefs),
+        input.setupActionRequired, at,
+      );
+      this.recordEvent({
+        kind: "environment.checked", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, environmentCheckId: id, stageRunId: input.stageRunId, outcome: input.outcome },
+      });
+      return toEnvironmentCheck(this.store.get("SELECT * FROM environment_checks WHERE id = ?", id) as Row);
+    });
+  }
+
+  reserveAdmission(input: {
+    stageRunId: string;
+    controllerId: string;
+    fencingToken?: string;
+    provider?: string | null;
+    quotaDomain?: string | null;
+    resources?: string[];
+  }): AdmissionLease {
+    const id = ids.admissionLease();
+    const fencingToken = input.fencingToken ?? ids.launch();
+    return this.store.tx(() => {
+      const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", input.stageRunId);
+      if (!stage) throw new Error(`Unknown stage ${input.stageRunId}`);
+      if (stage.state !== "reserved") throw new Error(`Stage ${input.stageRunId} is ${String(stage.state)}; admission is not reservable.`);
+      const task = this.getTask(stage.task_id as string) as Task;
+      const at = nowIso();
+      this.store.run(
+        `INSERT INTO admission_leases(
+           id, stage_run_id, controller_id, fencing_token, provider, quota_domain,
+           project_id, resources, status, granted_at
+         ) VALUES(?,?,?,?,?,?,?,?,'reserved',?)`,
+        id, input.stageRunId, input.controllerId, fencingToken, input.provider ?? null,
+        input.quotaDomain ?? null, task.projectId, toJson([...new Set(input.resources ?? [])]), at,
+      );
+      this.recordEvent({
+        kind: "admission.reserved", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, admissionLeaseId: id, stageRunId: input.stageRunId, provider: input.provider ?? null, quotaDomain: input.quotaDomain ?? null },
+      });
+      return toAdmissionLease(this.store.get("SELECT * FROM admission_leases WHERE id = ?", id) as Row);
+    });
+  }
+
+  activateAdmission(id: string, fencingToken: string): AdmissionLease {
+    return this.store.tx(() => {
+      const lease = this.store.get("SELECT * FROM admission_leases WHERE id = ?", id);
+      if (!lease) throw new Error(`Unknown admission lease ${id}`);
+      if (lease.fencing_token !== fencingToken) throw new Error(`Stale fencing token for admission lease ${id}.`);
+      const result = this.store.db.prepare(
+        "UPDATE admission_leases SET status = 'active' WHERE id = ? AND fencing_token = ? AND status = 'reserved'",
+      ).run(id, fencingToken);
+      if (Number(result.changes) !== 1) throw new Error(`Admission lease ${id} is no longer reservable.`);
+      const stageResult = this.store.db.prepare(
+        "UPDATE stage_runs SET state = 'launching' WHERE id = ? AND state = 'reserved'",
+      ).run(lease.stage_run_id);
+      if (Number(stageResult.changes) !== 1) throw new Error(`Stage ${String(lease.stage_run_id)} is no longer reserved.`);
+      const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", lease.stage_run_id) as Row;
+      const task = this.getTask(stage.task_id as string) as Task;
+      this.store.run("UPDATE tasks SET record_version = record_version + 1, updated_at = ? WHERE id = ?", nowIso(), task.id);
+      this.recordEvent({
+        kind: "admission.activated", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, admissionLeaseId: id, stageRunId: lease.stage_run_id },
+      });
+      return toAdmissionLease(this.store.get("SELECT * FROM admission_leases WHERE id = ?", id) as Row);
+    });
+  }
+
+  releaseAdmission(id: string, fencingToken: string, reason: string): AdmissionLease {
+    return this.store.tx(() => {
+      const lease = this.store.get("SELECT * FROM admission_leases WHERE id = ?", id);
+      if (!lease) throw new Error(`Unknown admission lease ${id}`);
+      if (lease.fencing_token !== fencingToken) throw new Error(`Stale fencing token for admission lease ${id}.`);
+      const result = this.store.db.prepare(
+        `UPDATE admission_leases SET status = 'released', released_at = ?, release_reason = ?
+         WHERE id = ? AND fencing_token = ? AND status IN ('reserved','active')`,
+      ).run(nowIso(), reason, id, fencingToken);
+      if (Number(result.changes) !== 1) throw new Error(`Admission lease ${id} is already terminal.`);
+      const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", lease.stage_run_id) as Row;
+      const task = this.getTask(stage.task_id as string) as Task;
+      this.recordEvent({
+        kind: "admission.released", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, admissionLeaseId: id, stageRunId: lease.stage_run_id, reason },
+      });
+      return toAdmissionLease(this.store.get("SELECT * FROM admission_leases WHERE id = ?", id) as Row);
+    });
+  }
+
   // --- attempts -----------------------------------------------------------
 
   startAttempt(input: {
@@ -1105,6 +1780,15 @@ export class Records {
     outputPath?: string | null;
     promptVersion?: string | null;
     skillVersions?: string[];
+    stageRunId?: string | null;
+    parentAttemptId?: string | null;
+    parentSessionId?: string | null;
+    requestedModel?: string | null;
+    configuredModel?: string | null;
+    requestedEffort?: string | null;
+    configuredEffort?: string | null;
+    engineVersion?: string | null;
+    cliVersion?: string | null;
   }): Attempt {
     const id = input.id ?? ids.attempt();
     const at = nowIso();
@@ -1113,8 +1797,10 @@ export class Records {
       const attemptNumber = Number(previous?.n ?? 0) + 1;
       this.store.run(
         `INSERT INTO attempts(id, task_id, launch_id, attempt_number, kind, adapter, model, effort, auth_mode,
-           state, worktree_path, base_revision, packet_id, output_path, prompt_version, skill_versions, started_at, heartbeat_at)
-         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?)`,
+           state, worktree_path, base_revision, packet_id, output_path, prompt_version, skill_versions,
+           stage_run_id, parent_attempt_id, parent_session_id, requested_model, configured_model,
+           requested_effort, configured_effort, engine_version, cli_version, started_at, heartbeat_at, last_progress_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.taskId,
         input.launchId,
@@ -1130,6 +1816,16 @@ export class Records {
         input.outputPath ?? null,
         input.promptVersion ?? null,
         toJson(input.skillVersions ?? []),
+        input.stageRunId ?? null,
+        input.parentAttemptId ?? null,
+        input.parentSessionId ?? null,
+        input.requestedModel ?? input.model ?? null,
+        input.configuredModel ?? input.model ?? null,
+        input.requestedEffort ?? input.effort ?? null,
+        input.configuredEffort ?? input.effort ?? null,
+        input.engineVersion ?? null,
+        input.cliVersion ?? null,
+        at,
         at,
         at,
       );
@@ -1140,6 +1836,8 @@ export class Records {
         data: {
           adapter: input.adapter, model: input.model ?? null, kind: input.kind, launchId: input.launchId,
           promptVersion: input.promptVersion ?? null, skillVersions: input.skillVersions ?? [],
+          stageRunId: input.stageRunId ?? null, requestedModel: input.requestedModel ?? input.model ?? null,
+          configuredModel: input.configuredModel ?? input.model ?? null,
         },
       });
       return this.getAttempt(id) as Attempt;
@@ -1177,13 +1875,17 @@ export class Records {
     resultRevision?: string | null;
     usage?: Record<string, unknown> | null;
     outputPath?: string | null;
+    reportedModel?: string | null;
+    reportedEffort?: string | null;
+    usageStatus?: string | null;
   }): void {
     this.store.tx(() => {
       const attempt = this.getAttempt(input.attemptId);
       if (!attempt) throw new Error(`Unknown attempt ${input.attemptId}`);
       this.store.run(
         `UPDATE attempts SET state = ?, outcome = ?, failure_class = ?, reason = ?, exit_status = ?,
-           result_revision = ?, usage_json = ?, output_path = COALESCE(?, output_path), ended_at = ?
+           result_revision = ?, usage_json = ?, output_path = COALESCE(?, output_path),
+           reported_model = ?, reported_effort = ?, usage_status = ?, last_progress_at = ?, ended_at = ?
          WHERE id = ?`,
         input.state,
         input.outcome ?? null,
@@ -1193,6 +1895,10 @@ export class Records {
         input.resultRevision ?? null,
         input.usage ? toJson(input.usage) : null,
         input.outputPath ?? null,
+        input.reportedModel ?? null,
+        input.reportedEffort ?? null,
+        input.usageStatus ?? (input.usage ? "reported" : null),
+        nowIso(),
         nowIso(),
         input.attemptId,
       );
@@ -1208,6 +1914,118 @@ export class Records {
         },
       });
     });
+  }
+
+  recordUsageProjection(input: Omit<UsageProjection, "updatedAt">): UsageProjection {
+    if (!USAGE_COVERAGE.includes(input.coverage)) throw new Error(`Unknown usage coverage: ${input.coverage}`);
+    if (!input.normalizerVersion.trim() || !input.sourceArtifactHash.trim() || !input.sourceSemantics.trim()) {
+      throw new Error("Usage projection requires normalizer and source provenance.");
+    }
+    const at = nowIso();
+    this.store.tx(() => {
+      if (!this.getAttempt(input.attemptId)) throw new Error(`Unknown attempt ${input.attemptId}`);
+      this.store.run(
+        `INSERT INTO attempt_usage(
+           attempt_id, normalizer_version, normalized, source_artifact_hash, source_offset,
+           coverage, source_semantics, updated_at
+         ) VALUES(?,?,?,?,?,?,?,?)`,
+        input.attemptId, input.normalizerVersion, toJson(input.normalized), input.sourceArtifactHash,
+        input.sourceOffset, input.coverage, input.sourceSemantics, at,
+      );
+      const attempt = this.getAttempt(input.attemptId) as Attempt;
+      this.recordEvent({
+        kind: "usage.projected", taskId: attempt.taskId, attemptId: input.attemptId,
+        data: { schemaVersion: 1, normalizerVersion: input.normalizerVersion, coverage: input.coverage, sourceArtifactHash: input.sourceArtifactHash },
+      });
+    });
+    return this.getUsageProjection(input.attemptId, input.normalizerVersion) as UsageProjection;
+  }
+
+  getUsageProjection(attemptId: string, normalizerVersion: string): UsageProjection | null {
+    const row = this.store.get(
+      "SELECT * FROM attempt_usage WHERE attempt_id = ? AND normalizer_version = ?",
+      attemptId, normalizerVersion,
+    );
+    return row ? toUsageProjection(row) : null;
+  }
+
+  recordIncidentOccurrence(input: {
+    incidentId?: string;
+    signature: string;
+    classifierVersion: string;
+    category: string;
+    layer: string;
+    symptom: string;
+    hypothesis?: string | null;
+    confirmedCause?: string | null;
+    confidence?: Incident["confidence"];
+    lifecycle?: Incident["lifecycle"];
+    affectedVersionStart?: string | null;
+    affectedVersionEnd?: string | null;
+    lessonRefs?: string[];
+    fixRefs?: string[];
+    testRefs?: string[];
+    occurrenceId?: string;
+    sourceKey: string;
+    taskId?: string | null;
+    stageRunId?: string | null;
+    attemptId?: string | null;
+    revision?: string | null;
+    evidenceRefs?: string[];
+    observedAt?: string;
+  }): IncidentOccurrence {
+    if (!input.signature.trim() || !input.classifierVersion.trim() || !input.sourceKey.trim()) {
+      throw new Error("Incident occurrence requires signature, classifier version, and stable source key.");
+    }
+    const occurrenceId = input.occurrenceId ?? ids.occurrence();
+    return this.store.tx(() => {
+      let incidentRow = this.store.get(
+        "SELECT * FROM incidents WHERE signature = ? AND classifier_version = ?",
+        input.signature, input.classifierVersion,
+      );
+      if (!incidentRow) {
+        const incidentId = input.incidentId ?? ids.incident();
+        const at = nowIso();
+        this.store.run(
+          `INSERT INTO incidents(
+             id, signature, classifier_version, category, layer, symptom, hypothesis, confirmed_cause,
+             confidence, lifecycle, affected_version_start, affected_version_end, lesson_refs, fix_refs,
+             test_refs, created_at, updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          incidentId, input.signature, input.classifierVersion, input.category, input.layer, input.symptom,
+          input.hypothesis ?? null, input.confirmedCause ?? null, input.confidence ?? "unknown",
+          input.lifecycle ?? "open", input.affectedVersionStart ?? null, input.affectedVersionEnd ?? null,
+          toJson(input.lessonRefs ?? []), toJson(input.fixRefs ?? []), toJson(input.testRefs ?? []), at, at,
+        );
+        incidentRow = this.store.get("SELECT * FROM incidents WHERE id = ?", incidentId);
+      } else if (input.incidentId && input.incidentId !== incidentRow.id) {
+        throw new Error(`Incident signature ${input.signature} already belongs to ${String(incidentRow.id)}.`);
+      }
+      const incident = toIncident(incidentRow as Row);
+      this.store.run(
+        `INSERT INTO incident_occurrences(
+           id, incident_id, source_key, task_id, stage_run_id, attempt_id, revision, evidence_refs, observed_at
+         ) VALUES(?,?,?,?,?,?,?,?,?)`,
+        occurrenceId, incident.id, input.sourceKey, input.taskId ?? null, input.stageRunId ?? null,
+        input.attemptId ?? null, input.revision ?? null, toJson(input.evidenceRefs ?? []), input.observedAt ?? nowIso(),
+      );
+      const projectId = input.taskId ? this.getTask(input.taskId)?.projectId ?? null : null;
+      this.recordEvent({
+        kind: "incident.occurrence_recorded", projectId, taskId: input.taskId ?? null, attemptId: input.attemptId ?? null,
+        data: { schemaVersion: 1, incidentId: incident.id, occurrenceId, sourceKey: input.sourceKey, classifierVersion: input.classifierVersion },
+      });
+      return toIncidentOccurrence(this.store.get("SELECT * FROM incident_occurrences WHERE id = ?", occurrenceId) as Row);
+    });
+  }
+
+  getIncident(id: string): Incident | null {
+    const row = this.store.get("SELECT * FROM incidents WHERE id = ?", id);
+    return row ? toIncident(row) : null;
+  }
+
+  incidentOccurrences(incidentId: string): IncidentOccurrence[] {
+    return this.store.all("SELECT * FROM incident_occurrences WHERE incident_id = ? ORDER BY observed_at, rowid", incidentId)
+      .map(toIncidentOccurrence);
   }
 
   // --- gates --------------------------------------------------------------
