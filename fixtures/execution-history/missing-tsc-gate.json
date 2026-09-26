@@ -1,0 +1,9 @@
+{
+  "gate": "typecheck",
+  "exit_status": 127,
+  "signal": "tsc executable not found",
+  "status": "ERROR",
+  "expected_failure_domain": "environment",
+  "consumes_code_repair": false,
+  "sanitized": true
+}

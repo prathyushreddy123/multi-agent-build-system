@@ -1,0 +1,7 @@
+{
+  "source_attempt_id": "att_01M3ATD35EDRBG83MGE5ZFSAGT",
+  "fallback_attempt_id": "att_01M3ATD90N0SSYNZQYXV0PA178",
+  "failure_class": "QUOTA",
+  "preserved_obligation": "repair findings supplied before the provider fallback",
+  "sanitized": true
+}

@@ -940,6 +940,43 @@ These are coherent work packages, not a requirement for a fresh model session fo
 
 **Acceptance:** historical snapshot counts/known usage match; missing usage and artifact gaps remain explicit; audit leaves source rows/schema unchanged; future schema is rejected without mutation; no default command silently selects the live DB.
 
+#### T01 implementation record
+
+T01 is implemented locally by task `tsk_01M3FMXTWW29N1GVZYSCS37RFE`; this record does not activate a
+live migration or authorize use against the live controller database.
+
+- `Store.openReadOnly(path)` requires an existing explicit filesystem path, opens SQLite read-only,
+  enables only the connection-local `query_only` guard, checks future-schema compatibility, and does
+  not create a directory, select the configured live path, set WAL, or run migrations.
+- Writable opening now checks `schema_meta` before persistent pragmas or DDL, rejects versions newer
+  than `14`, and applies the existing schema/column convergence plus version stamp in one transaction.
+  T01 allocates no new schema number.
+- `auditExecutionHistory({ dbPath, taskIds? })` reports the selected evidence tables, task linkage,
+  digest, gate/checkpoint/retry/review counts, provider-specific known token-event subtotals, duration
+  coverage, malformed/missing usage, and absent artifact references from one read transaction.
+- The local command is:
+  `node scripts/audit-execution-history.ts --db <explicit.sqlite> --read-only --output <new-report.json>`.
+  It refuses an omitted source, a missing `--read-only` acknowledgement, an existing report, and an
+  output path equal to the source.
+- `rehearseBackupRestore(source, destination)` uses SQLite's backup API, requires a distinct
+  non-existing destination, and compares schema version plus the selected historical-evidence digest
+  after reopening the restored file read-only. Callers own cleanup of their explicitly created
+  disposable directory.
+- Sanitized fixtures under `fixtures/execution-history/` reproduce all nine tasks, 41 attempts,
+  13 reviews, seven change requests, nine retries, 40 gate results, 60 checkpoints, 83,047,613 known
+  input/cache token events, 677,025 output tokens, five missing-usage attempts, and 12,590,406 elapsed
+  worker milliseconds. The manifest retains source identifiers without raw transcripts or machine
+  paths; focused fixtures retain the section 2.4 failure semantics for their owning later packages.
+- Deterministic evidence is in `test/history-audit.test.ts` and `test/schema-migrations.test.ts`.
+  These cover byte-for-byte source preservation during audit/future-version refusal, rollback after a
+  deterministic mid-migration DDL failure, and backup/restore into a temporary independent path.
+
+Known limits: this audit normalizer is versioned historical reporting, not the T04 durable usage
+projection; known provider events are not unique tokens, cost, or a subscription charge. Artifact
+checks can prove that a recorded local path is absent at observation time but cannot reconstruct an
+unrecorded or pruned artifact. No live database, controller, provider, or external service is touched
+by the fixture checks.
+
 ### T02 — Durable shared contracts and schema
 
 **Milestone:** M1. **Depends on:** T01. **Risk:** high. **Mode:** sequential.

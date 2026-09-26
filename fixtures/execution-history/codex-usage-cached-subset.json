@@ -1,0 +1,6 @@
+{
+  "adapter": "codex",
+  "usage_json": { "input_tokens": 56712129, "cached_input_tokens": 40000000, "output_tokens": 368642 },
+  "expected": { "known_input_events": 56712129, "known_output_tokens": 368642 },
+  "note": "cached_input_tokens is a subset of input_tokens and must not be added twice"
+}

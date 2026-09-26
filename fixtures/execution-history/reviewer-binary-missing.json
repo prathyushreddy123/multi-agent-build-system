@@ -1,0 +1,8 @@
+{
+  "source_attempt_id": "att_01M3AC43D3CN6V5NDERB18ZEY5",
+  "stage": "review",
+  "signal": "configured reviewer executable not found",
+  "expected_failure_domain": "environment",
+  "resume_stage": "review",
+  "sanitized": true
+}
