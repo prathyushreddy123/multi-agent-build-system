@@ -1,0 +1,49 @@
+{
+  "schema_version": "14",
+  "expected": {
+    "tasks": 9,
+    "attempts": 41,
+    "reviews": 13,
+    "review_change_requests": 7,
+    "retries": 9,
+    "gates": 40,
+    "gate_statuses": { "PASS": 37, "FAIL": 1, "ERROR": 2 },
+    "checkpoints": 60,
+    "applied_request_changes": 1,
+    "curator_proposals": 0,
+    "optimization_experiments": 0,
+    "known_input_events": 83047613,
+    "known_output_tokens": 677025,
+    "missing_usage_attempts": 5,
+    "elapsed_milliseconds": 12590406
+  },
+  "cohorts": [
+    {
+      "project_id": "prj_fixture_study",
+      "project_name": "Study assistant",
+      "known_input_events": 26335484,
+      "known_output_tokens": 308383,
+      "missing_usage_attempts": 0,
+      "elapsed_milliseconds": 5950278
+    },
+    {
+      "project_id": "prj_fixture_mabs_ui",
+      "project_name": "MABS UI",
+      "known_input_events": 56712129,
+      "known_output_tokens": 368642,
+      "missing_usage_attempts": 5,
+      "elapsed_milliseconds": 6640128
+    }
+  ],
+  "tasks": [
+    { "ref": "H1", "project_id": "prj_fixture_study", "id": "tsk_01M2XJXQYX7XMBTQGQTC7YR4NH", "attempts": 6, "reviews": 3, "change_requests": 2, "retries": 0, "gates": 5, "checkpoints": 8 },
+    { "ref": "H2", "project_id": "prj_fixture_study", "id": "tsk_01M2XJXQYXT5FD2S9T3HNJ1AQY", "attempts": 4, "reviews": 2, "change_requests": 1, "retries": 1, "gates": 5, "checkpoints": 6 },
+    { "ref": "H3", "project_id": "prj_fixture_study", "id": "tsk_01M2XJXQYYKNT105TJVGKXNWPF", "attempts": 4, "reviews": 2, "change_requests": 1, "retries": 0, "gates": 5, "checkpoints": 6 },
+    { "ref": "H4", "project_id": "prj_fixture_study", "id": "tsk_01M2XJXQYYAY0EA9CMBRTNH705", "attempts": 4, "reviews": 2, "change_requests": 1, "retries": 0, "gates": 5, "checkpoints": 6 },
+    { "ref": "H5", "project_id": "prj_fixture_study", "id": "tsk_01M2XQKVHW2QHKNEF17M4KZWFN", "attempts": 2, "reviews": 1, "change_requests": 0, "retries": 0, "gates": 4, "checkpoints": 4 },
+    { "ref": "H6", "project_id": "prj_fixture_mabs_ui", "id": "tsk_01M3A915GRHN8A1VE6AH7V8QAE", "attempts": 5, "reviews": 1, "change_requests": 0, "retries": 2, "gates": 4, "checkpoints": 7 },
+    { "ref": "H7", "project_id": "prj_fixture_mabs_ui", "id": "tsk_01M3A915GRJPGY0KT99K6EXJ5N", "attempts": 10, "reviews": 2, "change_requests": 2, "retries": 4, "gates": 6, "checkpoints": 13 },
+    { "ref": "H8", "project_id": "prj_fixture_mabs_ui", "id": "tsk_01M3A915GS5HCR3ME8XX9Y4QBD", "attempts": 2, "reviews": 0, "change_requests": 0, "retries": 1, "gates": 3, "checkpoints": 4 },
+    { "ref": "H9", "project_id": "prj_fixture_mabs_ui", "id": "tsk_01M3A915GS53XEK9RJKCQPX4T6", "attempts": 4, "reviews": 0, "change_requests": 0, "retries": 1, "gates": 3, "checkpoints": 6 }
+  ]
+}
