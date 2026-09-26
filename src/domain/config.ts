@@ -5,6 +5,8 @@ import { DEFAULT_REVIEW_POLICY, normalizeReviewPolicy, validateReviewPolicy } fr
 import type { ReviewPolicy } from "../review/policy.ts";
 import type { GateSpec, Project } from "../store/records.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES, type TaskClass } from "../routing/router.ts";
+import { PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES, unresolvedGovernance } from "./project-policy.ts";
+import type { ProjectGovernance } from "./project-policy.ts";
 
 export interface PromptProfile {
   implementationAddendum: string | null;
@@ -33,7 +35,21 @@ export interface ProjectConfigSnapshot {
   checkCommands: GateSpec[];
   promptProfile: PromptProfile;
   controllerSettings: ProjectControllerSettings;
+  governance?: ProjectGovernance;
+  policyVersions?: {
+    governance: string;
+    routing: string;
+    budget: string;
+    scheduling: string;
+  };
 }
+
+export const DEFAULT_POLICY_VERSIONS = {
+  governance: PROJECT_POLICY_VERSION,
+  routing: "mabs.routing.v1",
+  budget: "mabs.budget.v1",
+  scheduling: "mabs.scheduling.v1",
+} as const;
 
 export const DEFAULT_PROMPT_PROFILE: PromptProfile = {
   implementationAddendum: null,
@@ -55,6 +71,8 @@ export function normalizeProjectConfig(config: ProjectConfigSnapshot): ProjectCo
     checkCommands: config.checkCommands ?? [],
     promptProfile: { ...DEFAULT_PROMPT_PROFILE, ...(config.promptProfile ?? {}) },
     controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...(config.controllerSettings ?? {}) },
+    governance: { ...unresolvedGovernance(), ...(config.governance ?? {}) },
+    policyVersions: { ...DEFAULT_POLICY_VERSIONS, ...(config.policyVersions ?? {}) },
   };
 }
 
@@ -67,6 +85,8 @@ export function projectConfigSnapshot(project: Project): ProjectConfigSnapshot {
     checkCommands: project.checkCommands,
     promptProfile: project.promptProfile,
     controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...project.controllerSettings },
+    governance: project.governance,
+    policyVersions: DEFAULT_POLICY_VERSIONS,
   };
 }
 
@@ -79,7 +99,7 @@ function stableValue(value: unknown): unknown {
 }
 
 export function canonicalConfig(config: ProjectConfigSnapshot): string {
-  return JSON.stringify(stableValue(config));
+  return JSON.stringify(stableValue(normalizeProjectConfig(config)));
 }
 
 export function configFingerprint(config: ProjectConfigSnapshot): string {
@@ -95,6 +115,7 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
   if (!config || typeof config !== "object") return ["Configuration must be an object."];
   errors.push(...unknownKeys(config, [
     "routingProfile", "routingOverrides", "approvalPolicy", "reviewPolicy", "checkCommands", "promptProfile", "controllerSettings",
+    "governance", "policyVersions",
   ], "configuration"));
   if (typeof config.routingProfile !== "string" || !config.routingProfile.trim()) errors.push("routingProfile is required.");
   if (!config.routingOverrides || typeof config.routingOverrides !== "object" || Array.isArray(config.routingOverrides)) {
@@ -190,6 +211,21 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
   const contextBudget = config.controllerSettings?.contextBudgetTokens;
   if (!Number.isSafeInteger(contextBudget) || contextBudget < 1_000 || contextBudget > 100_000) {
     errors.push("controllerSettings.contextBudgetTokens must be an integer from 1,000 through 100,000.");
+  }
+  const governance = config.governance;
+  if (governance !== undefined) {
+    errors.push(...unknownKeys(governance, ["projectType", "reviewChoice", "decisionState", "decisionId", "policyVersion", "version"], "governance"));
+    if (governance.projectType !== null && !PROJECT_TYPES.includes(governance.projectType)) errors.push("governance.projectType is invalid.");
+    if (governance.reviewChoice !== null && !REVIEW_CHOICES.includes(governance.reviewChoice)) errors.push("governance.reviewChoice is invalid.");
+    if (governance.projectType === "client" && governance.reviewChoice !== null && governance.reviewChoice !== "required") {
+      errors.push("Client governance cannot disable required review.");
+    }
+  }
+  if (config.policyVersions !== undefined) {
+    errors.push(...unknownKeys(config.policyVersions, ["governance", "routing", "budget", "scheduling"], "policyVersions"));
+    for (const [name, value] of Object.entries(config.policyVersions)) {
+      if (typeof value !== "string" || !value.trim()) errors.push(`policyVersions.${name} is required.`);
+    }
   }
   return [...new Set(errors)];
 }

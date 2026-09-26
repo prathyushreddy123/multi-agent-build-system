@@ -46,6 +46,14 @@ export const ids = {
   bootstrap: () => newId("bst"),
   conversation: () => newId("cnv"),
   operationRun: () => newId("opr"),
+  policyDecision: () => newId("gvd"),
+  episode: () => newId("eps"),
+  stage: () => newId("stg"),
+  obligation: () => newId("obl"),
+  environmentCheck: () => newId("env"),
+  admissionLease: () => newId("adm"),
+  incident: () => newId("inc"),
+  occurrence: () => newId("occ"),
 };
 
 /** RFC 4122 v4 UUID, required by harnesses that accept an explicit session id. */
