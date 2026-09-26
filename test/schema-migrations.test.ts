@@ -210,6 +210,38 @@ test("a fresh database and a migrated schema-14 database converge on one schema"
   assert.throws(() => createLegacyBaselineDatabase(upgraded), /Refusing to overwrite/);
 });
 
+test("replaying a migration over objects it already created converges instead of failing", (t) => {
+  const root = rootFor(t, "mabs-migration-replay-");
+  const path = join(root, "restamped.sqlite");
+
+  const first = new Store(path);
+  const at = "2026-09-25T00:00:00.000Z";
+  first.run(
+    `INSERT INTO projects(id, name, repo_path, config_version, created_at, updated_at)
+     VALUES('prj_replay', 'replay', '/sanitized/replay', 'cfg_replay', ?, ?)`, at, at,
+  );
+  first.close();
+  const target = schemaShape(path);
+
+  // An understamped database is how a downgraded deployment, or a restored
+  // backup taken before the stamp, presents itself: the objects are already
+  // there while schema_meta claims they are not.
+  const restamp = new DatabaseSync(path);
+  restamp.prepare("UPDATE schema_meta SET value = '11' WHERE key = 'schema_version'").run();
+  restamp.close();
+
+  const replayed = new Store(path);
+  assert.equal(replayed.get("SELECT value FROM schema_meta WHERE key='schema_version'")?.value, SCHEMA_VERSION);
+  const project = replayed.get("SELECT * FROM projects WHERE id = 'prj_replay'");
+  replayed.close();
+
+  // No duplicate column, index, or table, and no rewritten row.
+  assert.deepEqual(schemaShape(path), target);
+  assert.equal(project?.name, "replay");
+  assert.equal(project?.updated_at, at);
+  assert.equal(project?.project_type, null);
+});
+
 test("migrating to schema 15 neither classifies a project nor reopens completed work", (t) => {
   const root = rootFor(t, "mabs-migration-preserves-");
   const path = join(root, "legacy14.sqlite");
