@@ -1800,7 +1800,7 @@ export class Records {
            state, worktree_path, base_revision, packet_id, output_path, prompt_version, skill_versions,
            stage_run_id, parent_attempt_id, parent_session_id, requested_model, configured_model,
            requested_effort, configured_effort, engine_version, cli_version, started_at, heartbeat_at, last_progress_at)
-         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.taskId,
         input.launchId,

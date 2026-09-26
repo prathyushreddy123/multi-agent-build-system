@@ -1,18 +1,14 @@
 -- Schema 15: durable governance, execution continuation, and projections.
 -- This migration is deliberately structural only. It does not classify legacy
 -- projects, create execution episodes, or rewrite historical evidence.
+--
+-- This file holds the new objects. The additive columns on pre-existing tables,
+-- and the two indexes over them, live in the schema-15 entry of MIGRATIONS in
+-- `../db.ts`, because SQLite has no `ADD COLUMN IF NOT EXISTS` and they must be
+-- applied through a presence check. Every statement here is likewise written so
+-- that re-applying the migration converges instead of failing.
 
-ALTER TABLE projects ADD COLUMN project_type TEXT;
-ALTER TABLE projects ADD COLUMN review_choice TEXT;
-ALTER TABLE projects ADD COLUMN governance_decision_id TEXT;
-ALTER TABLE projects ADD COLUMN governance_version INTEGER NOT NULL DEFAULT 0;
-
-ALTER TABLE product_briefs ADD COLUMN project_type TEXT;
-ALTER TABLE product_briefs ADD COLUMN review_choice TEXT;
-ALTER TABLE product_briefs ADD COLUMN governance_decision_id TEXT;
-ALTER TABLE product_briefs ADD COLUMN governance_version INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE project_policy_decisions (
+CREATE TABLE IF NOT EXISTS project_policy_decisions (
   id               TEXT PRIMARY KEY,
   project_id       TEXT REFERENCES projects(id) ON DELETE CASCADE,
   brief_id         TEXT REFERENCES product_briefs(id) ON DELETE CASCADE,
@@ -30,7 +26,7 @@ CREATE TABLE project_policy_decisions (
   UNIQUE(brief_id, expected_version)
 );
 
-CREATE TABLE execution_episodes (
+CREATE TABLE IF NOT EXISTS execution_episodes (
   id                    TEXT PRIMARY KEY,
   task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   episode_number        INTEGER NOT NULL CHECK(episode_number > 0),
@@ -45,7 +41,7 @@ CREATE TABLE execution_episodes (
   UNIQUE(task_id, episode_number)
 );
 
-CREATE TABLE stage_runs (
+CREATE TABLE IF NOT EXISTS stage_runs (
   id                      TEXT PRIMARY KEY,
   task_id                 TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   episode_id              TEXT NOT NULL REFERENCES execution_episodes(id) ON DELETE CASCADE,
@@ -71,10 +67,10 @@ CREATE TABLE stage_runs (
   UNIQUE(gate_id)
 );
 
-CREATE INDEX stage_runs_by_task ON stage_runs(task_id, reserved_at);
-CREATE INDEX stage_runs_active ON stage_runs(state) WHERE state IN ('reserved', 'launching', 'running', 'waiting', 'unknown');
+CREATE INDEX IF NOT EXISTS stage_runs_by_task ON stage_runs(task_id, reserved_at);
+CREATE INDEX IF NOT EXISTS stage_runs_active ON stage_runs(state) WHERE state IN ('reserved', 'launching', 'running', 'waiting', 'unknown');
 
-CREATE TABLE task_obligations (
+CREATE TABLE IF NOT EXISTS task_obligations (
   id                    TEXT PRIMARY KEY,
   task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   kind                  TEXT NOT NULL CHECK(kind IN ('code_defect', 'gate_failure', 'requirement_evidence', 'decision_needed', 'advisory')),
@@ -96,24 +92,9 @@ CREATE TABLE task_obligations (
   UNIQUE(task_id, source_key)
 );
 
-CREATE INDEX task_obligations_open ON task_obligations(task_id, state, blocking);
+CREATE INDEX IF NOT EXISTS task_obligations_open ON task_obligations(task_id, state, blocking);
 
-ALTER TABLE attempts ADD COLUMN stage_run_id TEXT REFERENCES stage_runs(id) ON DELETE SET NULL;
-ALTER TABLE attempts ADD COLUMN parent_attempt_id TEXT REFERENCES attempts(id) ON DELETE SET NULL;
-ALTER TABLE attempts ADD COLUMN parent_session_id TEXT;
-ALTER TABLE attempts ADD COLUMN requested_model TEXT;
-ALTER TABLE attempts ADD COLUMN configured_model TEXT;
-ALTER TABLE attempts ADD COLUMN reported_model TEXT;
-ALTER TABLE attempts ADD COLUMN requested_effort TEXT;
-ALTER TABLE attempts ADD COLUMN configured_effort TEXT;
-ALTER TABLE attempts ADD COLUMN reported_effort TEXT;
-ALTER TABLE attempts ADD COLUMN engine_version TEXT;
-ALTER TABLE attempts ADD COLUMN cli_version TEXT;
-ALTER TABLE attempts ADD COLUMN last_progress_at TEXT;
-ALTER TABLE attempts ADD COLUMN usage_status TEXT;
-CREATE UNIQUE INDEX attempts_by_stage_run ON attempts(stage_run_id) WHERE stage_run_id IS NOT NULL;
-
-CREATE TABLE attempt_usage (
+CREATE TABLE IF NOT EXISTS attempt_usage (
   attempt_id          TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
   normalizer_version  TEXT NOT NULL,
   normalized          TEXT NOT NULL,
@@ -125,7 +106,7 @@ CREATE TABLE attempt_usage (
   PRIMARY KEY(attempt_id, normalizer_version)
 );
 
-CREATE TABLE environment_checks (
+CREATE TABLE IF NOT EXISTS environment_checks (
   id                    TEXT PRIMARY KEY,
   task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   stage_run_id          TEXT REFERENCES stage_runs(id) ON DELETE SET NULL,
@@ -140,7 +121,7 @@ CREATE TABLE environment_checks (
   checked_at            TEXT NOT NULL
 );
 
-CREATE TABLE admission_leases (
+CREATE TABLE IF NOT EXISTS admission_leases (
   id             TEXT PRIMARY KEY,
   stage_run_id   TEXT NOT NULL UNIQUE REFERENCES stage_runs(id) ON DELETE CASCADE,
   controller_id  TEXT NOT NULL,
@@ -155,9 +136,9 @@ CREATE TABLE admission_leases (
   release_reason TEXT
 );
 
-CREATE INDEX admission_leases_active ON admission_leases(status, provider, project_id);
+CREATE INDEX IF NOT EXISTS admission_leases_active ON admission_leases(status, provider, project_id);
 
-CREATE TABLE incidents (
+CREATE TABLE IF NOT EXISTS incidents (
   id                     TEXT PRIMARY KEY,
   signature              TEXT NOT NULL,
   classifier_version     TEXT NOT NULL,
@@ -178,7 +159,7 @@ CREATE TABLE incidents (
   UNIQUE(signature, classifier_version)
 );
 
-CREATE TABLE incident_occurrences (
+CREATE TABLE IF NOT EXISTS incident_occurrences (
   id           TEXT PRIMARY KEY,
   incident_id  TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
   source_key   TEXT NOT NULL,
@@ -191,48 +172,7 @@ CREATE TABLE incident_occurrences (
   UNIQUE(incident_id, source_key)
 );
 
-ALTER TABLE context_packets ADD COLUMN purpose TEXT;
-ALTER TABLE context_packets ADD COLUMN prompt_bytes INTEGER;
-ALTER TABLE context_packets ADD COLUMN prompt_token_estimate INTEGER;
-ALTER TABLE context_packets ADD COLUMN estimator_version TEXT;
-ALTER TABLE context_packets ADD COLUMN section_sizes TEXT;
-ALTER TABLE context_packets ADD COLUMN mandatory_count INTEGER;
-ALTER TABLE context_packets ADD COLUMN optional_count INTEGER;
-ALTER TABLE context_packets ADD COLUMN content_fingerprint TEXT;
-
-ALTER TABLE routing_decisions ADD COLUMN capability_registry_version TEXT;
-ALTER TABLE routing_decisions ADD COLUMN config_version TEXT;
-ALTER TABLE routing_decisions ADD COLUMN requested_selection TEXT;
-ALTER TABLE routing_decisions ADD COLUMN effective_selection TEXT;
-ALTER TABLE routing_decisions ADD COLUMN eligibility_evidence TEXT;
-ALTER TABLE routing_decisions ADD COLUMN fallback_reason TEXT;
-ALTER TABLE routing_decisions ADD COLUMN escalation_reason TEXT;
-ALTER TABLE routing_decisions ADD COLUMN quota_domain_id TEXT;
-
-ALTER TABLE gate_results ADD COLUMN stage_run_id TEXT REFERENCES stage_runs(id) ON DELETE SET NULL;
-ALTER TABLE gate_results ADD COLUMN job_id TEXT;
-ALTER TABLE gate_results ADD COLUMN environment_fingerprint TEXT;
-ALTER TABLE gate_results ADD COLUMN command_fingerprint TEXT;
-ALTER TABLE gate_results ADD COLUMN input_fingerprint TEXT;
-ALTER TABLE gate_results ADD COLUMN raw_exit_status INTEGER;
-ALTER TABLE gate_results ADD COLUMN raw_signal TEXT;
-ALTER TABLE gate_results ADD COLUMN timed_out INTEGER;
-ALTER TABLE gate_results ADD COLUMN failure_diagnosis TEXT;
-CREATE UNIQUE INDEX gates_by_stage_run ON gate_results(stage_run_id) WHERE stage_run_id IS NOT NULL;
-
-ALTER TABLE optimization_experiments ADD COLUMN protocol_version TEXT;
-ALTER TABLE optimization_experiments ADD COLUMN primary_metric TEXT;
-ALTER TABLE optimization_experiments ADD COLUMN tolerances TEXT;
-ALTER TABLE optimization_experiments ADD COLUMN safeguards TEXT;
-ALTER TABLE optimization_experiments ADD COLUMN run_authorization TEXT;
-ALTER TABLE optimization_experiments ADD COLUMN source_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
-ALTER TABLE optimization_experiments ADD COLUMN source_stage_run_id TEXT REFERENCES stage_runs(id) ON DELETE SET NULL;
-
-ALTER TABLE optimization_measurements ADD COLUMN repeat_index INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE optimization_measurements ADD COLUMN seed TEXT;
-ALTER TABLE optimization_measurements ADD COLUMN usage_coverage TEXT;
-
-CREATE TABLE task_requirement_ownership (
+CREATE TABLE IF NOT EXISTS task_requirement_ownership (
   task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   requirement_id  TEXT NOT NULL,
   mapping_version TEXT NOT NULL,
@@ -241,7 +181,7 @@ CREATE TABLE task_requirement_ownership (
   PRIMARY KEY(task_id, requirement_id, mapping_version)
 );
 
-CREATE TABLE projection_cursors (
+CREATE TABLE IF NOT EXISTS projection_cursors (
   projection       TEXT NOT NULL,
   projection_version TEXT NOT NULL,
   source_key       TEXT NOT NULL,

@@ -9,9 +9,113 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const SCHEMA_VERSION = "15";
 const LEGACY_SCHEMA_VERSION = 14;
 
-const MIGRATIONS = [
-  { version: 15, file: "migrations/015_durable_execution.sql" },
-] as const;
+interface Migration {
+  version: number;
+  /** New tables and indexes over columns that already exist. */
+  file: string;
+  /**
+   * Additive columns on pre-existing tables, as `table -> column -> definition`.
+   * SQLite has no `ADD COLUMN IF NOT EXISTS`, so they are applied through a
+   * presence check. Together with the `IF NOT EXISTS` DDL in `file`, that keeps
+   * a replay of the migration convergent rather than fatal.
+   */
+  columns: Record<string, Record<string, string>>;
+  /** Indexes over the columns above; they must follow the columns. */
+  indexes: string[];
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    version: 15,
+    file: "migrations/015_durable_execution.sql",
+    columns: {
+      projects: {
+        project_type: "TEXT",
+        review_choice: "TEXT",
+        governance_decision_id: "TEXT",
+        governance_version: "INTEGER NOT NULL DEFAULT 0",
+      },
+      product_briefs: {
+        project_type: "TEXT",
+        review_choice: "TEXT",
+        governance_decision_id: "TEXT",
+        governance_version: "INTEGER NOT NULL DEFAULT 0",
+      },
+      attempts: {
+        stage_run_id: "TEXT REFERENCES stage_runs(id) ON DELETE SET NULL",
+        parent_attempt_id: "TEXT REFERENCES attempts(id) ON DELETE SET NULL",
+        parent_session_id: "TEXT",
+        requested_model: "TEXT",
+        configured_model: "TEXT",
+        reported_model: "TEXT",
+        requested_effort: "TEXT",
+        configured_effort: "TEXT",
+        reported_effort: "TEXT",
+        engine_version: "TEXT",
+        cli_version: "TEXT",
+        last_progress_at: "TEXT",
+        usage_status: "TEXT",
+      },
+      context_packets: {
+        purpose: "TEXT",
+        prompt_bytes: "INTEGER",
+        prompt_token_estimate: "INTEGER",
+        estimator_version: "TEXT",
+        section_sizes: "TEXT",
+        mandatory_count: "INTEGER",
+        optional_count: "INTEGER",
+        content_fingerprint: "TEXT",
+      },
+      routing_decisions: {
+        capability_registry_version: "TEXT",
+        config_version: "TEXT",
+        requested_selection: "TEXT",
+        effective_selection: "TEXT",
+        eligibility_evidence: "TEXT",
+        fallback_reason: "TEXT",
+        escalation_reason: "TEXT",
+        quota_domain_id: "TEXT",
+      },
+      gate_results: {
+        stage_run_id: "TEXT REFERENCES stage_runs(id) ON DELETE SET NULL",
+        job_id: "TEXT",
+        environment_fingerprint: "TEXT",
+        command_fingerprint: "TEXT",
+        input_fingerprint: "TEXT",
+        raw_exit_status: "INTEGER",
+        raw_signal: "TEXT",
+        timed_out: "INTEGER",
+        failure_diagnosis: "TEXT",
+      },
+      optimization_experiments: {
+        protocol_version: "TEXT",
+        primary_metric: "TEXT",
+        tolerances: "TEXT",
+        safeguards: "TEXT",
+        run_authorization: "TEXT",
+        source_task_id: "TEXT REFERENCES tasks(id) ON DELETE SET NULL",
+        source_stage_run_id: "TEXT REFERENCES stage_runs(id) ON DELETE SET NULL",
+      },
+      optimization_measurements: {
+        repeat_index: "INTEGER NOT NULL DEFAULT 0",
+        seed: "TEXT",
+        usage_coverage: "TEXT",
+      },
+    },
+    indexes: [
+      "CREATE UNIQUE INDEX IF NOT EXISTS attempts_by_stage_run ON attempts(stage_run_id) WHERE stage_run_id IS NOT NULL",
+      "CREATE UNIQUE INDEX IF NOT EXISTS gates_by_stage_run ON gate_results(stage_run_id) WHERE stage_run_id IS NOT NULL",
+    ],
+  },
+];
+
+/** Add a column only when it is absent, so a replayed migration converges. */
+function addColumn(db: DatabaseSync, table: string, name: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!columns.some((column) => column.name === name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+}
 
 export type Row = Record<string, unknown>;
 
@@ -62,10 +166,7 @@ function schemaVersion(db: DatabaseSync, path: string): number | null {
  */
 function applyLegacyBaseline(db: DatabaseSync): void {
   db.exec(readFileSync(join(HERE, "schema.sql"), "utf8"));
-  const ensureColumn = (table: string, name: string, definition: string) => {
-    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!columns.some((column) => column.name === name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
-  };
+  const ensureColumn = (table: string, name: string, definition: string) => addColumn(db, table, name, definition);
   ensureColumn("projects", "review_policy", "TEXT NOT NULL DEFAULT '{\"mode\":\"substantive\",\"skipTaskClasses\":[\"mechanical\",\"planning\",\"research\"]}'");
   ensureColumn("projects", "routing_overrides", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn("projects", "prompt_profile", "TEXT NOT NULL DEFAULT '{\"implementationAddendum\":null,\"reviewAddendum\":null,\"researchAddendum\":null}'");
@@ -201,6 +302,10 @@ export class Store {
       const sql = readFileSync(join(HERE, migration.file), "utf8");
       this.tx(() => {
         this.db.exec(sql);
+        for (const [table, columns] of Object.entries(migration.columns)) {
+          for (const [name, definition] of Object.entries(columns)) addColumn(this.db, table, name, definition);
+        }
+        for (const index of migration.indexes) this.db.exec(index);
         this.db.prepare("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'").run(String(migration.version));
       });
       version = migration.version;
