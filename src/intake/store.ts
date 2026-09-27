@@ -13,8 +13,8 @@ import type { ExecutionPlan } from "../domain/plan.ts";
 import { REVIEW_PRESETS, type ReviewPreset } from "../review/policy.ts";
 import { fromJson, nowIso, toJson, type Row } from "../store/db.ts";
 import type { Records } from "../store/records.ts";
-import type { ProjectType, ReviewChoice } from "../domain/project-policy.ts";
-import { PROJECT_TYPES, REVIEW_CHOICES } from "../domain/project-policy.ts";
+import type { ProjectGovernance, ProjectType, ReviewChoice } from "../domain/project-policy.ts";
+import { evaluateProjectReadiness, PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES } from "../domain/project-policy.ts";
 import {
   BRIEF_STATES,
   BRIEF_TRANSITIONS,
@@ -42,6 +42,46 @@ export const DEFAULT_QUALITY: QualitySettings = { reviewPreset: null, checks: []
 export const DEFAULT_OPERATIONS: OperationalPreferences = {
   ci: "off", deployment: "off", monitoring: "off", scheduling: "manual", delivery: "local_files", notes: null,
 };
+
+export function briefGovernance(brief: ProductBrief): ProjectGovernance {
+  return {
+    projectType: brief.projectType,
+    reviewChoice: brief.reviewChoice,
+    decisionState: brief.governanceDecisionId ? "confirmed" : "unresolved",
+    decisionId: brief.governanceDecisionId,
+    policyVersion: PROJECT_POLICY_VERSION,
+    version: brief.governanceVersion,
+  };
+}
+
+/** Keep one open governance question per decision version and field. */
+export function syncGovernanceClarifications(records: Records, briefId: string, actor = "system"): ClarificationItem[] {
+  const brief = getBrief(records, briefId);
+  if (!brief) throw new Error(`Unknown brief ${briefId}`);
+  const readiness = evaluateProjectReadiness(briefGovernance(brief));
+  const prefix = `governance:${brief.governanceVersion}:`;
+  const wanted = new Map(readiness.questions.map((question) => [`${prefix}${question.key}`, question]));
+  const open = listClarifications(records, brief.id, "open");
+  for (const item of open) {
+    if (item.field?.startsWith("governance:") && !wanted.has(item.field)) {
+      records.store.run(
+        "UPDATE clarification_items SET state = 'withdrawn', resolved_at = ? WHERE id = ?",
+        nowIso(), item.id,
+      );
+    }
+  }
+  for (const [field, question] of wanted) {
+    if (open.some((item) => item.field === field)) continue;
+    addClarification(records, {
+      briefId: brief.id,
+      field,
+      question: question.prompt,
+      whyItMatters: "Implementation cannot be submitted or launched until this project-governance decision is explicit.",
+      actor,
+    });
+  }
+  return listClarifications(records, brief.id, "open").filter((item) => item.field?.startsWith("governance:"));
+}
 
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -155,6 +195,10 @@ function toBootstrapRun(row: Row): BootstrapRun {
 export function proposalFingerprint(input: {
   briefId: string;
   briefVersion: number;
+  governanceDecisionId: string | null;
+  governanceVersion: number;
+  projectType: ProjectType | null;
+  reviewChoice: ReviewChoice | null;
   summary: string;
   requirements: { id: string; text: string; mandatory: boolean }[];
   plan: ExecutionPlan;
@@ -162,6 +206,10 @@ export function proposalFingerprint(input: {
   return createHash("sha256").update(JSON.stringify({
     briefId: input.briefId,
     briefVersion: input.briefVersion,
+    governanceDecisionId: input.governanceDecisionId,
+    governanceVersion: input.governanceVersion,
+    projectType: input.projectType,
+    reviewChoice: input.reviewChoice,
     summary: input.summary,
     requirements: input.requirements.map((requirement) => [requirement.id, requirement.text, requirement.mandatory]),
     plan: input.plan,
@@ -281,6 +329,9 @@ export function createBrief(records: Records, input: {
   if (input.reviewChoice !== undefined && input.reviewChoice !== null && !REVIEW_CHOICES.includes(input.reviewChoice)) {
     throw new Error(`Unknown review choice: ${String(input.reviewChoice)}`);
   }
+  const resolvedReviewChoice = input.projectType === "client" && input.reviewChoice == null
+    ? "required"
+    : input.reviewChoice ?? null;
   return records.store.tx(() => {
     records.store.run(
       `INSERT INTO product_briefs(id, title, state, purpose, audience, objective, constraints, unknowns,
@@ -293,7 +344,7 @@ export function createBrief(records: Records, input: {
       toJson(list(input.acceptanceCriteria)),
       toJson({ ...DEFAULT_QUALITY, ...(input.qualitySettings ?? {}) }),
       toJson({ ...DEFAULT_OPERATIONS, ...(input.operationalPreferences ?? {}) }),
-      text(input.targetPath ?? null), input.projectType ?? null, input.reviewChoice ?? null,
+      text(input.targetPath ?? null), input.projectType ?? null, resolvedReviewChoice,
       input.createdBy ?? "local", at, at,
     );
     const brief = getBrief(records, id) as ProductBrief;
@@ -303,7 +354,17 @@ export function createBrief(records: Records, input: {
       body: title, data: { objective: brief.objective, unknowns: brief.unknowns.length },
     });
     records.recordEvent({ kind: "intake.brief_created", data: { briefId: id, title } });
-    return brief;
+    if (input.projectType != null && resolvedReviewChoice != null) {
+      records.recordProjectDecision({
+        briefId: id,
+        projectType: input.projectType,
+        reviewChoice: resolvedReviewChoice,
+        actor: input.createdBy ?? "local",
+        source: "brief-creation",
+      }, 0);
+    }
+    syncGovernanceClarifications(records, id, input.createdBy ?? "local");
+    return getBrief(records, id) as ProductBrief;
   });
 }
 
@@ -430,6 +491,23 @@ export function updateBrief(records: Records, input: {
         setBriefState(records, input.briefId, "CLARIFYING", "Brief revised after acceptance; a fresh proposal is required.", actor);
       }
     }
+    const governanceChanged = patch.projectType !== undefined || patch.reviewChoice !== undefined;
+    if (governanceChanged) {
+      const currentType = updated.projectType;
+      const currentChoice = currentType === "client" && patch.reviewChoice === undefined
+        ? "required"
+        : updated.reviewChoice;
+      if (currentType !== null && currentChoice !== null) {
+        records.recordProjectDecision({
+          briefId: updated.id,
+          projectType: currentType,
+          reviewChoice: currentChoice,
+          actor,
+          source: "brief-update",
+        }, current.governanceVersion);
+      }
+    }
+    syncGovernanceClarifications(records, input.briefId, actor);
     return { brief: getBrief(records, input.briefId) as ProductBrief, changed, invalidated };
   });
 }
@@ -452,11 +530,19 @@ export function addClarification(records: Records, input: {
   const question = text(input.question);
   if (!question) throw new Error("A clarification needs a question.");
   if (!text(input.whyItMatters)) throw new Error("A clarification must say why the answer matters; otherwise it is not a material question.");
+  const field = text(input.field ?? null);
+  if (field) {
+    const existing = records.store.get(
+      "SELECT * FROM clarification_items WHERE brief_id = ? AND field = ? AND state = 'open' ORDER BY asked_at LIMIT 1",
+      input.briefId, field,
+    );
+    if (existing) return toClarification(existing);
+  }
   const id = ids.clarification();
   return records.store.tx(() => {
     records.store.run(
       "INSERT INTO clarification_items(id, brief_id, field, question, why_it_matters, state, asked_at) VALUES(?,?,?,?,?,'open',?)",
-      id, input.briefId, text(input.field ?? null), question, input.whyItMatters.trim(), nowIso(),
+      id, input.briefId, field, question, input.whyItMatters.trim(), nowIso(),
     );
     recordConversation(records, { briefId: input.briefId, kind: "clarification.asked", actor: input.actor ?? "agent", body: question });
     return getClarification(records, id) as ClarificationItem;

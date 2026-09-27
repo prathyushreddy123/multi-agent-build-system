@@ -451,6 +451,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Call mabs_create_brief as soon as the user describes something they want built, before asking questions.",
       "Use mabs_create_brief to record what the user actually said; leave unknown fields empty and list them in unknowns instead of guessing.",
+      "Use mabs_create_brief projectType and reviewChoice only when the user supplied them; MABS will return a structured needs_input question otherwise.",
     ],
     parameters: Type.Object({
       title: Type.String({ description: "Short product name" }),
@@ -461,6 +462,8 @@ export default function mabsExtension(pi: ExtensionAPI) {
       unknowns: Type.Optional(Type.Array(Type.String({ description: "Material things you do not know yet" }))),
       acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
       targetPath: Type.Optional(Type.String({ description: "Directory the user chose, if they named one" })),
+      projectType: Type.Optional(Type.String({ description: "Explicit user choice: personal, client, or other" })),
+      reviewChoice: Type.Optional(Type.String({ description: "Explicit user choice: off, risk, or required; client resolves to required" })),
     }),
     async execute(_toolCallId, params, signal) {
       const output = await run(["brief", "create", `--payload=${JSON.stringify(params)}`, "--by=pi-conversation"], signal);
@@ -492,6 +495,8 @@ export default function mabsExtension(pi: ExtensionAPI) {
         assumptions: Type.Optional(Type.Array(Type.String())),
         acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
         targetPath: Type.Optional(Type.String()),
+        projectType: Type.Optional(Type.String({ description: "Explicit user choice: personal, client, or other" })),
+        reviewChoice: Type.Optional(Type.String({ description: "Explicit user choice: off, risk, or required" })),
         proposedStack: Type.Optional(Type.Object({
           language: Type.Optional(Type.String()),
           runtime: Type.Optional(Type.String()),
@@ -513,6 +518,34 @@ export default function mabsExtension(pi: ExtensionAPI) {
         `--summary=${params.summary}`,
         `--payload=${JSON.stringify(params.patch)}`,
         "--by=pi-conversation",
+      ], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  registerCompactTool({
+    name: "mabs_set_project_governance",
+    label: "Set MABS Project Governance",
+    description: "Record an explicit project type and review choice at the current governance version. Client projects always require review.",
+    promptSnippet: "Record an explicit MABS project type and review decision",
+    promptGuidelines: [
+      "Use mabs_set_project_governance only for choices the user explicitly supplied; never infer personal from a repository name or an existing review preset.",
+      "When mabs_set_project_governance records client, use required review; never retry client with review off.",
+    ],
+    parameters: Type.Object({
+      project: Type.String({ description: "Registered project ID or name" }),
+      projectType: Type.String({ description: "personal, client, or other" }),
+      reviewChoice: Type.Optional(Type.String({ description: "off, risk, or required; omit for client" })),
+      expectedVersion: Type.Number({ description: "Governance version last read" }),
+      decidedBy: Type.String({ description: "Person who supplied the decision" }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const output = await run([
+        "project", "governance", params.project,
+        `--type=${params.projectType}`,
+        ...(params.reviewChoice ? [`--review=${params.reviewChoice}`] : []),
+        `--version=${String(params.expectedVersion)}`,
+        `--by=${params.decidedBy}`,
       ], signal);
       return { content: [{ type: "text", text: output }], details: { output } };
     },
@@ -706,7 +739,10 @@ export default function mabsExtension(pi: ExtensionAPI) {
     label: "Submit Accepted MABS Plan",
     description: "Apply the accepted, validated plan to the registered project. No hand-written plan JSON is involved.",
     promptSnippet: "Apply an accepted product plan to its registered project",
-    promptGuidelines: ["Use mabs_submit_plan only for an accepted plan; if a revision invalidated acceptance, propose and ask again."],
+    promptGuidelines: [
+      "Use mabs_submit_plan only for an accepted plan; if a revision invalidated acceptance, propose and ask again.",
+      "If mabs_submit_plan returns needs_input, ask the supplied governance question and do not claim any task was launched.",
+    ],
     parameters: Type.Object({
       brief: Type.String(),
       project: Type.Optional(Type.String({ description: "Project ID or name, when the brief is not linked yet" })),
@@ -738,7 +774,10 @@ export default function mabsExtension(pi: ExtensionAPI) {
     label: "Submit MABS Task",
     description: "Submit a scoped task to an already registered MABS project. This does not approve push, merge, or deployment.",
     promptSnippet: "Submit an accepted implementation or research task to MABS",
-    promptGuidelines: ["Use mabs_submit_task only after the user has supplied or accepted a concrete objective and acceptance criteria."],
+    promptGuidelines: [
+      "Use mabs_submit_task only after the user has supplied or accepted a concrete objective and acceptance criteria.",
+      "If mabs_submit_task returns needs_input, ask the supplied governance question; do not retry with an inferred personal default.",
+    ],
     parameters: Type.Object({
       project: Type.String({ description: "Registered project ID or name" }),
       title: Type.String(),

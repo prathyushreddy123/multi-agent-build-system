@@ -59,7 +59,7 @@ async function buildWorld(): Promise<World> {
   const baseRevision = await git(repo, ["rev-parse", "HEAD"]);
 
   const records = openRecords();
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "acceptance", repoPath: repo, baseBranch: "main",
     checkCommands: [{ name: "typecheck", command: ["npm", "run", "typecheck"], required: true }],
   });

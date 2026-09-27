@@ -13,7 +13,7 @@ test("project, task, transition, and event state are stored together", (t) => {
   const db = records();
   t.after(() => db.store.close());
 
-  const project = db.createProject({ name: "demo", repoPath: "/tmp/demo" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "demo", repoPath: "/tmp/demo" });
   db.addRequirement(project.id, "REQ-1", "The result must be durable.");
   const task = db.createTask({
     projectId: project.id,
@@ -45,8 +45,8 @@ test("project, task, transition, and event state are stored together", (t) => {
 test("dependencies must exist in the same project", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const one = db.createProject({ name: "one", repoPath: "/tmp/one" });
-  const two = db.createProject({ name: "two", repoPath: "/tmp/two" });
+  const one = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "one", repoPath: "/tmp/one" });
+  const two = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "two", repoPath: "/tmp/two" });
   const upstream = db.createTask({ projectId: one.id, title: "upstream", objective: "first" });
 
   assert.throws(
@@ -62,7 +62,7 @@ test("dependencies must exist in the same project", (t) => {
 test("explicit retries require the current task version", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const project = db.createProject({ name: "retry-demo", repoPath: "/tmp/retry" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "retry-demo", repoPath: "/tmp/retry" });
   const task = db.createTask({ projectId: project.id, title: "retry", objective: "recover" });
   const blocked = db.transition(task.id, "BLOCKED", { blocked_reason: "provider unavailable" });
   assert.throws(() => db.retryTask(task.id, task.recordVersion), /changed since/);
@@ -100,7 +100,7 @@ test("controller lease excludes peers until released or stale", (t) => {
 test("attempts, gates, and revision-bound approvals retain evidence", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const project = db.createProject({ name: "demo", repoPath: "/tmp/demo" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "demo", repoPath: "/tmp/demo" });
   const task = db.createTask({ projectId: project.id, title: "change", objective: "change code" });
   db.transition(task.id, "READY");
   db.claimTask(task.id, "launch-1");
@@ -195,7 +195,7 @@ test("governance decisions need the current version and never infer a project ty
 test("episodes, stages, task state, and events advance in one transaction", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const project = db.createProject({ name: "durable", repoPath: "/tmp/durable" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "durable", repoPath: "/tmp/durable" });
   const task = db.createTask({ projectId: project.id, title: "durable", objective: "persist" });
   const ready = db.transition(task.id, "READY");
 
@@ -281,7 +281,7 @@ test("episodes, stages, task state, and events advance in one transaction", (t) 
 test("stage uniqueness and fencing reject duplicate side effects", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const project = db.createProject({ name: "fencing", repoPath: "/tmp/fencing" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "fencing", repoPath: "/tmp/fencing" });
   const task = db.createTask({ projectId: project.id, title: "fence", objective: "no duplicates" });
   const ready = db.transition(task.id, "READY");
   const episode = db.createExecutionEpisode({
@@ -343,7 +343,7 @@ test("stage uniqueness and fencing reject duplicate side effects", (t) => {
 test("obligations, usage projections, and incidents are keyed by their source", (t) => {
   const db = records();
   t.after(() => db.store.close());
-  const project = db.createProject({ name: "evidence", repoPath: "/tmp/evidence" });
+  const project = db.createProject({ projectType: "personal", reviewChoice: "risk", name: "evidence", repoPath: "/tmp/evidence" });
   const task = db.createTask({ projectId: project.id, title: "fix", objective: "close findings" });
 
   const obligation = db.recordObligation({

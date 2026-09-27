@@ -57,7 +57,7 @@ class SimulatedDeployment implements DeploymentAdapter {
 
 test("all optional operations default disabled or local/manual and preparation has no effects", (t) => {
   const { root, records } = setup(t);
-  const project = records.createProject({ name: "ops-off", repoPath: root });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "ops-off", repoPath: root });
   const status = operationsStatus(records, project.id);
   assert.equal(status.configuration.version, 0);
   assert.equal(status.configuration.config.costs.paidModelApis, "prohibited");
@@ -104,7 +104,7 @@ test("enabled but incomplete targets, schedules, delivery, and costs fail valida
 
 test("external cost configuration requires and consumes an exact approval", (t) => {
   const { root, records } = setup(t);
-  const project = records.createProject({ name: "ops-cost", repoPath: root });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "ops-cost", repoPath: root });
   const config = configured(DEFAULT_OPERATIONS_CONFIG, {
     costs: { externalServices: "proposal_required", monthlyCapUsd: 12, proposalRef: "proposal:vps-small", paidModelApis: "prohibited" },
   });
@@ -131,7 +131,7 @@ test("external cost configuration requires and consumes an exact approval", (t) 
 
 test("versioned configuration generates CI only as a dry-run from registered project checks", (t) => {
   const { root, records } = setup(t);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "ops-ci", repoPath: root,
     checkCommands: [{ name: "test", command: ["python3", "-m", "unittest", "discover", "-s", "tests"], required: true }],
   });
@@ -155,7 +155,7 @@ test("versioned configuration generates CI only as a dry-run from registered pro
 
 test("deployment execution consumes exact approval, records simulated failure, and requires separate recovery approval", async (t) => {
   const { root, records } = setup(t);
-  const project = records.createProject({ name: "ops-deploy", repoPath: root });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "ops-deploy", repoPath: root });
   const config = configured(DEFAULT_OPERATIONS_CONFIG, {
     deployment: { mode: "local", target: "local:acceptance", adapter: "simulated-local", costProposalRef: null },
   });
@@ -209,7 +209,7 @@ test("schema 13 upgrades operation configuration and run evidence additively", (
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const old = new Store(dbPath);
   const records = new Records(old);
-  const project = records.createProject({ name: "schema13-project", repoPath: root });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "schema13-project", repoPath: root });
   old.run("DROP TABLE operation_runs");
   old.run("DROP TABLE operation_configs");
   old.run("UPDATE schema_meta SET value = '13' WHERE key = 'schema_version'");
@@ -228,7 +228,7 @@ test("the real CLI exposes disabled operational status without writing configura
   const dbPath = join(root, "cli.sqlite");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const records = new Records(new Store(dbPath));
-  const project = records.createProject({ name: "ops-cli", repoPath: root });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "ops-cli", repoPath: root });
   records.store.close();
   const output = execFileSync(process.execPath, [join(import.meta.dirname, "..", "src", "cli.ts"), "ops", "status", project.id], {
     encoding: "utf8", env: { ...process.env, MABS_DB_PATH: dbPath, MABS_STATE_DIR: join(root, "state") },

@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 
 import {
   activeAcceptance,
+  briefGovernance,
   createBootstrapRun,
   getBrief,
   getBootstrapRun,
@@ -13,10 +14,10 @@ import {
   setBriefState,
   updateBootstrapRun,
 } from "../intake/store.ts";
+import { requireProjectReadiness } from "../domain/project-policy.ts";
 import { submitAcceptedPlan } from "../intake/service.ts";
 import type { BootstrapRun, BootstrapStep, ProductBrief } from "../intake/types.ts";
 import { resolveApplicationProfiles, scaffoldProfile, type PackageManager, type ProfileKind } from "../profiles/index.ts";
-import { reviewPreset } from "../review/policy.ts";
 import type { Project, Records, Task } from "../store/records.ts";
 
 export const BOOTSTRAP_STEPS = [
@@ -121,10 +122,17 @@ function projectForRun(records: Records, run: BootstrapRun, name: string, target
 export function bootstrapProject(records: Records, input: BootstrapInput): BootstrapResult {
   const brief = getBrief(records, input.briefId);
   if (!brief) throw new Error(`Unknown brief ${input.briefId}`);
+  requireProjectReadiness({ kind: "brief", id: brief.id }, briefGovernance(brief));
   const acceptance = activeAcceptance(records, brief.id);
   if (!acceptance) throw new Error(`Brief ${brief.id} must have an active accepted proposal before bootstrap.`);
   const targetPath = safeTarget(input.targetPath);
   const linkedProject = brief.projectId ? records.getProject(brief.projectId) : null;
+  if (linkedProject) {
+    requireProjectReadiness({ kind: "project", id: linkedProject.id }, linkedProject.governance, linkedProject.reviewPolicy);
+    if (brief.projectType !== linkedProject.governance.projectType || brief.reviewChoice !== linkedProject.governance.reviewChoice) {
+      throw new Error(`Brief ${brief.id} governance conflicts with linked project ${linkedProject.id}; record an explicit compatible decision before bootstrap.`);
+    }
+  }
   if (linkedProject && resolve(linkedProject.repoPath) !== targetPath) {
     throw new Error(
       `Brief ${brief.id} is already linked to ${linkedProject.repoPath}. ` +
@@ -218,14 +226,16 @@ export function bootstrapProject(records: Records, input: BootstrapInput): Boots
     runStep("project_registration", () => {
       project = projectForRun(records, run, projectName, targetPath);
       if (!project) {
-        const preset = brief.qualitySettings.reviewPreset;
         project = records.createProject({
           name: projectName,
           repoPath: targetPath,
           baseBranch: "main",
           goal: brief.objective ?? brief.purpose ?? undefined,
           checkCommands: [],
-          reviewPolicy: preset && preset !== "custom" ? reviewPreset(preset) : reviewPreset("personal"),
+          projectType: brief.projectType,
+          reviewChoice: brief.reviewChoice,
+          governanceActor: input.actor ?? "bootstrap",
+          governanceSource: `brief:${brief.id}`,
         });
       }
       run = updateBootstrapRun(records, run.id, { projectId: project.id });

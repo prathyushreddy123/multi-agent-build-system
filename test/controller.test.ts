@@ -81,7 +81,7 @@ test("controller restart collects one isolated launch without duplication and ch
     rmSync(root, { recursive: true, force: true });
   });
 
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "fixture",
     repoPath: repo,
     reviewPolicy: { mode: "none", skipTaskClasses: [] },

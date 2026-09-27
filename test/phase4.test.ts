@@ -84,7 +84,7 @@ test("schema v8 migrates a legacy config_versions table before indexing project 
 
 test("curator evaluates, approval-gates, activates, applies, and reverts a versioned configuration", async (t) => {
   const { repo, records } = setup(t);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "curated", repoPath: repo,
     reviewPolicy: { mode: "none", skipTaskClasses: [] },
   });
@@ -173,7 +173,7 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
 
 test("curator rejects unsafe, duplicate, stale, and unevaluated proposals", async (t) => {
   const { repo, records } = setup(t);
-  const project = records.createProject({ name: "guarded", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "guarded", repoPath: repo });
   const baseline = projectConfigSnapshot(project);
   const failedTask = records.createTask({ projectId: project.id, title: "observed failure", objective: "supply curator signal" });
   records.updateTaskFields(failedTask.id, { failure_class: "CODE", repairs_used: 1 });
@@ -224,7 +224,10 @@ test("curator rejects unsafe, duplicate, stale, and unevaluated proposals", asyn
   evaluateProposal(records, stale.id);
   const approval = requestActivationApproval(records, stale.id, "Approve only the current binding.");
   records.decideApproval(approval.id, "approved", "owner");
-  records.setProjectReviewPolicy(project.id, { mode: "required", skipTaskClasses: [] });
+  records.recordProjectDecision({
+    projectId: project.id, projectType: "personal", reviewChoice: "required",
+    actor: "owner", source: "test",
+  }, project.governance.version);
   assert.equal(records.getApproval(approval.id)?.state, "invalidated");
   assert.throws(() => records.activateCuratorProposal(stale.id, approval.id, "owner", "must fail"), /stale/);
 });

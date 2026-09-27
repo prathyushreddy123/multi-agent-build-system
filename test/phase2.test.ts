@@ -15,7 +15,12 @@ import { integrateDependencyRevisions } from "../src/workspace/git.ts";
 
 class Phase2Records extends Records {
   override createProject(input: Parameters<Records["createProject"]>[0]) {
-    return super.createProject({ reviewPolicy: { mode: "none", skipTaskClasses: [] }, ...input });
+    return super.createProject({
+      ...input,
+      projectType: "personal",
+      reviewChoice: "off",
+      reviewPolicy: { mode: "none", skipTaskClasses: [] },
+    });
   }
 }
 
@@ -100,7 +105,7 @@ function setup(t: TestContext) {
 
 test("execution-plan validation rejects cycles and overlapping parallel edits, then atomically applies a valid DAG", (t) => {
   const { records } = setup(t);
-  const project = records.createProject({ name: "plan", repoPath: "/tmp/plan" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "plan", repoPath: "/tmp/plan" });
   const cyclic: ExecutionPlan = {
     objective: "bad", mode: "parallel", reason: "test validation", tasks: [
       { key: "a", title: "a", objective: "a", acceptanceCriteria: [], dependsOn: ["b"], executionMode: "parallel", executionReason: "independent", allowedScope: ["src"] },
@@ -167,7 +172,7 @@ test("two projects dispatch independently while global and provider caps hold", 
   const adapters = new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]);
   const projects = ["one", "two"].map((name) => {
     const repo = join(root, name); repoAt(repo);
-    return records.createProject({ name, repoPath: repo });
+    return records.createProject({ projectType: "personal", reviewChoice: "risk", name, repoPath: repo });
   });
   const tasks = projects.map((project, index) => records.createTask({
     projectId: project.id, title: `task-${index}`, objective: "change value", acceptanceCriteria: ["committed"],
@@ -193,7 +198,7 @@ test("two projects dispatch independently while global and provider caps hold", 
 test("task-class policy chooses its evidence-based route unless explicitly overridden", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "review-route"); repoAt(repo);
-  const project = records.createProject({ name: "review-route", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "review-route", repoPath: repo });
   const task = records.createTask({
     projectId: project.id, title: "review", objective: "review the current implementation", acceptanceCriteria: ["findings returned"],
     taskClass: "review", role: "reviewer",
@@ -213,7 +218,7 @@ test("task-class policy chooses its evidence-based route unless explicitly overr
 test("routing rejects a task when a required local tool is unavailable", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "missing-tool"); repoAt(repo);
-  const project = records.createProject({ name: "missing-tool", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "missing-tool", repoPath: repo });
   const task = records.createTask({
     projectId: project.id, title: "needs tool", objective: "use a required tool", acceptanceCriteria: ["done"],
     requiredTools: ["mabs-tool-that-does-not-exist"],
@@ -232,7 +237,7 @@ test("routing rejects a task when a required local tool is unavailable", async (
 test("controller rejects worker edits outside the declared repository scope", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "scoped"); repoAt(repo);
-  const project = records.createProject({ name: "scoped", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "scoped", repoPath: repo });
   const task = records.createTask({
     projectId: project.id, title: "scoped change", objective: "only edit docs", acceptanceCriteria: ["docs updated"],
     allowedScope: ["docs"],
@@ -252,7 +257,7 @@ test("controller rejects worker edits outside the declared repository scope", as
 test("mechanical tasks run registered gates without a model worker", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "mechanical"); repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "mechanical", repoPath: repo,
     checkCommands: [{ name: "check", command: [process.execPath, "-e", "process.exit(0)"], required: true }],
   });
@@ -275,7 +280,7 @@ test("mechanical tasks run registered gates without a model worker", async (t) =
 test("machine backpressure leaves work READY and reports the constraint", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "backpressure"); repoAt(repo);
-  const project = records.createProject({ name: "backpressure", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "backpressure", repoPath: repo });
   const task = records.createTask({ projectId: project.id, title: "wait", objective: "wait for capacity", acceptanceCriteria: ["done"] });
   const codex = new Phase2Adapter("codex");
   const controller = new Controller(records, {
@@ -296,7 +301,7 @@ test("fair scheduling gives the next slot to the less-dispatched project", async
   const adapters = new Map<string, WorkerAdapter>([["codex", codex]]);
   const projects = ["fair-one", "fair-two"].map((name) => {
     const repo = join(root, name); repoAt(repo);
-    return records.createProject({ name, repoPath: repo });
+    return records.createProject({ projectType: "personal", reviewChoice: "risk", name, repoPath: repo });
   });
   for (const project of projects) {
     records.createTask({ projectId: project.id, title: `${project.name}-1`, objective: "change value", acceptanceCriteria: ["done"] });
@@ -320,7 +325,7 @@ test("fair scheduling gives the next slot to the less-dispatched project", async
 test("quota failure reroutes at an attempt boundary without spending repair budget", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "repo"); repoAt(repo);
-  const project = records.createProject({ name: "reroute", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "reroute", repoPath: repo });
   const task = records.createTask({ projectId: project.id, title: "fallback", objective: "change value", acceptanceCriteria: ["committed"] });
   const codex = new Phase2Adapter("codex"); codex.failWithQuota = true;
   const claude = new Phase2Adapter("claude");

@@ -22,6 +22,8 @@ Classify each request before acting:
 
 If the user asks to build a new product, call `mabs_create_brief` immediately with what is known. A repository is not required. Leave unknown facts unknown.
 
+Project type is a durable user decision, not a review-preset inference. Record `personal`, `client`, or `other` only when the user supplies it. Personal and other projects also need an explicit `off`, `risk`, or `required` review choice; client projects resolve to mandatory independent review and cannot choose off. If a MABS tool returns `outcome: "needs_input"`, ask the included question and do not submit, bootstrap, or imply that implementation started.
+
 ## Assess before recording, only when asked
 
 Skip this stage unless the user asks whether the idea is worth building, or invokes `/mabs-assess`. Most requests do not need it, and running it uninvited slows down a user who already knows what they want.
@@ -83,5 +85,6 @@ After acceptance:
 - use `mabs_bootstrap_project` when available to prepare the user-selected local directory safely;
 - use `mabs_submit_plan` to apply the stored validated plan without asking the user to author JSON;
 - use `mabs_get_product` to report pending decisions, work, outputs, and next actions;
+- resolve any structured governance `needs_input` response with the user and persist it before bootstrap or submission;
 - do not repeatedly ask permission for routine actions already inside the accepted local implementation boundary;
 - do ask for any separate approval required for external release, deployment, spending, credentials, or destructive replacement.

@@ -151,7 +151,7 @@ test("building, clicking through, and dismissing popup screens never calls Herdr
   const value = fixture();
   const fake = fakeHerdr(value.root);
   try {
-    const project = value.records.createProject({ name: "project", repoPath: join(value.root, "repo") });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: join(value.root, "repo") });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     const actions = buildLauncherScreen(value.records);
     const projects = activateLauncherChoice(value.records, actions, "action:logs", "mouse").screen;
@@ -168,8 +168,8 @@ test("building, clicking through, and dismissing popup screens never calls Herdr
 test("multi-project scope is an explicit stable-ID choice rather than a label inference", () => {
   const value = fixture();
   try {
-    const one = value.records.createProject({ name: "same label one", repoPath: join(value.root, "one") });
-    const two = value.records.createProject({ name: "same label two", repoPath: join(value.root, "two") });
+    const one = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "same label one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "same label two", repoPath: join(value.root, "two") });
     const screen = buildLauncherScreen(value.records, { action: "tasks" });
     assert.equal(screen.step, "project");
     assert.deepEqual(screen.choices.map((choice) => choice.id).sort(), [`project:${one.id}`, `project:${two.id}`].sort());
@@ -183,7 +183,7 @@ test("multi-project scope is an explicit stable-ID choice rather than a label in
 test("stale project and task context returns to explicit choices", () => {
   const value = fixture();
   try {
-    const project = value.records.createProject({ name: "live", repoPath: join(value.root, "repo") });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "live", repoPath: join(value.root, "repo") });
     const task = value.records.createTask({ projectId: project.id, title: "duplicate title", objective: "test" });
 
     const staleProject = buildLauncherScreen(value.records, { action: "logs", projectId: "prj_stale", taskId: task.id });
@@ -202,7 +202,7 @@ test("stale project and task context returns to explicit choices", () => {
 test("mouse and keyboard activation produce identical scoped actions", () => {
   const value = fixture();
   try {
-    const project = value.records.createProject({ name: "project", repoPath: join(value.root, "repo") });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: join(value.root, "repo") });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     const actionScreen = buildLauncherScreen(value.records);
 
@@ -232,8 +232,8 @@ test("mouse and keyboard activation produce identical scoped actions", () => {
 test("a task from another project is never inferred from its title or stale ID", () => {
   const value = fixture();
   try {
-    const one = value.records.createProject({ name: "one", repoPath: join(value.root, "one") });
-    const two = value.records.createProject({ name: "two", repoPath: join(value.root, "two") });
+    const one = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "two", repoPath: join(value.root, "two") });
     const oneTask = value.records.createTask({ projectId: one.id, title: "same", objective: "one" });
     const twoTask = value.records.createTask({ projectId: two.id, title: "same", objective: "two" });
 
@@ -303,7 +303,7 @@ test("Tasks and Logs own separate rail-free tabs in the invoking workspace", asy
     process.env.HERDR_WORKSPACE_ID = "w1";
     process.env.HERDR_TAB_ID = "w1:t0";
     process.env.HERDR_PANE_ID = "w1:p0";
-    const project = value.records.createProject({ name: "project", repoPath: value.root });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: value.root });
     const task = value.records.createTask({ projectId: project.id, title: "selected", objective: "test" });
     const before = JSON.stringify({ task: value.records.getTask(task.id), events: value.records.listEvents(task.id) });
     const tasks = await dispatchLauncherAction(
@@ -371,7 +371,7 @@ test("a generated tool-view command starts from a distinct project checkout", as
     process.env.HERDR_PANE_ID = "w1:p0";
     const projectRepo = join(value.root, "unrelated-project");
     mkdirSync(projectRepo, { recursive: true });
-    const project = value.records.createProject({ name: "other checkout", repoPath: projectRepo });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "other checkout", repoPath: projectRepo });
     value.records.createTask({ projectId: project.id, title: "visible from absolute CLI", objective: "test" });
 
     const opened = await dispatchLauncherAction(
@@ -477,8 +477,8 @@ test("tool ownership and control requests do not leak across workspaces", async 
 test("stale or cross-workspace control data is rejected", () => {
   const value = fixture();
   try {
-    const one = value.records.createProject({ name: "one", repoPath: join(value.root, "one") });
-    const two = value.records.createProject({ name: "two", repoPath: join(value.root, "two") });
+    const one = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "two", repoPath: join(value.root, "two") });
     const otherTask = value.records.createTask({ projectId: two.id, title: "private to two", objective: "test" });
     const mismatched = requestToolView("w1", "logs", { projectId: one.id, taskId: otherTask.id }).request;
     const frame = renderToolView(value.records, mismatched);
@@ -572,7 +572,7 @@ test("Code opens only the selected live worktree and never substitutes the proje
     mkdirSync(projectRepo, { recursive: true });
     mkdirSync(worktree, { recursive: true });
     writeFileSync(join(worktree, ".git"), "gitdir: /tmp/example\n");
-    const project = value.records.createProject({ name: "project", repoPath: projectRepo });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: projectRepo });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     value.records.updateTaskFields(task.id, { worktree_path: worktree });
 
@@ -615,7 +615,7 @@ test("Code routes an ambiguous multi-project selection only to the chosen live w
       mkdirSync(repoPath);
       mkdirSync(worktreePath);
       writeFileSync(join(worktreePath, ".git"), `gitdir: /tmp/${name}\n`);
-      const project = value.records.createProject({ name: `duplicate label ${name}`, repoPath });
+      const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: `duplicate label ${name}`, repoPath });
       const task = value.records.createTask({ projectId: project.id, title: "duplicate task", objective: name });
       value.records.updateTaskFields(task.id, { worktree_path: worktreePath });
       return { project, task, repoPath, worktreePath };
@@ -677,7 +677,7 @@ test("Windows-hosted VS Code receives an explicit WSL remote address", () => {
 test("Code reports a missing live worktree instead of opening a revision or base checkout", async () => {
   const value = fixture();
   try {
-    const project = value.records.createProject({ name: "project", repoPath: join(value.root, "project") });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: join(value.root, "project") });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     value.records.updateTaskFields(task.id, {
       worktree_path: join(value.root, "gone"),
@@ -703,7 +703,7 @@ test("Code binds the selected attempt worktree and passes a Unicode file as one 
     mkdirSync(join(attemptWorktree, "src"));
     writeFileSync(join(attemptWorktree, relative), "const unchanged = true;\n");
 
-    const project = value.records.createProject({ name: "project", repoPath: projectRepo });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: projectRepo });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     value.records.updateTaskFields(task.id, { worktree_path: taskWorktree });
     const attempt = value.records.startAttempt({
@@ -743,7 +743,7 @@ test("Code rejects paths outside the selected live worktree before launching", a
     const worktree = join(value.root, "worktree");
     mkdirSync(worktree);
     writeFileSync(join(worktree, ".git"), "gitdir: /tmp/example\n");
-    const project = value.records.createProject({ name: "project", repoPath: join(value.root, "project") });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: join(value.root, "project") });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     value.records.updateTaskFields(task.id, { worktree_path: worktree });
     const screen = buildLauncherScreen(value.records, { action: "code", projectId: project.id, taskId: task.id });
@@ -767,7 +767,7 @@ test("a removed selected attempt never falls back to the task or project checkou
     mkdirSync(projectRepo);
     mkdirSync(taskWorktree);
     writeFileSync(join(taskWorktree, ".git"), "gitdir: /tmp/task\n");
-    const project = value.records.createProject({ name: "project", repoPath: projectRepo });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: projectRepo });
     const task = value.records.createTask({ projectId: project.id, title: "task", objective: "test" });
     value.records.updateTaskFields(task.id, { worktree_path: taskWorktree });
     const attempt = value.records.startAttempt({

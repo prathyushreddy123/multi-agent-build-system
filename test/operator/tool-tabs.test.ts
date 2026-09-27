@@ -315,8 +315,8 @@ test("a running view follows the control channel without any command being reinj
   const value = fixture();
   const fake = fakeHerdr(value.root);
   try {
-    const one = value.records.createProject({ name: "one", repoPath: join(value.root, "one") });
-    const two = value.records.createProject({ name: "two", repoPath: join(value.root, "two") });
+    const one = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "two", repoPath: join(value.root, "two") });
     value.records.createTask({ projectId: one.id, title: "only in one", objective: "test" });
     value.records.createTask({ projectId: two.id, title: "only in two", objective: "test" });
     requestToolView("w1", "tasks", { projectId: one.id, taskId: null });
@@ -360,7 +360,7 @@ test("a running view follows the control channel without any command being reinj
 test("each rendered surface is rail-free and offers only closing itself", () => {
   const value = fixture();
   try {
-    const project = value.records.createProject({ name: "project", repoPath: value.root });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: value.root });
     const task = value.records.createTask({ projectId: project.id, title: "selected", objective: "test" });
     const tasksFrame = renderToolView(
       value.records,
@@ -392,8 +392,8 @@ test("each rendered surface is rail-free and offers only closing itself", () => 
 test("stale channel data renders an explanation instead of another project's records", () => {
   const value = fixture();
   try {
-    const one = value.records.createProject({ name: "one", repoPath: join(value.root, "one") });
-    const two = value.records.createProject({ name: "two", repoPath: join(value.root, "two") });
+    const one = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "one", repoPath: join(value.root, "one") });
+    const two = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "two", repoPath: join(value.root, "two") });
     const privateTask = value.records.createTask({ projectId: two.id, title: "private", objective: "test" });
 
     const goneProject = renderToolView(value.records, {
@@ -424,7 +424,7 @@ test("opening, following, and closing a tool view changes no task record", async
   const value = fixture();
   const fake = fakeHerdr(value.root);
   try {
-    const project = value.records.createProject({ name: "project", repoPath: value.root });
+    const project = value.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "project", repoPath: value.root });
     const task = value.records.createTask({ projectId: project.id, title: "worker task", objective: "test" });
     const before = JSON.stringify({
       task: value.records.getTask(task.id),
