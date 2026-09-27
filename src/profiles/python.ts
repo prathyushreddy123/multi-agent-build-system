@@ -1,19 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
 
 import type { GateSpec } from "../store/records.ts";
 import { checkName, findNamedFiles, relativeRoot } from "./files.ts";
-import type { ApplicationProfile, ComponentProfile, EnvironmentPlan, PackageManager, ProfileSelection, ScaffoldResult } from "./types.ts";
+import { resolveTool } from "./tools.ts";
+import type { ApplicationProfile, ComponentProfile, EnvironmentPlan, PackageManager, ProfileSelection, ScaffoldResult, ToolRequirement } from "./types.ts";
 
 const VERSION = "python-profile-v1";
 
 function read(path: string): string {
   try { return readFileSync(path, "utf8"); } catch { return ""; }
-}
-
-function executable(name: string): boolean {
-  return spawnSync(name, ["--version"], { stdio: "ignore" }).status === 0;
 }
 
 function pythonManager(root: string, manifestText: string): { manager: PackageManager; lockfile: string | null } {
@@ -47,9 +43,56 @@ function environment(rootPath: string, manager: PackageManager, runtimeVersion: 
     runtime: `python${runtimeVersion ? ` ${runtimeVersion}` : ""}`,
     versionFile: existsSync(join(rootPath, ".python-version")) ? ".python-version" : null,
     setupCommands,
-    missingPrerequisites: executable(tool) ? [] : [`${tool} is required but was not found on PATH.`],
+    missingPrerequisites: resolveTool(rootPath, tool).found ? [] : [`${tool} is required but was not found on PATH.`],
     notes: ["Setup commands are instructions only; bootstrap never modifies a shared global Python environment."],
   };
+}
+
+const STANDARD_LIBRARY_MODULES = new Set(["compileall", "unittest"]);
+
+function requirementsFor(checks: GateSpec[], manager: PackageManager): ToolRequirement[] {
+  const merged = new Map<string, ToolRequirement>();
+  const add = (requirement: Omit<ToolRequirement, "checks">, check: string): void => {
+    const key = `${requirement.kind}:${requirement.tool}`;
+    const existing = merged.get(key);
+    if (existing) {
+      if (!existing.checks.includes(check)) existing.checks.push(check);
+      return;
+    }
+    merged.set(key, { ...requirement, checks: [check] });
+  };
+
+  for (const check of checks) {
+    const command = check.command;
+    let offset = 0;
+    if (["uv", "poetry", "pipenv"].includes(command[0] ?? "")) {
+      add({ tool: command[0] as string, kind: "package_manager", declaredIn: null, localPath: null }, check.name);
+      offset = 2; // <manager> run <actual command>
+    }
+    const tool = command[offset];
+    if (!tool) continue;
+    if (tool === "python3" || tool === "python") {
+      add({ tool, kind: "runtime", declaredIn: null, localPath: null }, check.name);
+      const moduleFlag = command[offset + 1];
+      const module = command[offset + 2];
+      if (moduleFlag === "-m" && module && !STANDARD_LIBRARY_MODULES.has(module)) {
+        add({
+          tool: module,
+          kind: "project_module",
+          declaredIn: "Python project dependencies",
+          localPath: `.venv/**/site-packages/${module.replaceAll(".", "/")}`,
+        }, check.name);
+      }
+    } else {
+      add({
+        tool,
+        kind: "project_local",
+        declaredIn: "Python project dependencies",
+        localPath: `.venv/bin/${tool}`,
+      }, check.name);
+    }
+  }
+  return [...merged.values()].sort((left, right) => left.tool.localeCompare(right.tool));
 }
 
 function checksFor(rootPath: string, root: string, manifestText: string, manager: PackageManager): GateSpec[] {
@@ -89,6 +132,7 @@ function component(repoPath: string, manifest: string): ComponentProfile {
   const requires = manifestText.match(/requires-python\s*=\s*["']([^"']+)/)?.[1] ?? null;
   const runtimeVersion = versionFile || requires;
   const env = environment(rootPath, managed.manager, runtimeVersion);
+  const checks = checksFor(rootPath, root, manifestText, managed.manager);
   const srcRoot = existsSync(join(rootPath, "src")) ? "src" : ".";
   const detectedEntries = findNamedFiles(rootPath, ["cli.py"], 3).map((path) => root === "." ? path : `${root}/${path}`);
   return {
@@ -102,7 +146,8 @@ function component(repoPath: string, manifest: string): ComponentProfile {
     lockfile: managed.lockfile ? (root === "." ? managed.lockfile : `${root}/${managed.lockfile}`) : null,
     evidence: [manifest, ...(managed.lockfile ? [managed.lockfile] : []), ...(versionFile ? [".python-version"] : [])],
     environment: env,
-    checks: checksFor(rootPath, root, manifestText, managed.manager),
+    checks,
+    toolRequirements: requirementsFor(checks, managed.manager),
     artifacts: {
       entryPoints: detectedEntries.length > 0 ? detectedEntries : [root === "." ? srcRoot : `${root}/${srcRoot}`],
       buildOutputs: [root === "." ? "dist/" : `${root}/dist/`],
