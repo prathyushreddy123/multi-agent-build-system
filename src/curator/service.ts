@@ -15,6 +15,8 @@ import {
 import { DEFAULT_POLICY } from "../domain/policy.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES } from "../routing/router.ts";
 import type { Records } from "../store/records.ts";
+import { summarizeDurations, summarizeUsage } from "../usage/summary.ts";
+import type { DurationSubtotal, UsageSubtotal } from "../usage/types.ts";
 import type { CuratorEvaluation, CuratorProposal, CuratorSignals, EvaluationCase, EvaluationMetrics, ProposalInput } from "./types.ts";
 
 export const CURATOR_SUITE_VERSION = "policy-replay-v1";
@@ -191,20 +193,31 @@ export async function createProposal(records: Records, input: ProposalInput): Pr
   }
 }
 
-function reportedUsage(records: Records, projectId: string): { input: number | null; output: number | null } {
+/**
+ * Known provider-reported usage for a project, normalized once so the curator
+ * and the routing report agree. A cohort with some unmeasured attempts keeps its
+ * known subtotal and states its coverage instead of collapsing to null, and a
+ * cohort with no measurement at all stays null instead of becoming zero.
+ */
+function reportedUsage(records: Records, projectId: string): UsageSubtotal {
   const attempts = records.listTasks({ projectId }).flatMap((task) => records.listAttempts(task.id));
-  if (attempts.length === 0) return { input: null, output: null };
-  const values = attempts.map((attempt) => ({
-    input: attempt.usage?.input_tokens,
-    output: attempt.usage?.output_tokens,
-  }));
-  if (values.some((value) => typeof value.input !== "number" || typeof value.output !== "number")) {
-    return { input: null, output: null };
-  }
-  return {
-    input: values.reduce((sum, value) => sum + Number(value.input), 0),
-    output: values.reduce((sum, value) => sum + Number(value.output), 0),
-  };
+  return summarizeUsage(attempts.map((attempt) => ({
+    attemptId: attempt.id,
+    adapter: attempt.adapter,
+    raw: attempt.usage,
+    reportedModel: attempt.reportedModel,
+  })));
+}
+
+/** Recorded worker elapsed time, including failed attempts. Never wall-clock lead time. */
+function observedDuration(records: Records, projectId: string): DurationSubtotal {
+  const attempts = records.listTasks({ projectId }).flatMap((task) => records.listAttempts(task.id));
+  return summarizeDurations(attempts.map((attempt) => ({
+    attemptId: attempt.id,
+    startedAt: attempt.startedAt,
+    endedAt: attempt.endedAt,
+    state: attempt.state,
+  })));
 }
 
 function policyCases(baseline: ProjectConfigSnapshot, candidate: ProjectConfigSnapshot): EvaluationCase[] {
@@ -262,9 +275,15 @@ function policyCases(baseline: ProjectConfigSnapshot, candidate: ProjectConfigSn
   return cases;
 }
 
-function metrics(records: Records, projectId: string, config: ProjectConfigSnapshot, baseline: ProjectConfigSnapshot, caseCount: number): EvaluationMetrics {
+function metrics(
+  records: Records,
+  projectId: string,
+  config: ProjectConfigSnapshot,
+  baseline: ProjectConfigSnapshot,
+  caseCount: number,
+  usage: UsageSubtotal,
+): EvaluationMetrics {
   const tasks = records.listTasks({ projectId }).slice(0, 20);
-  const usage = reportedUsage(records, projectId);
   const routingChanges = TASK_CLASSES.filter((taskClass) =>
     JSON.stringify(config.routingOverrides[taskClass] ?? null) !== JSON.stringify(baseline.routingOverrides[taskClass] ?? null),
   ).length;
@@ -279,8 +298,10 @@ function metrics(records: Records, projectId: string, config: ProjectConfigSnaps
     requiredGates: config.checkCommands.filter((gate) => gate.required).length,
     routingChanges,
     promptCharacters: Object.values(config.promptProfile).reduce((sum, value) => sum + (value?.length ?? 0), 0),
-    reportedInputTokens: usage.input,
-    reportedOutputTokens: usage.output,
+    // Known subtotals. `usageCoverage` in the evaluation evidence states how many
+    // attempts these figures actually cover.
+    reportedInputTokens: usage.knownInputEvents,
+    reportedOutputTokens: usage.knownOutputTokens,
   };
 }
 
@@ -297,8 +318,10 @@ export function evaluateProposal(records: Records, proposalId: string): CuratorE
   if (!proposal.diffPath || !existsSync(proposal.diffPath)) errors.push("Proposal Git diff evidence is unavailable.");
   const cases = policyCases(baseline, version.payload);
   for (const failed of cases.filter((item) => !item.passed)) errors.push(`${failed.id}: expected ${failed.expected}, got ${failed.candidateOutcome}.`);
-  const baselineMetrics = metrics(records, project.id, baseline, baseline, cases.length);
-  const candidateMetrics = metrics(records, project.id, version.payload, baseline, cases.length);
+  const usage = reportedUsage(records, project.id);
+  const duration = observedDuration(records, project.id);
+  const baselineMetrics = metrics(records, project.id, baseline, baseline, cases.length, usage);
+  const candidateMetrics = metrics(records, project.id, version.payload, baseline, cases.length, usage);
   const status = errors.length === 0 ? "passed" : "failed";
   const evidencePath = join(artifactDir("curator", project.id, proposal.id), "evaluation.json");
   writeFileSync(evidencePath, JSON.stringify({
@@ -307,6 +330,8 @@ export function evaluateProposal(records: Records, proposalId: string): CuratorE
     status,
     errors,
     interpretation: "Policy replay validates safety and compares observable historical metrics. It does not claim candidate product-task quality or subscription spend.",
+    usageCoverage: usage,
+    observedDuration: duration,
     baselineMetrics,
     candidateMetrics,
     cases,
