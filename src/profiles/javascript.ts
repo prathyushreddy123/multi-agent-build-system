@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
 
 import type { GateSpec } from "../store/records.ts";
 import { checkName, findNamedFiles, relativeRoot } from "./files.ts";
-import type { ApplicationProfile, ComponentProfile, EnvironmentPlan, PackageManager, ProfileSelection, ScaffoldResult } from "./types.ts";
+import { providingPackage, resolveTool, scriptTools } from "./tools.ts";
+import type { ApplicationProfile, ComponentProfile, EnvironmentPlan, PackageManager, ProfileSelection, ScaffoldResult, ToolRequirement } from "./types.ts";
 
 const VERSION = "javascript-typescript-profile-v1";
 const JS_MANAGERS: PackageManager[] = ["npm", "pnpm", "yarn", "bun"];
@@ -20,10 +20,6 @@ interface PackageJson {
 
 function parsePackage(path: string): PackageJson | null {
   try { return JSON.parse(readFileSync(path, "utf8")) as PackageJson; } catch { return null; }
-}
-
-function executable(name: string): boolean {
-  return spawnSync(name, ["--version"], { stdio: "ignore" }).status === 0;
 }
 
 function managerFor(rootPath: string, pkg: PackageJson): { manager: PackageManager; lockfile: string | null; evidence: string[] } {
@@ -57,8 +53,8 @@ function environment(rootPath: string, manager: PackageManager, runtimeVersion: 
         ? ["yarn", "install", ...(hasLock ? ["--immutable"] : [])]
         : ["bun", "install", ...(hasLock ? ["--frozen-lockfile"] : [])];
   const missing = [
-    ...(executable("node") ? [] : ["node is required but was not found on PATH."]),
-    ...(executable(manager) ? [] : [`${manager} is selected but was not found on PATH.`]),
+    ...(resolveTool(rootPath, "node").found ? [] : ["node is required but was not found on PATH."]),
+    ...(resolveTool(rootPath, manager).found ? [] : [`${manager} is selected but was not found on PATH.`]),
     ...(hasDependencies && !existsSync(join(rootPath, "node_modules"))
       ? [`Package dependencies are not installed; run: ${install.join(" ")}.`]
       : []),
@@ -70,6 +66,51 @@ function environment(rootPath: string, manager: PackageManager, runtimeVersion: 
     missingPrerequisites: missing,
     notes: ["Setup commands are instructions only; bootstrap does not install packages or modify global runtimes."],
   };
+}
+
+/** Manifest field that declares the package providing a tool, when it does. */
+function declaredIn(pkg: PackageJson, tool: string): string | null {
+  const packageName = providingPackage(tool);
+  if (pkg.devDependencies?.[packageName] !== undefined) return `devDependencies.${packageName}`;
+  if (pkg.dependencies?.[packageName] !== undefined) return `dependencies.${packageName}`;
+  return null;
+}
+
+/**
+ * Tools the registered checks need. A check command is `npm run typecheck`, so
+ * the package manager is only the first requirement; the script body names the
+ * compiler that has to be installed under this component root.
+ */
+function toolRequirements(pkg: PackageJson, manager: PackageManager, checkNames: Map<string, string>): ToolRequirement[] {
+  const merged = new Map<string, ToolRequirement>();
+  const add = (requirement: Omit<ToolRequirement, "checks">, check: string): void => {
+    const existing = merged.get(requirement.tool);
+    if (existing) {
+      if (!existing.checks.includes(check)) existing.checks.push(check);
+      return;
+    }
+    merged.set(requirement.tool, { ...requirement, checks: [check] });
+  };
+
+  for (const [check, script] of checkNames) {
+    add({ tool: "node", kind: "runtime", declaredIn: pkg.engines?.node ? "engines.node" : null, localPath: null }, check);
+    add({ tool: manager, kind: "package_manager", declaredIn: pkg.packageManager ? "packageManager" : null, localPath: null }, check);
+    for (const tool of scriptTools(script)) {
+      if (tool === "node" || tool === manager) continue;
+      const declaration = declaredIn(pkg, tool);
+      if (tool === "npx" || tool === "npm" || tool === "pnpm" || tool === "yarn" || tool === "bun") {
+        add({ tool, kind: "package_manager", declaredIn: null, localPath: null }, check);
+        continue;
+      }
+      add(
+        declaration === null
+          ? { tool, kind: "system", declaredIn: null, localPath: null }
+          : { tool, kind: "project_local", declaredIn: declaration, localPath: `node_modules/.bin/${tool}` },
+        check,
+      );
+    }
+  }
+  return [...merged.values()].sort((left, right) => left.tool.localeCompare(right.tool));
 }
 
 function component(repoPath: string, manifest: string): ComponentProfile | null {
@@ -84,8 +125,10 @@ function component(repoPath: string, manifest: string): ComponentProfile | null 
   const env = environment(rootPath, managed.manager, runtimeVersion, managed.lockfile !== null, hasDependencies);
   const cwd = root === "." ? undefined : root;
   const checks: GateSpec[] = [];
+  const checkScripts = new Map<string, string>();
   for (const name of ["format", "lint", "typecheck", "test", "build"] as const) {
-    if (typeof pkg.scripts?.[name] !== "string" || !pkg.scripts[name]?.trim()) continue;
+    const script = pkg.scripts?.[name];
+    if (typeof script !== "string" || !script.trim()) continue;
     checks.push({
       name: checkName(root, name),
       command: runScript(managed.manager, name),
@@ -93,6 +136,7 @@ function component(repoPath: string, manifest: string): ComponentProfile | null 
       timeoutMs: name === "test" || name === "build" ? 15 * 60_000 : 10 * 60_000,
       ...(cwd ? { cwd } : {}),
     });
+    checkScripts.set(checkName(root, name), script);
   }
   const typescript = existsSync(join(rootPath, "tsconfig.json")) || Boolean(pkg.devDependencies?.typescript || pkg.dependencies?.typescript);
   return {
@@ -107,6 +151,7 @@ function component(repoPath: string, manifest: string): ComponentProfile | null 
     evidence: [manifest, ...managed.evidence, ...(typescript ? ["TypeScript manifest evidence"] : [])],
     environment: env,
     checks,
+    toolRequirements: toolRequirements(pkg, managed.manager, checkScripts),
     artifacts: {
       entryPoints: [root === "." ? (typescript ? "src/cli.ts" : "src/cli.js") : `${root}/${typescript ? "src/cli.ts" : "src/cli.js"}`],
       buildOutputs: pkg.scripts?.build ? [root === "." ? "dist/" : `${root}/dist/`] : [],
