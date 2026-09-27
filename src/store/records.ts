@@ -1730,7 +1730,7 @@ export class Records {
       if (Number(result.changes) !== 1) throw new Error(`Admission lease ${id} is no longer reservable.`);
       const stageResult = this.store.db.prepare(
         "UPDATE stage_runs SET state = 'launching' WHERE id = ? AND state = 'reserved'",
-      ).run(lease.stage_run_id);
+      ).run(String(lease.stage_run_id));
       if (Number(stageResult.changes) !== 1) throw new Error(`Stage ${String(lease.stage_run_id)} is no longer reserved.`);
       const stage = this.store.get("SELECT * FROM stage_runs WHERE id = ?", lease.stage_run_id) as Row;
       const task = this.getTask(stage.task_id as string) as Task;
