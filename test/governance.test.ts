@@ -38,6 +38,36 @@ test("MABS is explicitly personal with risk review without making personal a glo
   assert.equal(db.readProjectReadiness(mabs.id).ready, true);
 });
 
+test("a governance decision preserves compatible explicit review behavior", (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  const configured = {
+    ...reviewPreset("personal"),
+    preset: "custom" as const,
+    scope: "release" as const,
+    capacityAction: "blocked" as const,
+    reviewerRoute: "same_provider_fresh_context" as const,
+    riskRules: [{ id: "all-code", reason: "Review every code change.", always: true }],
+  };
+
+  const project = db.createProject({
+    name: "custom-personal",
+    repoPath: "/tmp/custom-personal",
+    projectType: "personal",
+    reviewChoice: "risk",
+    reviewPolicy: configured,
+  });
+
+  assert.equal(project.reviewPolicy.trigger, "risk");
+  assert.equal(project.reviewPolicy.scope, "release");
+  assert.equal(project.reviewPolicy.capacityAction, "blocked");
+  assert.equal(project.reviewPolicy.reviewerRoute, "same_provider_fresh_context");
+  assert.deepEqual(project.reviewPolicy.riskRules, configured.riskRules);
+  assert.equal(db.readProjectReadiness(project.id).ready, true);
+  const decision = db.getProjectDecision(project.governance.decisionId as string);
+  assert.deepEqual(decision?.resolvedPolicy.reviewPolicy, project.reviewPolicy);
+});
+
 test("missing governance is structured needs-input and creates no task", (t) => {
   const db = records();
   t.after(() => db.store.close());

@@ -212,7 +212,7 @@ export function acceptPlan(records: Records, input: {
   const proposal = getProposal(records, input.proposalId);
   if (!proposal || proposal.briefId !== brief.id) throw new Error(`Unknown proposal ${input.proposalId} for brief ${brief.id}`);
   if (fingerprintForBrief(brief, proposal) !== proposal.fingerprint) {
-    throw new Error("Project governance changed after this proposal was prepared; create and present a fresh proposal before acceptance.");
+    throw new Error("This proposal was invalidated because project governance changed after it was prepared; create and present a fresh proposal before acceptance.");
   }
   const acceptedBy = input.acceptedBy?.trim();
   const nonPeople = new Set(["agent", "assistant", "model", "system", "pi", "pi-conversation"]);
