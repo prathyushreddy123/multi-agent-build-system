@@ -116,6 +116,13 @@ test("client review cannot be disabled by registration or a review-policy setter
     acknowledgeWeakening: true,
     reason: "attempted bypass",
   }), /conflicts with recorded project governance/);
+
+  // Capacity handling is part of the same client guarantee: a required review that
+  // cannot be routed must block for manual resolution, never silently auto-resume.
+  assert.throws(() => db.setProjectReviewPolicy(client.id, { ...client.reviewPolicy, capacityAction: "pending" }, {
+    acknowledgeWeakening: true,
+    reason: "attempted capacity bypass",
+  }), /conflicts with recorded project governance/);
 });
 
 test("client review-off cannot enter configuration history through proposal or revert", (t) => {
