@@ -1621,6 +1621,8 @@ export class Records {
     fencingToken?: string;
     /** A provider reroute of an already-reserved repair keeps its allocation. */
     consumeRepair?: boolean;
+    /** An explicitly retried operational stage consumes the separate recovery budget. */
+    consumeRecovery?: boolean;
   }): StageRun {
     if (!EXECUTION_STAGES.includes(input.stage)) throw new Error(`Unknown execution stage: ${input.stage}`);
     if (!Number.isSafeInteger(input.ordinal) || input.ordinal < 1) throw new Error("Stage ordinal must be a positive integer.");
@@ -1642,6 +1644,10 @@ export class Records {
         if (Number(episode.repairs_consumed) >= Number(episode.repair_limit)) throw new Error(`Repair limit reached for episode ${input.episodeId}.`);
         this.store.run("UPDATE execution_episodes SET repairs_consumed = repairs_consumed + 1 WHERE id = ?", input.episodeId);
       }
+      if (input.consumeRecovery === true) {
+        if (Number(episode.recoveries_consumed) >= Number(episode.recovery_limit)) throw new Error(`Recovery limit reached for episode ${input.episodeId}.`);
+        this.store.run("UPDATE execution_episodes SET recoveries_consumed = recoveries_consumed + 1 WHERE id = ?", input.episodeId);
+      }
       const taskState = taskStateForStage(input.stage);
       if (task.state !== taskState) assertTransition(task.state, taskState);
       const at = nowIso();
@@ -1659,7 +1665,16 @@ export class Records {
       if (Number(updated.changes) !== 1) throw new Error(`Concurrent task update for ${task.id}.`);
       this.recordEvent({
         kind: "stage.reserved", projectId: task.projectId, taskId: task.id,
-        data: { schemaVersion: 1, stageRunId: id, episodeId: input.episodeId, stage: input.stage, ordinal: input.ordinal, launchKey: input.launchKey },
+        data: {
+          schemaVersion: 1,
+          stageRunId: id,
+          episodeId: input.episodeId,
+          stage: input.stage,
+          ordinal: input.ordinal,
+          launchKey: input.launchKey,
+          repairConsumed: input.stage === "repair" && input.consumeRepair !== false,
+          recoveryConsumed: input.consumeRecovery === true,
+        },
       });
       return toStageRun(this.store.get("SELECT * FROM stage_runs WHERE id = ?", id) as Row);
     });

@@ -399,7 +399,12 @@ export class Controller {
     stage: ExecutionStage,
     launchKey: string,
     input: unknown,
-    options: { revision?: string | null; environmentFingerprint?: string | null; consumeRepair?: boolean } = {},
+    options: {
+      revision?: string | null;
+      environmentFingerprint?: string | null;
+      consumeRepair?: boolean;
+      consumeRecovery?: boolean;
+    } = {},
   ): StageRun {
     const existing = this.records.stageByLaunchKey(launchKey);
     if (existing) return existing;
@@ -417,6 +422,7 @@ export class Controller {
       engineRevision: ENGINE_REVISION,
       expectedTaskVersion: current.recordVersion,
       consumeRepair: options.consumeRepair,
+      consumeRecovery: options.consumeRecovery,
     });
   }
 
@@ -437,7 +443,7 @@ export class Controller {
     return existing ?? this.records.recordObligation(input);
   }
 
-  private async runPreflight(task: Task, project: Project, launchId: string): Promise<boolean> {
+  private async runPreflight(task: Task, project: Project, launchId: string, consumeRecovery = false): Promise<boolean> {
     const current = this.records.getTask(task.id) as Task;
     const launchKey = `${launchId}:preflight`;
     for (const prior of this.records.listActiveStageRuns()) {
@@ -455,7 +461,7 @@ export class Controller {
       worktreePath: current.worktreePath,
       revision: current.baseRevision,
       checks: project.checkCommands,
-    }, { revision: current.baseRevision });
+    }, { revision: current.baseRevision, consumeRecovery });
     if (!current.worktreePath) {
       this.finishStage(stage, { state: "waiting", failureClass: "CONFIG", failureDetail: "Prepared worktree path is missing." });
       return false;
@@ -549,6 +555,7 @@ export class Controller {
     }, {
       revision: current.resultRevision,
       environmentFingerprint: this.records.latestEnvironmentCheck(current.id)?.runtimeFingerprint ?? null,
+      consumeRecovery: true,
     });
     const lease = this.records.reserveAdmission({
       stageRunId: stage.id,
@@ -563,28 +570,33 @@ export class Controller {
 
   private async resumeOperationalTask(task: Task, project: Project): Promise<boolean> {
     const obligations = this.records.getContinuation(task.id).openObligations.filter((item) => item.blocking);
+    const recoveryAvailable = (): boolean => {
+      const episode = this.records.getContinuation(task.id).episode;
+      if (!episode || episode.recoveriesConsumed < episode.recoveryLimit) return true;
+      this.blockTask(task, "CONFIG", "The active execution episode exhausted its operational recovery budget.");
+      return false;
+    };
     const reviewRecovery = obligations.find((item) => item.sourceKey.startsWith("review-recovery:"));
     if (reviewRecovery && task.resultRevision && task.worktreePath) {
-      const episode = this.records.getContinuation(task.id).episode;
-      if (episode && episode.recoveriesConsumed >= episode.recoveryLimit) {
-        this.blockTask(task, "CONFIG", "The active execution episode exhausted its operational review-recovery budget.");
-        return true;
-      }
+      if (!recoveryAvailable()) return true;
       const running = this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "explicit review recovery" });
       const checking = this.records.transition(running.id, "CHECKING", {}, { reason: "resume the already finalized revision" });
       const reviewing = this.records.transition(checking.id, "REVIEWING", {}, { reason: "retry only the outstanding review" });
       const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
       const excluded = project.reviewPolicy.reviewerRoute === "independent_provider" ? implementer?.adapter : undefined;
       const selection = this.selectReviewRoute(reviewing, excluded);
-      if (selection.chosen) await this.launchAttempt(reviewing, project, "review", [reviewRecovery.summary], ids.launch(), selection);
+      if (selection.chosen) {
+        await this.launchAttempt(reviewing, project, "review", [reviewRecovery.summary], ids.launch(), selection, { consumeRecovery: true });
+      }
       else this.blockTask(reviewing, this.providerBlockClass(selection), `${REVIEW_RECOVERY_PREFIX} ${selection.reason}`);
       return true;
     }
     const preflight = obligations.find((item) => item.sourceKey.startsWith("preflight:"));
     if (preflight && task.worktreePath) {
+      if (!recoveryAvailable()) return true;
       const running = this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "retry environment preflight" });
       const launchId = ids.launch();
-      if (!await this.runPreflight(running, project, launchId)) return true;
+      if (!await this.runPreflight(running, project, launchId, true)) return true;
       const current = this.records.getTask(task.id) as Task;
       if (current.resultRevision) await this.scheduleNextCheck(current, project);
       else {
@@ -594,7 +606,10 @@ export class Controller {
       return true;
     }
     const gate = obligations.find((item) => item.sourceGateId !== null && item.kind === "gate_failure");
-    if (gate) return this.retryOperationalCheck(task, project, gate);
+    if (gate) {
+      if (!recoveryAvailable()) return true;
+      return this.retryOperationalCheck(task, project, gate);
+    }
     const policyBlocker = obligations.find((item) => item.kind === "decision_needed" || item.kind === "requirement_evidence");
     if (policyBlocker) {
       this.blockTask(task, "CONTRACT", `The task is still waiting on obligation ${policyBlocker.id}: ${policyBlocker.summary}`);
@@ -754,11 +769,32 @@ export class Controller {
   }
 
   private resolveValidatedGateObligations(taskId: string, revision: string, gates: GateResult[]): void {
-    const evidence = gates.filter((gate) => gate.status === "PASS").map((gate) => `gate:${gate.id}:PASS`);
-    if (evidence.length === 0) return;
+    const passing = gates.filter((gate) => gate.status === "PASS");
+    if (passing.length === 0) return;
+    const allGates = this.records.gatesForTask(taskId);
     for (const obligation of this.records.getContinuation(taskId).openObligations) {
-      if ((obligation.kind === "gate_failure" || obligation.kind === "code_defect") && obligation.sourceReviewId === null) {
-        this.records.resolveObligation({ obligationId: obligation.id, state: "resolved", resolvedRevision: revision }, evidence);
+      if (obligation.sourceReviewId !== null) continue;
+      if (obligation.sourceGateId !== null && (obligation.kind === "gate_failure" || obligation.kind === "code_defect")) {
+        const source = allGates.find((gate) => gate.id === obligation.sourceGateId);
+        if (!source) continue;
+        const validation = passing.find((gate) =>
+          (gate.inputFingerprint != null && gate.inputFingerprint === source.inputFingerprint) ||
+          (gate.commandFingerprint != null && gate.commandFingerprint === source.commandFingerprint),
+        );
+        if (!validation) continue;
+        this.records.resolveObligation(
+          { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
+          [`gate:${validation.id}:PASS`],
+        );
+        continue;
+      }
+      // A worker-reported defect has no source gate. It is cleared only after
+      // the repaired revision reaches complete passing gate coverage.
+      if (obligation.kind === "code_defect" && obligation.sourceKey.startsWith("attempt:")) {
+        this.records.resolveObligation(
+          { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
+          passing.map((gate) => `gate:${gate.id}:PASS`),
+        );
       }
     }
   }
@@ -850,6 +886,18 @@ export class Controller {
       this.records.transition(current.id, "FAILED", {
         failure_class: failure,
         blocked_reason: `Repair limit exhausted. ${findings.join("; ")}`,
+        claimed_by: null,
+        claimed_at: null,
+      });
+    } else if (diagnosis?.category === "unknown") {
+      // An unexplained required-check verdict is not evidence of a code defect
+      // and must not spend a repair. It is still a terminal unsuccessful run:
+      // retain the typed obligation and evidence so only an explicit retry can
+      // begin recovery instead of presenting the check as a resumable setup
+      // condition.
+      this.records.transition(current.id, "FAILED", {
+        failure_class: failure,
+        blocked_reason: `${diagnosis.recoveryAction} ${findings.join("; ")}`,
         claimed_by: null,
         claimed_at: null,
       });
@@ -1837,6 +1885,7 @@ export class Controller {
     previousFindings: string[],
     launchId = ids.launch(),
     routeSelection?: RouteSelection,
+    stageOptions: { consumeRecovery?: boolean } = {},
   ): Promise<void> {
     requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     if (!task.worktreePath || !task.branch || !task.baseRevision) throw new Error(`Task ${task.id} has no prepared workspace`);
@@ -1867,6 +1916,7 @@ export class Controller {
     }, {
       revision: executionStage === "review" ? task.resultRevision : task.baseRevision,
       consumeRepair: kind !== "reroute",
+      consumeRecovery: stageOptions.consumeRecovery,
     });
     const admission = this.records.reserveAdmission({
       stageRunId: stage.id,

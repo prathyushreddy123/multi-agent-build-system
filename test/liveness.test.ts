@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { Controller, ControllerLeaseHeldError } from "../src/controller/controller.ts";
+import { diagnoseFailure } from "../src/core/failure.ts";
 import { launchGateJob } from "../src/gates/runner.ts";
 import { controllerLiveness, processAlive } from "../src/operator/liveness.ts";
 import { Records } from "../src/store/records.ts";
@@ -281,5 +282,120 @@ test("dependency recovery clears only its typed obligation", async (t) => {
   db.resolveObligation({ obligationId: decision.id, state: "resolved" }, ["decision:operator-approved"]);
   await controller.tick();
   assert.equal(db.getTask(dependent.id)?.state, "READY");
+  await controller.stop();
+});
+
+test("operational recovery reservations consume their own bounded budget atomically", (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  const project = db.createProject({
+    projectType: "personal", reviewChoice: "off", name: "recovery-budget", repoPath: process.cwd(),
+    reviewPolicy: { mode: "none", skipTaskClasses: [] },
+  });
+  const task = db.createTask({ projectId: project.id, title: "recover", objective: "recover once", repairLimit: 2 });
+  const ready = db.transition(task.id, "READY");
+  const episode = db.createExecutionEpisode({
+    taskId: task.id, expectedTaskVersion: ready.recordVersion, repairLimit: 2, recoveryLimit: 1,
+  });
+  db.transition(task.id, "RUNNING");
+
+  db.reserveStage({
+    taskId: task.id, episodeId: episode.id, stage: "check", ordinal: 1,
+    launchKey: "recovery:one", inputFingerprint: "check:one", engineRevision: "test",
+    expectedTaskVersion: db.getTask(task.id)!.recordVersion, consumeRecovery: true,
+  });
+  assert.equal(db.getContinuation(task.id).episode?.recoveriesConsumed, 1);
+  assert.equal(db.getContinuation(task.id).episode?.repairsConsumed, 0);
+  assert.equal(db.getTask(task.id)?.repairsUsed, 0);
+
+  assert.throws(() => db.reserveStage({
+    taskId: task.id, episodeId: episode.id, stage: "check", ordinal: 2,
+    launchKey: "recovery:two", inputFingerprint: "check:two", engineRevision: "test",
+    expectedTaskVersion: db.getTask(task.id)!.recordVersion, consumeRecovery: true,
+  }), /Recovery limit reached/);
+  assert.equal(db.stageRunsForTask(task.id).length, 1, "an exhausted reservation must roll back without a stage row");
+  assert.equal(db.getContinuation(task.id).episode?.recoveriesConsumed, 1);
+});
+
+test("an unexplained required-check verdict fails without consuming repair budget or losing its obligation", async (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  const spec = { name: "opaque-check", command: [process.execPath, "-e", "process.exit(7)"], required: true };
+  const project = db.createProject({
+    projectType: "personal", reviewChoice: "off", name: "opaque-gate", repoPath: process.cwd(),
+    reviewPolicy: { mode: "none", skipTaskClasses: [] }, checkCommands: [spec],
+  });
+  const task = db.createTask({ projectId: project.id, title: "opaque", objective: "preserve evidence", repairLimit: 0 });
+  db.transition(task.id, "READY");
+  db.transition(task.id, "RUNNING");
+  db.transition(task.id, "CHECKING", { result_revision: "opaque-revision" });
+  db.recordGate({
+    taskId: task.id, attemptId: null, name: spec.name, status: "FAIL", required: true,
+    command: spec.command.join(" "), toolVersion: null, revision: "opaque-revision",
+    evidencePath: "/tmp/opaque-check.log", durationMs: 1, waiverId: null,
+    inputFingerprint: gateFingerprint("opaque-revision", 0, spec), rawExitStatus: 7,
+    failureDiagnosis: diagnoseFailure({ stage: "check", source: "gate", exitCode: 7, toolResolved: true, text: "" }),
+  });
+  const controller = new Controller(db, { controllerId: "opaque-gate-controller" });
+  await (controller as unknown as {
+    completeChecks(task: NonNullable<ReturnType<Records["getTask"]>>, project: NonNullable<ReturnType<Records["getProject"]>>): Promise<void>;
+  }).completeChecks(db.getTask(task.id)!, db.getProject(project.id)!);
+
+  assert.equal(db.getTask(task.id)?.state, "FAILED");
+  assert.equal(db.getTask(task.id)?.repairsUsed, 0);
+  assert.ok(db.getContinuation(task.id).openObligations.some((item) => item.kind === "gate_failure" && item.sourceGateId !== null));
+  await controller.stop();
+});
+
+test("passing one check clears only obligations validated by that same check", async (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  const project = db.createProject({
+    projectType: "personal", reviewChoice: "off", name: "typed-gates", repoPath: process.cwd(),
+    reviewPolicy: { mode: "none", skipTaskClasses: [] },
+  });
+  const task = db.createTask({ projectId: project.id, title: "validate", objective: "validate blockers" });
+  const gate = (name: string, status: "PASS" | "FAIL", inputFingerprint: string) => db.recordGate({
+    taskId: task.id, attemptId: null, name, status, required: true, command: name,
+    toolVersion: null, revision: "revision", evidencePath: null, durationMs: 1, waiverId: null,
+    inputFingerprint,
+  });
+  const failedA = gate("check-a", "FAIL", "fingerprint-a");
+  const passedB = gate("check-b", "PASS", "fingerprint-b");
+  const checkA = db.recordObligation({
+    taskId: task.id, kind: "gate_failure", severity: "blocking", blocking: true,
+    sourceKey: `gate:${failedA.id}`, sourceGateId: failedA.id, summary: "check A failed",
+  });
+  const ambiguous = db.recordObligation({
+    taskId: task.id, kind: "gate_failure", severity: "blocking", blocking: true,
+    sourceKey: "check-launch-unknown:fixture", summary: "launch outcome is unknown",
+  });
+  const workerDefect = db.recordObligation({
+    taskId: task.id, kind: "code_defect", severity: "blocking", blocking: true,
+    sourceKey: "attempt:fixture:code-failure", summary: "worker reported a defect",
+  });
+  const controller = new Controller(db, { controllerId: "typed-gate-controller" });
+  const resolve = (controller as unknown as {
+    resolveValidatedGateObligations(taskId: string, revision: string, gates: ReturnType<Records["gatesForRevision"]>): void;
+  }).resolveValidatedGateObligations.bind(controller);
+
+  resolve(task.id, "revision", [passedB]);
+  assert.deepEqual(
+    db.getContinuation(task.id).openObligations.map((item) => item.id),
+    [checkA.id, ambiguous.id],
+    "complete passing coverage can validate a repaired worker defect but not a different check or ambiguous launch",
+  );
+
+  const passedA = gate("check-a", "PASS", "fingerprint-a");
+  resolve(task.id, "revision", [passedB, passedA]);
+  assert.deepEqual(db.getContinuation(task.id).openObligations.map((item) => item.id), [ambiguous.id]);
+  assert.deepEqual(
+    JSON.parse(String(db.store.get("SELECT resolution_evidence FROM task_obligations WHERE id = ?", checkA.id)?.resolution_evidence)),
+    [`gate:${passedA.id}:PASS`],
+  );
+  assert.deepEqual(
+    JSON.parse(String(db.store.get("SELECT resolution_evidence FROM task_obligations WHERE id = ?", workerDefect.id)?.resolution_evidence)),
+    [`gate:${passedB.id}:PASS`],
+  );
   await controller.stop();
 });
