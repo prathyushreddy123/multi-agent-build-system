@@ -164,22 +164,24 @@ test("v1 policies migrate explicitly and never silently weaken an existing proje
   // A legacy project is not relaxed to advisory quality just because review was off.
   assert.equal(migrateLegacyReviewPolicy({ mode: "none", skipTaskClasses: [] }).qualityExpectation, "configured_checks");
 
-  const project = records.createProject({ name: "client-work", repoPath: repo, reviewPolicy: { mode: "required", skipTaskClasses: [] } });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "required", name: "client-work", repoPath: repo, reviewPolicy: { mode: "required", skipTaskClasses: [] } });
   assert.throws(
     () => records.setProjectReviewPreset(project.id, "experiment"),
-    /Refusing to weaken review/,
+    /conflicts with recorded project governance/,
   );
-  const configVersion = records.setProjectReviewPreset(project.id, "experiment", {
+  assert.throws(() => records.setProjectReviewPreset(project.id, "experiment", {
     acknowledgeWeakening: true,
     reason: "Owner moved this project to an experiment.",
-  });
-  assert.ok(configVersion);
+  }), /conflicts with recorded project governance/);
+  const decision = records.recordProjectDecision({
+    projectId: project.id, projectType: "personal", reviewChoice: "off",
+    actor: "owner", source: "test", sourceRef: "explicit weakening",
+  }, project.governance.version);
+  assert.ok(decision.id);
   const updated = records.getProject(project.id);
-  assert.equal(updated?.reviewPolicy.preset, "experiment");
-  const event = records.recentEvents(30).find((item) => item.kind === "project.review_policy_updated");
-  const data = JSON.parse(event?.data as string) as { weakened: string[]; reason: string };
-  assert.ok(data.weakened.length > 0, "the weakening must be recorded, not hidden");
-  assert.equal(data.reason, "Owner moved this project to an experiment.");
+  assert.equal(updated?.reviewPolicy.trigger, "off");
+  assert.equal(updated?.governance.reviewChoice, "off");
+  assert.ok(records.recentEvents(30).some((item) => item.kind === "governance.decision_recorded"));
 
   assert.deepEqual(weakensReview(reviewPreset("client"), reviewPreset("client")), []);
   assert.ok(weakensReview(reviewPreset("client"), reviewPreset("personal")).length > 0);
@@ -189,7 +191,7 @@ test("a stored v1 policy is readable, migrated on read, and validated strictly w
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({ name: "legacy-row", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "legacy-row", repoPath: repo });
   // Simulate a row written before this phase existed.
   records.store.run(
     "UPDATE projects SET review_policy = ? WHERE id = ?",
@@ -221,7 +223,7 @@ test("accepted review is reused only while the reviewed context still matches", 
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   const revision = repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "reuse", repoPath: repo,
     reviewPolicy: reviewPreset("personal"),
     checkCommands: [{ name: "unit", command: ["true"], required: true }],
@@ -303,7 +305,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
   repoAt(repo);
   const checks = [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }];
 
-  const risky = records.createProject({
+  const risky = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "risky", repoPath: repo, reviewPolicy: reviewPreset("personal"), checkCommands: checks,
   });
   const riskyTask = records.createTask({
@@ -324,7 +326,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
   const riskyDecision = records.listEvents(riskyTask.id).find((event) => event.kind === "review.decision");
   assert.match(JSON.parse(riskyDecision?.data as string).reason as string, /authentication-or-credentials/);
 
-  const calm = records.createProject({
+  const calm = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "calm", repoPath: repo, reviewPolicy: reviewPreset("personal"), checkCommands: checks,
   });
   const calmTask = records.createTask({
@@ -348,7 +350,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
   // Control: the same documentation task under a migrated v1 "substantive"
   // policy. It is still reviewed, so the measured difference comes from the
   // policy choice and not from a change in what the worker did.
-  const legacy = records.createProject({
+  const legacy = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "legacy-substantive", repoPath: repo,
     reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical", "planning", "research"] },
     checkCommands: checks,
@@ -374,7 +376,7 @@ test("required review that cannot be routed is recorded as pending and resumed, 
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "required",
     name: "capacity", repoPath: repo,
     reviewPolicy: { ...reviewPreset("client"), capacityAction: "pending" },
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],
@@ -472,7 +474,7 @@ test("a re-review after a repair receives the prior findings and the repair delt
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "required",
     name: "delta", repoPath: repo,
     reviewPolicy: { ...reviewPreset("client"), scope: "change", reviewerRoute: "same_provider_fresh_context" },
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],

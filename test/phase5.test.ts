@@ -53,7 +53,7 @@ test("deterministic retrieval selects scoped and explicitly referenced files, ex
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({ name: "retrieval", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "retrieval", repoPath: repo });
   const task = records.createTask({
     projectId: project.id,
     title: "Fix invoice total",
@@ -125,7 +125,7 @@ test("a real task run produces a non-empty relevant-file manifest, checkpoints, 
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "checkpointed", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] },
   });
   const task = records.createTask({
@@ -223,7 +223,7 @@ test("routing outcomes aggregate observed accepted work, repairs, and reported u
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "routing-telemetry", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] },
   });
   const task = records.createTask({
@@ -249,7 +249,7 @@ test("project configuration validates and normalizes the context budget", (t) =>
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({ name: "budgeted", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "budgeted", repoPath: repo });
   assert.equal(project.controllerSettings.contextBudgetTokens, 12_000);
   const config: ProjectConfigSnapshot = JSON.parse(JSON.stringify({
     routingProfile: project.routingProfile,

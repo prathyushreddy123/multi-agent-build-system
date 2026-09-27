@@ -31,7 +31,7 @@ function makeFixture(): Fixture {
   process.env.MABS_STATE_DIR = root;
   process.env.MABS_DB_PATH = join(root, "mabs.sqlite");
   const records = openRecords();
-  const project = records.createProject({ name: "logs", repoPath: root, baseBranch: "main" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "logs", repoPath: root, baseBranch: "main" });
   const task = records.createTask({ projectId: project.id, title: "Logged task", objective: "x" });
   records.transition(task.id, "READY");
   records.transition(task.id, "RUNNING");

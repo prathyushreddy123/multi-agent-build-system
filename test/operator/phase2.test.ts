@@ -69,7 +69,7 @@ async function makeFixture(): Promise<Fixture> {
   const baseRevision = head.stdout.trim();
 
   const records = openRecords();
-  const project = records.createProject({ name: "fixture", repoPath: repo, baseBranch: "main" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "fixture", repoPath: repo, baseBranch: "main" });
 
   const make = async (title: string, marker: string) => {
     const task = records.createTask({ projectId: project.id, title, objective: `Work on ${marker}` });

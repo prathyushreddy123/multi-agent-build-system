@@ -33,7 +33,7 @@ function makeFixture(): Fixture {
   process.env.MABS_STATE_DIR = root;
   process.env.MABS_DB_PATH = join(root, "mabs.sqlite");
   const records = openRecords();
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "progress", repoPath: root, baseBranch: "main",
     // An approval is only preparable when the project has required checks, so
     // the delivery test exercises the real gate rather than a relaxed one.

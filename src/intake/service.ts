@@ -7,11 +7,13 @@
  * propose; it cannot decide that the user agreed.
  */
 import { applyExecutionPlan, validateExecutionPlan, type ExecutionPlan } from "../domain/plan.ts";
-import { normalizeReviewPolicy, reviewPreset, type ReviewPreset } from "../review/policy.ts";
+import { requireProjectReadiness } from "../domain/project-policy.ts";
+import { normalizeReviewPolicy } from "../review/policy.ts";
 import type { Records, Task } from "../store/records.ts";
 import {
   activeAcceptance,
   addClarification,
+  briefGovernance,
   conversationFor,
   getBrief,
   getProposal,
@@ -29,6 +31,7 @@ import {
   resolveBrief,
   resolveClarification,
   setBriefState,
+  syncGovernanceClarifications,
 } from "./store.ts";
 import type { ProductBrief, ProposalVersion } from "./types.ts";
 
@@ -54,6 +57,38 @@ function requireBrief(records: Records, value: string): ProductBrief {
   const brief = resolveBrief(records, value);
   if (!brief) throw new Error(`Unknown product brief: ${value}`);
   return brief;
+}
+
+function reuseLinkedProjectGovernance(records: Records, brief: ProductBrief): ProductBrief {
+  if (brief.governanceDecisionId || !brief.projectId) return brief;
+  const project = records.getProject(brief.projectId);
+  if (!project || !records.readProjectReadiness(project.id).ready) return brief;
+  const compatibleType = brief.projectType === null || brief.projectType === project.governance.projectType;
+  const compatibleReview = brief.reviewChoice === null || brief.reviewChoice === project.governance.reviewChoice;
+  if (!compatibleType || !compatibleReview || !project.governance.projectType || !project.governance.reviewChoice) return brief;
+  records.recordProjectDecision({
+    briefId: brief.id,
+    projectType: project.governance.projectType,
+    reviewChoice: project.governance.reviewChoice,
+    actor: "system",
+    source: "linked-project-decision",
+    sourceRef: project.governance.decisionId,
+  }, brief.governanceVersion);
+  return getBrief(records, brief.id) as ProductBrief;
+}
+
+function fingerprintForBrief(brief: ProductBrief, proposal: Pick<ProposalVersion, "summary" | "requirements" | "plan">): string {
+  return proposalFingerprint({
+    briefId: brief.id,
+    briefVersion: brief.version,
+    governanceDecisionId: brief.governanceDecisionId,
+    governanceVersion: brief.governanceVersion,
+    projectType: brief.projectType,
+    reviewChoice: brief.reviewChoice,
+    summary: proposal.summary,
+    requirements: proposal.requirements,
+    plan: proposal.plan,
+  });
 }
 
 /** Ask only material questions, and record why each one matters. */
@@ -89,6 +124,7 @@ export function answerClarification(records: Records, input: {
 export function proposePlan(records: Records, input: ProposalInput & { brief: string; actor?: string }): ProposalResult {
   const brief = requireBrief(records, input.brief);
   const actor = input.actor ?? "agent";
+  syncGovernanceClarifications(records, brief.id, actor);
   const errors: string[] = [];
   if (!input.summary?.trim()) errors.push("The proposal needs a short summary the user can accept or change.");
   if (!input.rationale?.trim()) errors.push("The proposal needs a rationale.");
@@ -128,7 +164,15 @@ export function proposePlan(records: Records, input: ProposalInput & { brief: st
   }
 
   const fingerprint = proposalFingerprint({
-    briefId: brief.id, briefVersion: brief.version, summary: input.summary, requirements, plan: input.plan,
+    briefId: brief.id,
+    briefVersion: brief.version,
+    governanceDecisionId: brief.governanceDecisionId,
+    governanceVersion: brief.governanceVersion,
+    projectType: brief.projectType,
+    reviewChoice: brief.reviewChoice,
+    summary: input.summary,
+    requirements,
+    plan: input.plan,
   });
   return records.store.tx(() => {
     const proposal = insertProposal(records, {
@@ -162,9 +206,14 @@ export function acceptPlan(records: Records, input: {
   acceptedBy: string;
   note?: string | null;
 }): { brief: ProductBrief; proposal: ProposalVersion; acceptance: ReturnType<typeof recordAcceptance> } {
-  const brief = requireBrief(records, input.brief);
+  const brief = reuseLinkedProjectGovernance(records, requireBrief(records, input.brief));
+  syncGovernanceClarifications(records, brief.id, input.acceptedBy || "user");
+  requireProjectReadiness({ kind: "brief", id: brief.id }, briefGovernance(brief));
   const proposal = getProposal(records, input.proposalId);
   if (!proposal || proposal.briefId !== brief.id) throw new Error(`Unknown proposal ${input.proposalId} for brief ${brief.id}`);
+  if (fingerprintForBrief(brief, proposal) !== proposal.fingerprint) {
+    throw new Error("Project governance changed after this proposal was prepared; create and present a fresh proposal before acceptance.");
+  }
   const acceptedBy = input.acceptedBy?.trim();
   const nonPeople = new Set(["agent", "assistant", "model", "system", "pi", "pi-conversation"]);
   if (!acceptedBy || nonPeople.has(acceptedBy.toLowerCase())) {
@@ -211,11 +260,14 @@ export function submitAcceptedPlan(records: Records, input: {
   projectId?: string;
   actor?: string;
 }): { brief: ProductBrief; projectId: string; tasks: Task[]; requirements: number; planId: string | null } {
-  const brief = requireBrief(records, input.brief);
+  const brief = reuseLinkedProjectGovernance(records, requireBrief(records, input.brief));
   const acceptance = activeAcceptance(records, brief.id);
   if (!acceptance) throw new Error(`Brief ${brief.id} has no active acceptance; ask the user to accept a proposal first.`);
   const proposal = getProposal(records, acceptance.proposalId);
   if (!proposal) throw new Error(`Accepted proposal ${acceptance.proposalId} is missing.`);
+  if (fingerprintForBrief(brief, proposal) !== proposal.fingerprint) {
+    throw new Error("Project governance changed after this proposal was prepared; create and accept a fresh proposal before submission.");
+  }
   if (proposal.fingerprint !== acceptance.proposalFingerprint) {
     throw new Error("The accepted proposal no longer matches the recorded acceptance; ask the user to accept the current plan.");
   }
@@ -223,6 +275,14 @@ export function submitAcceptedPlan(records: Records, input: {
   if (!projectId) throw new Error(`Brief ${brief.id} is not linked to a registered project yet; bootstrap or register one first.`);
   const project = records.getProject(projectId);
   if (!project) throw new Error(`Unknown project ${projectId}`);
+  requireProjectReadiness({ kind: "brief", id: brief.id }, briefGovernance(brief));
+  requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
+  if (brief.projectType !== project.governance.projectType || brief.reviewChoice !== project.governance.reviewChoice) {
+    throw new Error(
+      `Brief ${brief.id} governance (${brief.projectType}/${brief.reviewChoice}) conflicts with project ${project.id} ` +
+      `governance (${project.governance.projectType}/${project.governance.reviewChoice}); record an explicit compatible decision before submission.`,
+    );
+  }
 
   const priorSubmission = planSubmissions(records, brief.id).find((submission) =>
     submission.proposalId === proposal.id && submission.projectId === project.id,
@@ -249,14 +309,6 @@ export function submitAcceptedPlan(records: Records, input: {
     for (const requirement of proposal.requirements) {
       records.addRequirement(project.id, requirement.id, requirement.text, requirement.mandatory);
     }
-    const preset = brief.qualitySettings.reviewPreset;
-    if (preset && preset !== "custom" && project.reviewPolicy.preset !== preset) {
-      records.setProjectReviewPolicy(project.id, reviewPreset(preset as Exclude<ReviewPreset, "custom">), {
-        reason: `Review preset agreed during intake for brief ${brief.id}.`,
-        acknowledgeWeakening: true,
-        changedBy: input.actor ?? "intake",
-      });
-    }
     const tasks = applyExecutionPlan(records, project.id, proposal.plan);
     const planId = records.listExecutionPlans(project.id).at(-1)?.id ?? null;
     records.recordEvent({
@@ -279,6 +331,7 @@ export function submitAcceptedPlan(records: Records, input: {
 
 export interface ProductSummary {
   brief: ProductBrief;
+  governance: ReturnType<Records["readProjectReadiness"]>;
   resolvedReviewPolicy: string | null;
   openQuestions: { id: string; question: string; whyItMatters: string }[];
   assumptions: string[];
@@ -306,12 +359,17 @@ export function productSummary(records: Records, value: string): ProductSummary 
   const proposal = latestProposal(records, brief.id);
   const acceptance = activeAcceptance(records, brief.id);
   const project = brief.projectId ? records.getProject(brief.projectId) : null;
+  const governance = project ? records.readProjectReadiness(project.id) : records.readProjectReadiness({ briefId: brief.id });
   const tasks = project ? records.listTasks({ projectId: project.id }) : [];
   const byState: Record<string, number> = {};
   for (const task of tasks) byState[task.state] = (byState[task.state] ?? 0) + 1;
   const bootstrap = listBootstrapRuns(records, brief.id).at(-1) ?? null;
 
   const nextActions: string[] = [];
+  if (!governance.ready) {
+    nextActions.push(...governance.questions.map((question) => question.prompt));
+    nextActions.push(...governance.conflicts);
+  }
   if (open.length > 0) nextActions.push(`Answer ${open.length} open question(s), or record an explicit assumption for each.`);
   if (!proposal || proposal.state === "invalidated" || proposal.state === "superseded") {
     nextActions.push("Propose a plan against the current brief for the user to review afresh.");
@@ -329,6 +387,7 @@ export function productSummary(records: Records, value: string): ProductSummary 
 
   return {
     brief,
+    governance,
     resolvedReviewPolicy: project ? normalizeReviewPolicy(project.reviewPolicy).preset : brief.qualitySettings.reviewPreset,
     openQuestions: open.map((item) => ({ id: item.id, question: item.question, whyItMatters: item.whyItMatters })),
     assumptions: [

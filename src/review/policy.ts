@@ -15,6 +15,7 @@
  * diff content — never from a worker's own claim that its change was harmless.
  */
 import { TASK_CLASSES, type ChangeRisk, type TaskClass } from "../routing/router.ts";
+import type { ProjectType, ReviewChoice } from "../domain/project-policy.ts";
 
 export const REVIEW_POLICY_VERSION = "review-policy-v2";
 
@@ -145,7 +146,34 @@ export function reviewPreset(preset: Exclude<ReviewPreset, "custom">): ReviewPol
   return presetPolicy(preset);
 }
 
-export const DEFAULT_REVIEW_POLICY: ReviewPolicy = presetPolicy("personal");
+/**
+ * An unclassified project has no personal-policy default. The trigger is off
+ * only because governance readiness prevents execution; it is not permission
+ * to run without review, and configured checks remain required.
+ */
+export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
+  ...presetPolicy("experiment"),
+  preset: "custom",
+  qualityExpectation: "configured_checks",
+};
+
+/** Resolve the exact review behavior recorded by a governance decision. */
+export function reviewPolicyForGovernance(projectType: ProjectType, reviewChoice: ReviewChoice): ReviewPolicy {
+  if (reviewChoice === "risk") return presetPolicy("personal");
+  if (reviewChoice === "off") {
+    return {
+      ...presetPolicy("experiment"),
+      preset: "custom",
+      qualityExpectation: "configured_checks",
+    };
+  }
+  const required = presetPolicy("client");
+  return {
+    ...required,
+    preset: projectType === "client" ? "client" : "custom",
+    cadence: "task",
+  };
+}
 
 function modeForTrigger(trigger: ReviewTrigger): ReviewMode {
   if (trigger === "off") return "none";

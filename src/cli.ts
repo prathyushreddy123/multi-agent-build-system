@@ -15,6 +15,14 @@ import {
   requestRevertApproval,
 } from "./curator/service.ts";
 import { projectConfigSnapshot } from "./domain/config.ts";
+import {
+  GovernanceNeedsInputError,
+  governanceNeedsInput,
+  PROJECT_TYPES,
+  REVIEW_CHOICES,
+  type ProjectType,
+  type ReviewChoice,
+} from "./domain/project-policy.ts";
 import { exec } from "./core/exec.ts";
 import { taskDiagnostics } from "./diagnostics/task.ts";
 import { ACTIONS } from "./domain/policy.ts";
@@ -31,7 +39,7 @@ import {
   proposePlan,
   submitAcceptedPlan,
 } from "./intake/service.ts";
-import { createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
+import { briefGovernance, createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
 import {
   DEFAULT_SKIP_TASK_CLASSES,
   REVIEW_MODES,
@@ -139,7 +147,8 @@ PRODUCTS AND PLANS
   plan list [--project=id] | plan show <id>
 
 PROJECTS AND TASKS
-  project add <name> <repo> [--goal=...] [--review=substantive]
+  project add <name> <repo> [--type=personal|client|other] [--review=off|risk|required]
+  project governance <project> --type=... [--review=...] --version=N
   project list | project status <id|name> <active|paused|archived>
   project review <id|name> [required|substantive|none]
   project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
@@ -411,20 +420,49 @@ async function main(): Promise<void> {
     if (area === "project" && action === "add") {
       const args = parseArgs(rest);
       const [name, repoArg] = args.positionals;
-      if (!name || !repoArg) throw new Error("Usage: mabs project add <name> <repo> [--goal=...]");
+      if (!name || !repoArg) throw new Error("Usage: mabs project add <name> <repo> [--type=personal|client|other] [--review=off|risk|required]");
       const repoPath = resolve(repoArg);
+      const projectType = textOption(args, "type") as ProjectType | undefined;
+      const reviewChoice = textOption(args, "review") as ReviewChoice | undefined;
+      if (projectType !== undefined && !PROJECT_TYPES.includes(projectType)) throw new Error(`Unknown project type: ${projectType}`);
+      if (reviewChoice !== undefined && !REVIEW_CHOICES.includes(reviewChoice)) throw new Error(`Unknown review choice: ${reviewChoice}`);
       const project = records.createProject({
         name,
         repoPath,
         baseBranch: textOption(args, "base") ?? await baseBranch(repoPath),
         goal: textOption(args, "goal"),
-        reviewPolicy: normalizeReviewPolicy({
-          mode: textOption(args, "review", "substantive") as ReviewMode,
-          skipTaskClasses: [...DEFAULT_SKIP_TASK_CLASSES],
-        }),
+        projectType: projectType ?? null,
+        reviewChoice: reviewChoice ?? null,
+        governanceActor: textOption(args, "by", "local-cli"),
+        governanceSource: "cli-project-add",
         checkCommands: args.options.has("no-checks") ? [] : discoverChecks(repoPath),
       });
-      console.log(JSON.stringify(project, null, 2));
+      console.log(JSON.stringify(
+        governanceNeedsInput({ kind: "project", id: project.id }, project.governance, project.reviewPolicy) ?? project,
+        null,
+        2,
+      ));
+      return;
+    }
+    if (area === "project" && action === "governance") {
+      const args = parseArgs(rest);
+      const project = args.positionals[0] ? resolveProject(records, args.positionals[0] as string) : null;
+      const projectType = textOption(args, "type") as ProjectType | undefined;
+      const suppliedReview = textOption(args, "review") as ReviewChoice | undefined;
+      const reviewChoice = projectType === "client" && suppliedReview === undefined ? "required" : suppliedReview;
+      const version = Number(textOption(args, "version"));
+      if (!project || !projectType || !reviewChoice || !Number.isSafeInteger(version)) {
+        throw new Error("Usage: mabs project governance <project> --type=personal|client|other --review=off|risk|required --version=N");
+      }
+      if (!PROJECT_TYPES.includes(projectType) || !REVIEW_CHOICES.includes(reviewChoice)) throw new Error("Invalid project governance choice.");
+      const decision = records.recordProjectDecision({
+        projectId: project.id,
+        projectType,
+        reviewChoice,
+        actor: textOption(args, "by", "local-cli") as string,
+        source: "cli-project-governance",
+      }, version);
+      console.log(JSON.stringify({ decision, project: records.getProject(project.id) }, null, 2));
       return;
     }
     if (area === "project" && action === "list") {
@@ -754,9 +792,11 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "create") {
-        console.log(JSON.stringify(createBrief(records, {
+        const brief = createBrief(records, {
           ...(payload as Record<string, never>), createdBy: actor,
-        } as Parameters<typeof createBrief>[1]), null, 2));
+        } as Parameters<typeof createBrief>[1]);
+        const pending = governanceNeedsInput({ kind: "brief", id: brief.id }, briefGovernance(brief));
+        console.log(JSON.stringify(pending ? { ...pending, draft: brief } : brief, null, 2));
         return;
       }
       if (action === "list") {
@@ -777,9 +817,11 @@ async function main(): Promise<void> {
         if (!brief || !summary || !Number.isSafeInteger(expectedVersion)) {
           throw new Error("Usage: mabs brief update <brief> --version=N --summary=... --payload='{...}'");
         }
-        console.log(JSON.stringify(updateBrief(records, {
+        const result = updateBrief(records, {
           briefId: brief.id, expectedVersion, summary, actor, patch: payload as never,
-        }), null, 2));
+        });
+        const pending = governanceNeedsInput({ kind: "brief", id: result.brief.id }, briefGovernance(result.brief));
+        console.log(JSON.stringify(pending ? { ...pending, update: result } : result, null, 2));
         return;
       }
       if (action === "ask") {
@@ -804,7 +846,8 @@ async function main(): Promise<void> {
         const result = proposePlan(records, {
           brief: value, actor, ...(payload as Record<string, never>),
         } as Parameters<typeof proposePlan>[1]);
-        console.log(JSON.stringify(result, null, 2));
+        const pending = governanceNeedsInput({ kind: "brief", id: result.brief.id }, briefGovernance(result.brief));
+        console.log(JSON.stringify(pending ? { ...pending, proposal: result } : result, null, 2));
         if (!result.valid) process.exitCode = 1;
         return;
       }
@@ -1306,6 +1349,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
+  if (error instanceof GovernanceNeedsInputError) {
+    console.log(JSON.stringify(error.result, null, 2));
+    return;
+  }
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

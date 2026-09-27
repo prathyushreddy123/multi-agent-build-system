@@ -37,7 +37,7 @@ function acceptedBrief(records: Records, input: {
   packageManager?: string;
   reviewPreset?: "experiment" | "personal" | "client";
 }) {
-  const brief = createBrief(records, {
+  const brief = createBrief(records, { projectType: "personal", reviewChoice: "risk",
     title: input.title,
     objective: `Create a local ${input.language} command-line application.`,
     proposedStack: {
@@ -264,7 +264,7 @@ test("attempt records retain the exact prompt and selected guidance versions", (
   writeFileSync(join(repo, "README.md"), "x\n");
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@local", "add", "-A"], { cwd: repo });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "initial"], { cwd: repo });
-  const project = records.createProject({ name: "attempt-e4", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "attempt-e4", repoPath: repo });
   const task = records.createTask({
     projectId: project.id, title: "Python task", objective: "x", acceptanceCriteria: ["x"], language: "Python",
   });

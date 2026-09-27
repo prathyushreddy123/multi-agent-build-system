@@ -8,7 +8,7 @@ import { createWorkbench } from "../src/workbench/server.ts";
 
 test("workbench binds locally, serves controller state, and protects mutations", async (t) => {
   const records = new Records(new Store(":memory:"));
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "demo", repoPath: "/tmp/demo", reviewPolicy: { mode: "none", skipTaskClasses: [] },
     checkCommands: [{ name: "test", command: ["true"], required: true }],
   });

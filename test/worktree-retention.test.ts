@@ -51,7 +51,7 @@ function harness(t: { after(fn: () => void): void }): Harness {
 
 /** Drive a task to DONE and give it a worktree, as the controller would. */
 async function finishedTask(h: Harness, title: string): Promise<{ id: string; path: string }> {
-  const project = h.records.findProjectByName("wt") ?? h.records.createProject({ name: "wt", repoPath: h.repoPath, baseBranch: "main" });
+  const project = h.records.findProjectByName("wt") ?? h.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "wt", repoPath: h.repoPath, baseBranch: "main" });
   const task = h.records.createTask({ projectId: project.id, title, objective: title });
   h.records.transition(task.id, "READY");
   h.records.claimTask(task.id, `launch-${title}`);
@@ -161,7 +161,7 @@ test("a clean worktree with a recorded result is removed but keeps its branch", 
 
 test("a worktree belonging to an in-flight task is never considered", async (t) => {
   const h = harness(t);
-  const project = h.records.createProject({ name: "wt", repoPath: h.repoPath, baseBranch: "main" });
+  const project = h.records.createProject({ projectType: "personal", reviewChoice: "risk", name: "wt", repoPath: h.repoPath, baseBranch: "main" });
   const task = h.records.createTask({ projectId: project.id, title: "busy", objective: "busy" });
   h.records.transition(task.id, "READY");
   h.records.claimTask(task.id, "launch-busy");
