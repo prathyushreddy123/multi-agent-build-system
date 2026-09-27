@@ -113,7 +113,7 @@ test("an idea becomes an accepted, validated plan through ordinary conversation"
   repoAt(repo);
 
   // 1. A new idea, recorded before any repository exists.
-  const brief = createBrief(records, {
+  const brief = createBrief(records, { projectType: "personal", reviewChoice: "risk",
     title: "study-assistant",
     purpose: "Help me prepare for applied AI engineering roles.",
     objective: "Produce a daily study packet I can actually follow.",
@@ -177,7 +177,7 @@ test("an idea becomes an accepted, validated plan through ordinary conversation"
   assert.equal(accepted.acceptance.proposalFingerprint, proposal.fingerprint);
 
   // 6. The accepted plan is applied with no hand-written JSON.
-  const project = records.createProject({ name: "study-assistant", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "study-assistant", repoPath: repo });
   const submitted = submitAcceptedPlan(records, { brief: brief.id, projectId: project.id });
   assert.equal(submitted.tasks.length, 2);
   assert.equal(submitted.brief.state, "REGISTERED");
@@ -203,7 +203,7 @@ test("an idea becomes an accepted, validated plan through ordinary conversation"
 
 test("an invalid dependency graph is rejected before the user ever sees it", (t) => {
   const { records } = setup(t);
-  const brief = createBrief(records, { title: "cycles", objective: "x", createdBy: "prathyush" });
+  const brief = createBrief(records, { projectType: "personal", reviewChoice: "risk", title: "cycles", objective: "x", createdBy: "prathyush" });
 
   const cyclic = proposePlan(records, {
     brief: brief.id,
@@ -270,13 +270,13 @@ test("a scope change after acceptance invalidates only the affected acceptance a
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const brief = createBrief(records, { title: "revisable", objective: "Ship a daily packet.", createdBy: "prathyush" });
+  const brief = createBrief(records, { projectType: "personal", reviewChoice: "risk", title: "revisable", objective: "Ship a daily packet.", createdBy: "prathyush" });
   const proposal = proposePlan(records, { brief: brief.id, ...proposalPayload() }).proposal;
   acceptPlan(records, {
     brief: brief.id, proposalId: (proposal as { id: string }).id,
     fingerprint: (proposal as { fingerprint: string }).fingerprint, acceptedBy: "prathyush",
   });
-  const project = records.createProject({ name: "revisable", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "revisable", repoPath: repo });
   const submitted = submitAcceptedPlan(records, { brief: brief.id, projectId: project.id });
 
   // One task has already completed; its history must survive the revision.
@@ -325,7 +325,7 @@ test("a restart during clarification resumes from durable state", (t) => {
   const { root } = setup(t);
   const dbPath = join(root, "restart.sqlite");
   const first = new Records(new Store(dbPath));
-  const brief = createBrief(first, { title: "resumable", objective: "Draft my weekly report.", createdBy: "prathyush" });
+  const brief = createBrief(first, { projectType: "personal", reviewChoice: "risk", title: "resumable", objective: "Draft my weekly report.", createdBy: "prathyush" });
   askClarifications(first, {
     brief: brief.id,
     questions: [{ question: "Which systems hold the source data?", whyItMatters: "It decides which adapters are needed." }],
@@ -344,7 +344,7 @@ test("a restart during clarification resumes from durable state", (t) => {
 
 test("concurrent brief edits fail closed on the expected version", (t) => {
   const { records } = setup(t);
-  const brief = createBrief(records, { title: "versioned", objective: "x", createdBy: "prathyush" });
+  const brief = createBrief(records, { projectType: "personal", reviewChoice: "risk", title: "versioned", objective: "x", createdBy: "prathyush" });
   updateBrief(records, { briefId: brief.id, expectedVersion: 1, summary: "Recorded the audience.", patch: { audience: "Me" } });
   assert.throws(
     () => updateBrief(records, { briefId: brief.id, expectedVersion: 1, summary: "Stale write.", patch: { audience: "Someone else" } }),
@@ -363,7 +363,7 @@ test("schema 11 upgrades add intake records without changing existing projects",
   repoAt(repo);
   const dbPath = join(root, "migration.sqlite");
   const oldRecords = new Records(new Store(dbPath));
-  const existing = oldRecords.createProject({ name: "existing-before-intake", repoPath: repo });
+  const existing = oldRecords.createProject({ projectType: "personal", reviewChoice: "risk", name: "existing-before-intake", repoPath: repo });
   oldRecords.store.close();
 
   const legacy = new DatabaseSync(dbPath);
@@ -377,7 +377,7 @@ test("schema 11 upgrades add intake records without changing existing projects",
   const migrated = new Records(new Store(dbPath));
   assert.equal(migrated.getProject(existing.id)?.name, "existing-before-intake");
   assert.equal(migrated.store.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, SCHEMA_VERSION);
-  const brief = createBrief(migrated, { title: "after-migration", createdBy: "test" });
+  const brief = createBrief(migrated, { projectType: "personal", reviewChoice: "risk", title: "after-migration", createdBy: "test" });
   assert.equal(brief.version, 1);
   migrated.store.close();
 });
@@ -396,6 +396,7 @@ test("the CLI tool surface drives the whole flow without hand-written plan JSON"
 
   const brief = JSON.parse(cli("brief", "create", `--payload=${JSON.stringify({
     title: "cli-product", objective: "Draft my weekly report from local notes.",
+    projectType: "personal", reviewChoice: "risk",
   })}`, "--by=prathyush")) as { id: string; version: number; state: string };
   assert.equal(brief.state, "DRAFT");
 
@@ -413,7 +414,9 @@ test("the CLI tool surface drives the whole flow without hand-written plan JSON"
   cli("brief", "accept", brief.id, proposed.proposal.id,
     `--fingerprint=${proposed.proposal.fingerprint}`, "--by=prathyush", "--note=Looks right.");
 
-  const project = JSON.parse(cli("project", "add", "cli-product", repo, "--no-checks")) as { id: string };
+  const project = JSON.parse(cli(
+    "project", "add", "cli-product", repo, "--type=personal", "--review=risk", "--no-checks",
+  )) as { id: string };
   const submitted = JSON.parse(cli("brief", "submit", brief.id, `--project=${project.id}`)) as { tasks: { id: string }[] };
   assert.equal(submitted.tasks.length, 2);
 

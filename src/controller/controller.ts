@@ -8,6 +8,7 @@ import { buildContextPacket, type ExecutionSelection } from "../context/packet.t
 import { consumesRepairBudget, isProviderUnavailable, type FailureClass } from "../core/failure.ts";
 import { ids } from "../core/ids.ts";
 import { scopesOverlap } from "../domain/plan.ts";
+import { requireProjectReadiness } from "../domain/project-policy.ts";
 import type { WorkerOutput } from "../domain/contract.ts";
 import { artifactDir } from "../core/paths.ts";
 import { runGates } from "../gates/runner.ts";
@@ -922,6 +923,13 @@ export class Controller {
         const task = tasks.shift();
         if (!task) { perProject.delete(projectId); continue; }
         const project = this.records.getProject(projectId);
+        if (project?.status === "active") {
+          const readiness = this.records.recordGovernanceNeedsInput(project.id, task.id);
+          if (!readiness.ready) {
+            if (tasks.length === 0) perProject.delete(projectId);
+            continue;
+          }
+        }
         if (project?.status === "active" && this.executionResourcesAvailable(task)) {
           const selection = this.selectTaskRoute(task);
           if (task.taskClass === "mechanical") {
@@ -1091,6 +1099,7 @@ export class Controller {
     launchId = ids.launch(),
     routeSelection?: RouteSelection,
   ): Promise<void> {
+    requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     if (!task.worktreePath || !task.branch || !task.baseRevision) throw new Error(`Task ${task.id} has no prepared workspace`);
     const selection = routeSelection ?? this.selectTaskRoute(task);
     if (!selection.chosen) throw new Error(selection.reason);

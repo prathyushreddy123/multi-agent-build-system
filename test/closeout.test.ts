@@ -75,7 +75,7 @@ class StaticAdapter implements WorkerAdapter {
 test("a stale worker heartbeat is surfaced as an actionable warning without automatically declaring failure", (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "repo"); repoAt(repo);
-  const project = records.createProject({ name: "heartbeat", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off", name: "heartbeat", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
   const task = records.createTask({ projectId: project.id, title: "long tool run", objective: "exercise heartbeat staleness" });
   records.transition(task.id, "READY");
   records.transition(task.id, "RUNNING", { claimed_by: "test", claimed_at: new Date().toISOString() });
@@ -102,7 +102,7 @@ test("a stale worker heartbeat is surfaced as an actionable warning without auto
 test("a controller tick reports and deduplicates stale-heartbeat health without failing the task", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "repo"); repoAt(repo);
-  const project = records.createProject({ name: "heartbeat-health", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off", name: "heartbeat-health", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
   const task = records.createTask({ projectId: project.id, title: "long tool run", objective: "exercise health reporting" });
 
   class HangingAdapter implements WorkerAdapter {
@@ -140,7 +140,7 @@ test("many registered inactive projects consume no model calls while two active 
 
   const activeProjects = ["active-one", "active-two"].map((name) => {
     const repo = join(root, name); repoAt(repo);
-    return records.createProject({ name, repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+    return records.createProject({ projectType: "personal", reviewChoice: "off", name, repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
   });
   const activeTasks = activeProjects.map((project, index) => records.createTask({
     projectId: project.id, title: `active-task-${index}`, objective: "change value", acceptanceCriteria: ["committed"],
@@ -149,7 +149,7 @@ test("many registered inactive projects consume no model calls while two active 
   const inactiveTasks = Array.from({ length: 5 }, (_, index) => {
     const name = `inactive-${index}`;
     const repo = join(root, name); repoAt(repo);
-    const project = records.createProject({ name, repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+    const project = records.createProject({ projectType: "personal", reviewChoice: "off", name, repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
     records.setProjectStatus(project.id, "paused");
     return records.createTask({
       projectId: project.id, title: `inactive-task-${index}`, objective: "must never run while paused", acceptanceCriteria: ["never dispatched"],
@@ -177,7 +177,7 @@ test("many registered inactive projects consume no model calls while two active 
 test("a database-lease error during a tick is counted, surfaced as degraded, and does not lose task ownership", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "repo"); repoAt(repo);
-  const project = records.createProject({ name: "db-error", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off", name: "db-error", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
   records.createTask({ projectId: project.id, title: "unaffected task", objective: "must not be dispatched during an outage" });
 
   class FlakyRecords extends Records {

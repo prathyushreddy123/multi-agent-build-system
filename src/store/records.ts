@@ -18,6 +18,7 @@ import {
   describeReviewPolicy,
   evaluateReviewPolicy,
   normalizeReviewPolicy,
+  reviewPolicyForGovernance,
   reviewPolicyNormalizationNotes,
   reviewPreset,
   weakensReview,
@@ -31,6 +32,7 @@ import {
   assertGovernanceDecision,
   evaluateProjectReadiness,
   PROJECT_POLICY_VERSION,
+  requireProjectReadiness,
   unresolvedGovernance,
 } from "../domain/project-policy.ts";
 import type {
@@ -861,10 +863,36 @@ export class Records {
     promptProfile?: PromptProfile;
     controllerSettings?: ProjectControllerSettings;
     routingProfile?: string;
+    projectType?: ProjectType | null;
+    reviewChoice?: ReviewChoice | null;
+    governanceActor?: string;
+    governanceSource?: string;
   }): Project {
-    const requestedReviewPolicy = input.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
+    const resolvedReviewChoice = input.projectType === "client" && input.reviewChoice == null
+      ? "required"
+      : input.reviewChoice ?? null;
+    if (input.projectType != null && resolvedReviewChoice != null) {
+      assertGovernanceDecision(input.projectType, resolvedReviewChoice);
+    }
+    const requestedReviewPolicy = input.reviewPolicy ?? (
+      input.projectType != null && resolvedReviewChoice != null
+        ? reviewPolicyForGovernance(input.projectType, resolvedReviewChoice)
+        : DEFAULT_REVIEW_POLICY
+    );
     assertReviewPolicyInput(requestedReviewPolicy);
     const reviewPolicy = normalizeReviewPolicy(requestedReviewPolicy);
+    if (input.projectType != null && resolvedReviewChoice != null) {
+      const provisional = {
+        ...unresolvedGovernance(),
+        projectType: input.projectType,
+        reviewChoice: resolvedReviewChoice,
+        decisionState: "confirmed" as const,
+        decisionId: "pending",
+        version: 1,
+      };
+      const conflicts = evaluateProjectReadiness(provisional, reviewPolicy).conflicts;
+      if (conflicts.length > 0) throw new Error(`Review policy conflicts with project governance: ${conflicts.join("; ")}`);
+    }
     const normalizationNotes = reviewPolicyNormalizationNotes(requestedReviewPolicy, reviewPolicy);
     const id = ids.project();
     const at = nowIso();
@@ -873,8 +901,8 @@ export class Records {
       this.store.run(
         `INSERT INTO projects(id, name, repo_path, base_branch, status, routing_profile, approval_policy,
            review_policy, routing_overrides, prompt_profile, controller_settings, check_commands,
-           config_version, goal, created_at, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           config_version, goal, project_type, review_choice, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.name,
         input.repoPath,
@@ -889,6 +917,8 @@ export class Records {
         toJson(input.checkCommands ?? []),
         configVersion,
         input.goal ?? null,
+        input.projectType ?? null,
+        resolvedReviewChoice,
         at,
         at,
       );
@@ -902,6 +932,16 @@ export class Records {
       this.recordEvent({ kind: "project.registered", projectId: id, data: { name: input.name, repoPath: input.repoPath, reviewPolicy } });
       if (normalizationNotes.length > 0) {
         this.recordEvent({ kind: "project.review_policy_normalized", projectId: id, data: { requested: requestedReviewPolicy, stored: reviewPolicy, notes: normalizationNotes } });
+      }
+      if (input.projectType != null && resolvedReviewChoice != null) {
+        this.recordProjectDecision({
+          projectId: id,
+          projectType: input.projectType,
+          reviewChoice: resolvedReviewChoice,
+          actor: input.governanceActor ?? "project-registration",
+          source: input.governanceSource ?? "project-registration",
+        }, 0);
+        return this.getProject(id) as Project;
       }
       return project;
     });
@@ -1010,6 +1050,15 @@ export class Records {
     const current = this.getProject(id);
     if (!current) throw new Error(`Unknown project ${id}`);
     const policy = normalizeReviewPolicy(requested);
+    if (current.governance.decisionState === "confirmed") {
+      const conflicts = evaluateProjectReadiness(current.governance, policy).conflicts;
+      if (conflicts.length > 0) {
+        throw new Error(
+          `Review policy conflicts with recorded project governance: ${conflicts.join("; ")}. ` +
+          "Record a new governance decision instead of bypassing it through review settings.",
+        );
+      }
+    }
     const notes = reviewPolicyNormalizationNotes(requested, policy);
     const weakened = weakensReview(current.reviewPolicy, policy);
     if (weakened.length > 0 && !options.acknowledgeWeakening) {
@@ -1077,7 +1126,7 @@ export class Records {
       const projectId = typeof subject === "string" ? subject : subject.projectId;
       const project = this.getProject(projectId);
       if (!project) throw new Error(`Unknown project ${projectId}`);
-      return evaluateProjectReadiness(project.governance);
+      return evaluateProjectReadiness(project.governance, project.reviewPolicy);
     }
     const row = this.store.get(
       "SELECT project_type, review_choice, governance_decision_id, governance_version FROM product_briefs WHERE id = ?",
@@ -1092,6 +1141,34 @@ export class Records {
       decisionId: (row.governance_decision_id as string) ?? null,
       version: Number(row.governance_version ?? 0),
     });
+  }
+
+  /** Record at most one controller-visible needs-input event per governance version. */
+  recordGovernanceNeedsInput(projectId: string, taskId?: string): ProjectReadiness {
+    const project = this.getProject(projectId);
+    if (!project) throw new Error(`Unknown project ${projectId}`);
+    const readiness = evaluateProjectReadiness(project.governance, project.reviewPolicy);
+    if (readiness.ready) return readiness;
+    const duplicate = this.store.get(
+      `SELECT id FROM events WHERE project_id = ? AND kind = 'governance.needs_input'
+       AND json_extract(data, '$.governanceVersion') = ? LIMIT 1`,
+      project.id, project.governance.version,
+    );
+    if (!duplicate) {
+      this.recordEvent({
+        kind: "governance.needs_input",
+        projectId: project.id,
+        taskId: taskId ?? null,
+        data: {
+          outcome: "needs_input",
+          subject: { kind: "project", id: project.id },
+          policyVersion: PROJECT_POLICY_VERSION,
+          governanceVersion: project.governance.version,
+          ...readiness,
+        },
+      });
+    }
+    return readiness;
   }
 
   recordProjectDecision(input: {
@@ -1115,16 +1192,23 @@ export class Records {
     return this.store.tx(() => {
       const table = input.projectId ? "projects" : "product_briefs";
       const subjectId = input.projectId ?? input.briefId as string;
-      const current = this.store.get(`SELECT governance_version FROM ${table} WHERE id = ?`, subjectId);
+      const current = this.store.get(`SELECT project_type, review_choice, governance_version FROM ${table} WHERE id = ?`, subjectId);
       if (!current) throw new Error(`Unknown ${input.projectId ? "project" : "brief"} ${subjectId}`);
       const currentVersion = Number(current.governance_version ?? 0);
       if (currentVersion !== expectedVersion) {
         throw new Error(`Governance changed since version ${expectedVersion}; current version is ${currentVersion}.`);
       }
+      if (input.projectId && current.project_type === "client" && input.projectType !== "client") {
+        const nonPeople = new Set(["agent", "assistant", "model", "system", "curator", "optimizer", "controller"]);
+        if (nonPeople.has(input.actor.trim().toLowerCase())) {
+          throw new Error("Only an explicit human decision may reclassify a client project; automation cannot relabel it to weaken review.");
+        }
+      }
       const resolvedPolicy = input.resolvedPolicy ?? {
         policyVersion: PROJECT_POLICY_VERSION,
         projectType: input.projectType,
         reviewChoice: input.reviewChoice,
+        reviewPolicy: reviewPolicyForGovernance(input.projectType, input.reviewChoice),
       };
       this.store.run(
         `INSERT INTO project_policy_decisions(
@@ -1147,9 +1231,26 @@ export class Records {
         const project = this.getProject(input.projectId) as Project;
         const parentId = project.configVersion;
         configVersion = ids.config();
-        this.store.run("UPDATE projects SET config_version = ? WHERE id = ?", configVersion, input.projectId);
+        const policy = reviewPolicyForGovernance(input.projectType, input.reviewChoice);
+        this.store.run(
+          "UPDATE projects SET review_policy = ?, config_version = ? WHERE id = ?",
+          toJson(policy), configVersion, input.projectId,
+        );
         this.invalidateProjectApprovals(input.projectId, "Project governance changed.");
         this.recordCurrentProjectConfig(input.projectId, configVersion, "governance-decision", parentId);
+      } else if (input.briefId) {
+        const reason = `Brief governance changed to version ${nextVersion}; a fresh acceptance is required.`;
+        const active = this.store.all(
+          "SELECT id, proposal_id FROM acceptance_bindings WHERE brief_id = ? AND state = 'active'",
+          input.briefId,
+        );
+        for (const binding of active) {
+          this.store.run(
+            "UPDATE acceptance_bindings SET state = 'invalidated', invalidated_reason = ? WHERE id = ?",
+            reason, binding.id,
+          );
+          this.store.run("UPDATE proposal_versions SET state = 'invalidated' WHERE id = ?", binding.proposal_id);
+        }
       }
       this.recordEvent({
         kind: "governance.decision_recorded",
@@ -1195,10 +1296,13 @@ export class Records {
     executionReason?: string | null;
     reviewOfTaskId?: string | null;
   }): Task {
+    const project = this.getProject(input.projectId);
+    if (!project) throw new Error(`Unknown project ${input.projectId}`);
+    requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     const id = ids.task();
     const at = nowIso();
     const dependsOn = [...new Set(input.dependsOn ?? [])];
-    const defaultRepairLimit = this.getProject(input.projectId)?.controllerSettings.defaultRepairLimit ?? 2;
+    const defaultRepairLimit = project.controllerSettings.defaultRepairLimit;
     const role = input.role ?? "implementer";
     const taskClass = input.taskClass ?? (role === "reviewer" ? "review" : role === "researcher" ? "research" : role === "troubleshooter" ? "troubleshooting" : "small_implementation");
     if (!TASK_CLASSES.includes(taskClass)) throw new Error(`Unknown task class: ${taskClass}`);
@@ -2457,6 +2561,8 @@ export class Records {
   }): CuratorProposal {
     const project = this.getProject(input.projectId);
     if (!project) throw new Error(`Unknown project ${input.projectId}`);
+    requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
+    this.assertConfigurationGovernance(project, input.config, "Curator proposal");
     const duplicate = this.store.get(
       `SELECT * FROM curator_proposals WHERE project_id = ? AND fingerprint = ? AND evidence_fingerprint = ?
        AND status IN ('proposed','evaluated','rejected','activated') ORDER BY created_at DESC LIMIT 1`,
@@ -2633,6 +2739,7 @@ export class Records {
     if (!evaluation || evaluation.status !== "passed") throw new Error(`Proposal ${id} has no passing evaluation`);
     const project = this.getProject(proposal.projectId);
     if (!project) throw new Error(`Unknown project ${proposal.projectId}`);
+    requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     if (project.configVersion !== proposal.baseConfigVersion) throw new Error(`Proposal ${id} is stale because project configuration changed`);
     const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
     if (activeTasks.length > 0) throw new Error(`Configuration activation requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
@@ -2648,6 +2755,7 @@ export class Records {
     }
     const version = this.getConfigVersion(proposal.proposedConfigVersion);
     if (!version) throw new Error(`Missing proposed configuration ${proposal.proposedConfigVersion}`);
+    this.assertConfigurationGovernance(project, version.payload, "Proposed configuration");
     const errors = validateProjectConfig(version.payload);
     if (errors.length > 0) throw new Error(`Proposed configuration is invalid: ${errors.join("; ")}`);
     return this.applyConfiguration({
@@ -2673,10 +2781,13 @@ export class Records {
     if (!input.reason.trim()) throw new Error("Revert reason is required");
     const project = this.getProject(input.projectId);
     if (!project) throw new Error(`Unknown project ${input.projectId}`);
+    requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
     if (activeTasks.length > 0) throw new Error(`Configuration revert requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
     const target = this.getConfigVersion(input.targetConfigVersion);
     if (!target || target.project_id !== project.id) throw new Error(`Unknown project configuration ${input.targetConfigVersion}`);
+    this.assertConfigurationGovernance(project, target.payload, "Target configuration", false);
+    const effectiveTarget = { ...normalizeProjectConfig(target.payload), governance: project.governance };
     const binding: ApprovalBinding = {
       action: "activate_config_change",
       target: `revert:${input.targetConfigVersion}`,
@@ -2687,18 +2798,18 @@ export class Records {
     if (!approval || approval.id !== this.findProjectApprovalFor(project.id, binding)?.id) {
       throw new Error("Revert requires an exact approved target and current configuration binding");
     }
-    const errors = validateProjectConfig(target.payload);
+    const errors = validateProjectConfig(effectiveTarget);
     if (errors.length > 0) throw new Error(`Target configuration is invalid: ${errors.join("; ")}`);
     const revertVersion = ids.config();
     this.store.run(
       `INSERT INTO config_versions(id, project_id, parent_id, source, kind, payload, revision, active, created_at)
        VALUES(?,?,?,'curator-revert','snapshot',?,NULL,0,?)`,
-      revertVersion, project.id, project.configVersion, toJson(target.payload), nowIso(),
+      revertVersion, project.id, project.configVersion, toJson(effectiveTarget), nowIso(),
     );
     return this.applyConfiguration({
       project,
       configVersion: revertVersion,
-      config: target.payload,
+      config: effectiveTarget,
       proposalId: null,
       action: "revert",
       sourceConfigVersion: input.targetConfigVersion,
@@ -2761,6 +2872,28 @@ export class Records {
       });
       return this.getConfigActivation(activationId) as ConfigActivation;
     });
+  }
+
+  private assertConfigurationGovernance(
+    project: Project,
+    config: ProjectConfigSnapshot,
+    label: string,
+    requireExactDecision = true,
+  ): void {
+    const normalized = normalizeProjectConfig(config);
+    const candidate = normalized.governance;
+    if (requireExactDecision && (
+      candidate?.decisionId !== project.governance.decisionId ||
+      candidate?.version !== project.governance.version ||
+      candidate?.projectType !== project.governance.projectType ||
+      candidate?.reviewChoice !== project.governance.reviewChoice
+    )) {
+      throw new Error(`${label} is stale because its governance decision does not match the current project decision.`);
+    }
+    const readiness = evaluateProjectReadiness(project.governance, normalized.reviewPolicy);
+    if (!readiness.ready) {
+      throw new Error(`${label} conflicts with current project governance: ${[...readiness.conflicts, ...readiness.missing].join("; ")}`);
+    }
   }
 
   getConfigActivation(id: string): ConfigActivation | null {

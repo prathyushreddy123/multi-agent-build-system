@@ -138,7 +138,7 @@ class ResponseAdapter implements WorkerAdapter {
 test("substantive work passes gates, independent review, one review repair, and fresh re-review", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "repo"); repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "reviewed", repoPath: repo,
     reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical"] },
     checkCommands: [{
@@ -186,7 +186,7 @@ test("substantive work passes gates, independent review, one review repair, and 
 test("failed required gates prevent review and completion and retain explanatory logs", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "failed-gate"); repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "required",
     name: "failed-gate", repoPath: repo,
     reviewPolicy: { mode: "required", skipTaskClasses: [] },
     checkCommands: [{ name: "must-pass", required: true, command: [process.execPath, "-e", "process.exit(7)"] }],
@@ -222,7 +222,7 @@ test("failed required gates prevent review and completion and retain explanatory
 test("an unanswered feedback question is resolved by one on-demand response task", async (t) => {
   const { root, records } = setup(t);
   const repo = join(root, "response"); repoAt(repo);
-  const project = records.createProject({ name: "response", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "response", repoPath: repo });
   const plan = records.recordExecutionPlan({
     projectId: project.id,
     objective: "Answer project questions",
@@ -247,7 +247,7 @@ test("an unanswered feedback question is resolved by one on-demand response task
 
 test("stale approvals are durably invalidated instead of being approved", (t) => {
   const { records } = setup(t);
-  const project = records.createProject({ name: "approval", repoPath: "/tmp/approval" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "approval", repoPath: "/tmp/approval" });
   const task = records.createTask({ projectId: project.id, title: "approved work", objective: "prepare action" });
   records.updateTaskFields(task.id, { result_revision: "revision-one" });
   const approval = records.requestApproval({
@@ -271,7 +271,7 @@ test("stale approvals are durably invalidated instead of being approved", (t) =>
 
 test("plans and versioned feedback preserve questions and create scoped follow-up work", (t) => {
   const { records } = setup(t);
-  const project = records.createProject({ name: "feedback", repoPath: "/tmp/feedback" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "feedback", repoPath: "/tmp/feedback" });
   const plan: ExecutionPlan = {
     objective: "Feedback flow", mode: "single", reason: "One bounded task.", assumptions: ["Local-only"], milestones: ["Reviewed"],
     tasks: [{ key: "one", title: "First", objective: "Complete first task", acceptanceCriteria: ["done"], executionMode: "single", executionReason: "bounded" }],

@@ -74,7 +74,7 @@ test("context packets quote the worktree under execution, not the project's base
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({ name: "provenance", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "provenance", repoPath: repo });
   const task = records.createTask({
     projectId: project.id,
     title: "Fix invoice total",
@@ -135,7 +135,7 @@ test("required review never inherits skip classes at any entry point", (t) => {
   repoAt(repo);
 
   // Project registration: the CLI path passes default skips alongside the mode.
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "required",
     name: "required-review",
     repoPath: repo,
     reviewPolicy: { mode: "required", skipTaskClasses: ["mechanical", "planning", "research"] },
@@ -175,7 +175,7 @@ test("minor findings stay advisory while blocking findings still force repair", 
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({ name: "severity", repoPath: repo });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "severity", repoPath: repo });
   const task = records.createTask({ projectId: project.id, title: "task", objective: "do work" });
   const attempt = records.startAttempt({
     id: "att_sev", taskId: task.id, launchId: "lch_sev", kind: "review", adapter: "claude",
@@ -210,7 +210,7 @@ test("an unconfigured quality gate list is reported as missing coverage, not as 
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   const revision = repoAt(repo);
-  const project = records.createProject({ name: "coverage", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off", name: "coverage", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] } });
   const task = records.createTask({ projectId: project.id, title: "task", objective: "do work" });
 
   const summary = await runGates({
@@ -242,7 +242,7 @@ test("an unconfigured quality gate list is reported as missing coverage, not as 
   assert.equal((prepared.approval?.evidence.qualityCoverage as { coverage: string }).coverage, "not_configured");
 
   // A configured, passing check reports passed coverage instead.
-  const configured = records.createProject({
+  const configured = records.createProject({ projectType: "personal", reviewChoice: "off",
     name: "configured-coverage", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] },
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],
   });
@@ -298,7 +298,7 @@ test("a review that finds only minor issues approves the revision without anothe
   const { root, records } = setup(t);
   const repo = join(root, "repo");
   repoAt(repo);
-  const project = records.createProject({
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "advisory-review", repoPath: repo,
     reviewPolicy: { mode: "substantive", skipTaskClasses: [] },
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],

@@ -20,7 +20,7 @@ test("backup is consistent and retention is dry-run by default", async (t) => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  const project = records.createProject({ name: "backup", repoPath: "/tmp/backup" });
+  const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "backup", repoPath: "/tmp/backup" });
   const task = records.createTask({ projectId: project.id, title: "done", objective: "finish" });
   records.transition(task.id, "READY");
   records.claimTask(task.id, "launch-maintenance");

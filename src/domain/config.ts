@@ -5,7 +5,7 @@ import { DEFAULT_REVIEW_POLICY, normalizeReviewPolicy, validateReviewPolicy } fr
 import type { ReviewPolicy } from "../review/policy.ts";
 import type { GateSpec, Project } from "../store/records.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES, type TaskClass } from "../routing/router.ts";
-import { PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES, unresolvedGovernance } from "./project-policy.ts";
+import { evaluateProjectReadiness, PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES, unresolvedGovernance } from "./project-policy.ts";
 import type { ProjectGovernance } from "./project-policy.ts";
 
 export interface PromptProfile {
@@ -219,6 +219,9 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
     if (governance.reviewChoice !== null && !REVIEW_CHOICES.includes(governance.reviewChoice)) errors.push("governance.reviewChoice is invalid.");
     if (governance.projectType === "client" && governance.reviewChoice !== null && governance.reviewChoice !== "required") {
       errors.push("Client governance cannot disable required review.");
+    }
+    if (governance.decisionState === "confirmed") {
+      errors.push(...evaluateProjectReadiness(governance, normalizeReviewPolicy(config.reviewPolicy)).conflicts);
     }
   }
   if (config.policyVersions !== undefined) {
