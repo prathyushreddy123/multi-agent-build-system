@@ -31,6 +31,7 @@ export interface ProjectReadiness {
 export interface GovernedReviewPolicy {
   trigger: "off" | "manual" | "risk" | "required";
   reviewerRoute: "independent_provider" | "same_provider_fresh_context";
+  capacityAction: "pending" | "blocked";
   skipTaskClasses: readonly string[];
 }
 
@@ -135,6 +136,9 @@ export function evaluateProjectReadiness(
     }
     if (governance.projectType === "client" && reviewPolicy.reviewerRoute !== "independent_provider") {
       conflicts.push("Client review requires an independent provider.");
+    }
+    if (governance.projectType === "client" && reviewPolicy.capacityAction !== "blocked") {
+      conflicts.push("Client review capacity handling must block on unavailable reviewers, not defer silently.");
     }
   }
   return {
