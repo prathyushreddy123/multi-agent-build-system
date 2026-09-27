@@ -118,12 +118,22 @@ test("controller restart collects one isolated launch without duplication and ch
     leaseTimeoutMs: 10,
   });
   await restarted.tick();
+  for (let poll = 0; poll < 20 && records.getTask(task.id)?.state !== "DONE"; poll += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    await restarted.tick();
+  }
   const done = records.getTask(task.id);
   assert.equal(done?.state, "DONE");
   assert.ok(done?.resultRevision);
   assert.equal(records.listAttempts(task.id)[0]?.state, "succeeded");
   assert.equal(fake.starts, 1, "restart must collect the existing launch rather than dispatch a duplicate");
-  assert.equal(records.gatesForRevision(task.id, done?.resultRevision as string)[0]?.status, "PASS");
+  const gates = records.gatesForRevision(task.id, done?.resultRevision as string);
+  assert.equal(gates[0]?.status, "PASS");
+  assert.equal(gates.length, 1, "a completed gate envelope is collected exactly once");
+  assert.equal(records.stageRunsForTask(task.id).filter((stage) => stage.stage === "implement").length, 1);
+  assert.equal(records.stageRunsForTask(task.id).filter((stage) => stage.stage === "finalize").length, 1);
+  assert.equal(git(done?.worktreePath as string, "rev-list", "--count", `${done?.baseRevision}..HEAD`), "1",
+    "restart reconciliation must not create a duplicate finalization commit");
   assert.equal(readFileSync(join(done?.worktreePath as string, "value.txt"), "utf8"), "implemented\n");
   assert.equal(git(done?.worktreePath as string, "status", "--porcelain"), "");
 });

@@ -112,6 +112,13 @@ export async function integrateDependencyRevisions(path: string, revisions: stri
     const commits = missing.split("\n").filter(Boolean);
     if (commits.length === 0) throw new Error(`Dependency revision ${revision} is not reachable and has no integrable commits.`);
     for (const commit of commits) {
+      // A prior controller may have crashed after the cherry-pick committed but
+      // before its integration event was recorded. `merge-base` cannot detect
+      // the resulting equivalent commit because cherry-pick changes the hash;
+      // `git cherry` compares patch identity and prevents launching the same
+      // side effect again during reconciliation.
+      const equivalent = await exec("git", ["cherry", "HEAD", commit], { cwd: path, timeoutMs: 30_000 });
+      if (equivalent.code === 0 && equivalent.stdout.split("\n").some((line) => line.startsWith(`- ${commit}`))) continue;
       const cherryPick = await exec("git", [
         "-c", "user.name=MABS Controller",
         "-c", "user.email=mabs@local",

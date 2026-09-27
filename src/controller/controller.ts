@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { accessSync, constants, copyFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { cpus, freemem, loadavg } from "node:os";
 import { delimiter, join } from "node:path";
@@ -5,23 +6,44 @@ import { delimiter, join } from "node:path";
 import { defaultAdapters } from "../adapters/harness.ts";
 import type { AdapterHandle, WorkerAdapter } from "../adapters/types.ts";
 import { buildContextPacket, type ExecutionSelection } from "../context/packet.ts";
-import { consumesRepairBudget, isProviderUnavailable, type FailureClass } from "../core/failure.ts";
+import {
+  consumesRepairBudget,
+  diagnoseFailure,
+  failureClassForCategory,
+  isProviderUnavailable,
+  type FailureClass,
+  type FailureDiagnosis,
+} from "../core/failure.ts";
 import { ids } from "../core/ids.ts";
 import { scopesOverlap } from "../domain/plan.ts";
 import { requireProjectReadiness } from "../domain/project-policy.ts";
 import type { WorkerOutput } from "../domain/contract.ts";
 import { artifactDir } from "../core/paths.ts";
-import { runGates } from "../gates/runner.ts";
+import {
+  QUALITY_COVERAGE_GATE,
+  collectGateJob,
+  gateJobHandle,
+  gateJobStatus,
+  launchGateJob,
+} from "../gates/runner.ts";
+import { preflightWorktree } from "../environment/preflight.ts";
 import { classifyFindings, describeReviewPolicy, evaluateReviewPolicy } from "../review/policy.ts";
 import type { ReviewDecision } from "../review/policy.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
-import type { Attempt, Project, Records, Task } from "../store/records.ts";
+import type { Attempt, GateResult, GateSpec, Project, Records, Task } from "../store/records.ts";
+import type { ExecutionEpisode, ExecutionStage, StageRun, TaskObligation } from "../domain/execution.ts";
 import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceContainsRevision, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
 
 /** Marks a task whose only outstanding work is a review the controller can retry. */
 export const REVIEW_PENDING_PREFIX = "Review pending:";
+export const REVIEW_RECOVERY_PREFIX = "Review recovery pending:";
+const ENGINE_REVISION = "mabs.controller.stage.v1";
+
+function fingerprint(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
 
 /**
  * A live peer already owns the lease.
@@ -156,9 +178,14 @@ export class Controller {
         );
       }
       await this.reconcileAttempts();
+      await this.reconcileGateStages();
       await this.resumePendingReviews();
       this.promoteTasks();
       await this.dispatchReadyTasks();
+      // Give newly spawned, very short deterministic checks one bounded
+      // collection opportunity. Long checks remain detached and never hold the
+      // controller beyond this small grace window.
+      await this.reconcileGateStages();
       this.writeHealth(loopDelayMs, "running");
     } catch (error) {
       this.failedTicks += 1;
@@ -356,6 +383,501 @@ export class Controller {
     };
   }
 
+  private ensureEpisode(task: Task): ExecutionEpisode {
+    const continuation = this.records.getContinuation(task.id);
+    if (continuation.episode?.status === "active") return continuation.episode;
+    return this.records.createExecutionEpisode({
+      taskId: task.id,
+      expectedTaskVersion: continuation.taskVersion,
+      repairLimit: task.repairLimit,
+      recoveryLimit: 2,
+    });
+  }
+
+  private reserveStage(
+    task: Task,
+    stage: ExecutionStage,
+    launchKey: string,
+    input: unknown,
+    options: { revision?: string | null; environmentFingerprint?: string | null; consumeRepair?: boolean } = {},
+  ): StageRun {
+    const existing = this.records.stageByLaunchKey(launchKey);
+    if (existing) return existing;
+    const episode = this.ensureEpisode(this.records.getTask(task.id) ?? task);
+    const current = this.records.getTask(task.id) as Task;
+    return this.records.reserveStage({
+      taskId: task.id,
+      episodeId: episode.id,
+      stage,
+      ordinal: this.records.stageRunsForTask(task.id).length + 1,
+      launchKey,
+      inputFingerprint: fingerprint(input),
+      revision: options.revision ?? null,
+      environmentFingerprint: options.environmentFingerprint ?? null,
+      engineRevision: ENGINE_REVISION,
+      expectedTaskVersion: current.recordVersion,
+      consumeRepair: options.consumeRepair,
+    });
+  }
+
+  private releaseStageAdmission(stage: StageRun, reason: string): void {
+    const lease = this.records.admissionForStage(stage.id);
+    if (lease && (lease.status === "reserved" || lease.status === "active")) {
+      this.records.releaseAdmission(lease.id, lease.fencingToken, reason);
+    }
+  }
+
+  private finishStage(stage: StageRun, outcome: Parameters<Records["finishStage"]>[2]): StageRun {
+    this.releaseStageAdmission(stage, outcome.state === "succeeded" ? "stage complete" : outcome.failureDetail ?? outcome.state);
+    return this.records.finishStage(stage.id, stage.fencingToken, outcome);
+  }
+
+  private recordObligationOnce(input: Parameters<Records["recordObligation"]>[0]): TaskObligation {
+    const existing = this.records.getContinuation(input.taskId).openObligations.find((item) => item.sourceKey === input.sourceKey);
+    return existing ?? this.records.recordObligation(input);
+  }
+
+  private async runPreflight(task: Task, project: Project, launchId: string): Promise<boolean> {
+    const current = this.records.getTask(task.id) as Task;
+    const launchKey = `${launchId}:preflight`;
+    for (const prior of this.records.listActiveStageRuns()) {
+      if (prior.taskId === current.id && prior.stage === "preflight" && prior.launchKey !== launchKey &&
+          (prior.state === "waiting" || prior.state === "unknown")) {
+        this.finishStage(prior, {
+          state: "failed",
+          failureClass: prior.failureClass,
+          failureDetail: "Superseded by an explicitly retried preflight stage.",
+          taskState: current.state,
+        });
+      }
+    }
+    const stage = this.reserveStage(current, "preflight", launchKey, {
+      worktreePath: current.worktreePath,
+      revision: current.baseRevision,
+      checks: project.checkCommands,
+    }, { revision: current.baseRevision });
+    if (!current.worktreePath) {
+      this.finishStage(stage, { state: "waiting", failureClass: "CONFIG", failureDetail: "Prepared worktree path is missing." });
+      return false;
+    }
+    if (stage.state === "reserved" || stage.state === "launching") {
+      this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+    }
+    const result = preflightWorktree({
+      worktreePath: current.worktreePath,
+      expected: {
+        branch: current.branch,
+        baseRevision: current.baseRevision,
+        dependencyRevisions: this.records.dependenciesOf(current.id)
+          .map((id) => this.records.getTask(id)?.resultRevision)
+          .filter((revision): revision is string => Boolean(revision)),
+        allowedDirtyPaths: [],
+      },
+      capabilityPolicy: {
+        version: ENGINE_REVISION,
+        workerCheckCommands: [],
+        controllerCheckRunner: true,
+        permissions: { worktreeRead: true, outputWrite: true },
+      },
+      outputPaths: [artifactDir(current.id, "preflight")],
+    });
+    const components = result.components.length > 0
+      ? result.components
+      : [{ root: ".", profile: "unknown", state: result.state, missingTools: [], setupCommands: [] }];
+    for (const component of components) {
+      this.records.recordEnvironmentCheck({
+        taskId: current.id,
+        stageRunId: stage.id,
+        component: component.root,
+        profile: component.profile,
+        revision: result.revision,
+        runtimeFingerprint: result.fingerprint,
+        lockfileFingerprint: null,
+        outcome: component.state === "ready" ? "ready" : component.state === "setup_required" ? "missing" : component.state === "unavailable" ? "mismatch" : "error",
+        evidenceRefs: result.evidence.map((item) => item.id),
+        setupActionRequired: component.setupCommands[0]?.join(" ") ?? null,
+      });
+    }
+    // Unknown preserves compatibility for repositories with custom/no detected
+    // profile. Positive unavailable/setup evidence blocks without launching a model.
+    if (result.state === "setup_required" || result.state === "unavailable") {
+      const summary = result.evidence.find((item) => item.status === "fail")?.summary ?? `Worktree readiness is ${result.state}.`;
+      this.recordObligationOnce({
+        taskId: current.id,
+        kind: "gate_failure",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `preflight:${result.fingerprint}`,
+        summary,
+        introducedRevision: result.revision,
+        evidenceRefs: result.evidence.map((item) => item.id),
+      });
+      this.finishStage(stage, { state: "waiting", failureClass: "CONFIG", failureDetail: summary });
+      return false;
+    }
+    if (result.state === "ready") {
+      for (const obligation of this.records.getContinuation(current.id).openObligations) {
+        if (obligation.sourceKey.startsWith("preflight:")) {
+          this.records.resolveObligation(
+            { obligationId: obligation.id, state: "resolved", resolvedRevision: result.revision },
+            result.evidence.map((item) => item.id),
+          );
+        }
+      }
+    }
+    this.finishStage(stage, { state: "succeeded", taskState: "RUNNING" });
+    return true;
+  }
+
+  private async retryOperationalCheck(task: Task, project: Project, obligation: TaskObligation): Promise<boolean> {
+    if (!task.resultRevision || !task.worktreePath || !obligation.sourceGateId) return false;
+    const failedGate = this.records.gatesForRevision(task.id, task.resultRevision).find((gate) => gate.id === obligation.sourceGateId);
+    if (!failedGate || failedGate.failureDiagnosis?.consumesCodeRepair) return false;
+    const index = project.checkCommands.findIndex((spec) => spec.name === failedGate.name);
+    const spec = project.checkCommands[index];
+    if (!spec || index < 0) return false;
+    const current = task.state === "READY"
+      ? this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "retry operational check stage" })
+      : task;
+    const priorRuns = this.records.stageRunsForTask(task.id).filter((stage) =>
+      stage.stage === "check" && stage.inputFingerprint === this.checkFingerprint(current, spec, index),
+    ).length;
+    const stage = this.reserveStage(current, "check", `${current.id}:check:${index}:${current.resultRevision}:recovery:${priorRuns}`, {
+      revision: current.resultRevision,
+      index,
+      spec,
+    }, {
+      revision: current.resultRevision,
+      environmentFingerprint: this.records.latestEnvironmentCheck(current.id)?.runtimeFingerprint ?? null,
+    });
+    const lease = this.records.reserveAdmission({
+      stageRunId: stage.id,
+      controllerId: this.options.controllerId,
+      resources: ["gate", "cpu", `worktree:${current.id}`],
+    });
+    this.records.activateAdmission(lease.id, lease.fencingToken);
+    await launchGateJob({ taskId: current.id, stageRunId: stage.id, worktreePath: task.worktreePath, spec });
+    this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+    return true;
+  }
+
+  private async resumeOperationalTask(task: Task, project: Project): Promise<boolean> {
+    const obligations = this.records.getContinuation(task.id).openObligations.filter((item) => item.blocking);
+    const reviewRecovery = obligations.find((item) => item.sourceKey.startsWith("review-recovery:"));
+    if (reviewRecovery && task.resultRevision && task.worktreePath) {
+      const episode = this.records.getContinuation(task.id).episode;
+      if (episode && episode.recoveriesConsumed >= episode.recoveryLimit) {
+        this.blockTask(task, "CONFIG", "The active execution episode exhausted its operational review-recovery budget.");
+        return true;
+      }
+      const running = this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "explicit review recovery" });
+      const checking = this.records.transition(running.id, "CHECKING", {}, { reason: "resume the already finalized revision" });
+      const reviewing = this.records.transition(checking.id, "REVIEWING", {}, { reason: "retry only the outstanding review" });
+      const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
+      const excluded = project.reviewPolicy.reviewerRoute === "independent_provider" ? implementer?.adapter : undefined;
+      const selection = this.selectReviewRoute(reviewing, excluded);
+      if (selection.chosen) await this.launchAttempt(reviewing, project, "review", [reviewRecovery.summary], ids.launch(), selection);
+      else this.blockTask(reviewing, this.providerBlockClass(selection), `${REVIEW_RECOVERY_PREFIX} ${selection.reason}`);
+      return true;
+    }
+    const preflight = obligations.find((item) => item.sourceKey.startsWith("preflight:"));
+    if (preflight && task.worktreePath) {
+      const running = this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "retry environment preflight" });
+      const launchId = ids.launch();
+      if (!await this.runPreflight(running, project, launchId)) return true;
+      const current = this.records.getTask(task.id) as Task;
+      if (current.resultRevision) await this.scheduleNextCheck(current, project);
+      else {
+        const selection = this.selectTaskRoute(current);
+        if (selection.chosen) await this.launchAttempt(current, project, "initial", [], launchId, selection);
+      }
+      return true;
+    }
+    const gate = obligations.find((item) => item.sourceGateId !== null && item.kind === "gate_failure");
+    if (gate) return this.retryOperationalCheck(task, project, gate);
+    const policyBlocker = obligations.find((item) => item.kind === "decision_needed" || item.kind === "requirement_evidence");
+    if (policyBlocker) {
+      this.blockTask(task, "CONTRACT", `The task is still waiting on obligation ${policyBlocker.id}: ${policyBlocker.summary}`);
+      return true;
+    }
+    return false;
+  }
+
+  private checkFingerprint(task: Task, spec: GateSpec, index: number): string {
+    return fingerprint({ revision: task.resultRevision, index, spec });
+  }
+
+  private implementationAttempt(taskId: string): Attempt | null {
+    return this.records.listAttempts(taskId).findLast((attempt) =>
+      attempt.kind !== "review" && attempt.state === "succeeded",
+    ) ?? null;
+  }
+
+  private async scheduleNextCheck(task: Task, project: Project): Promise<void> {
+    const current = this.records.getTask(task.id) as Task;
+    if (!current.resultRevision || !current.worktreePath) {
+      this.blockTask(current, "CONFIG", "Checks require a finalized revision and recorded worktree.");
+      return;
+    }
+    if (this.records.listActiveStageRuns().some((stage) => stage.taskId === current.id && stage.stage === "check")) return;
+    const gates = this.records.gatesForRevision(current.id, current.resultRevision);
+    if (project.checkCommands.length === 0) {
+      if (!gates.some((gate) => gate.name === QUALITY_COVERAGE_GATE)) {
+        const stage = this.reserveStage(current, "check", `${current.id}:check:coverage:${current.resultRevision}`, {
+          revision: current.resultRevision,
+          coverage: "not_configured",
+        }, { revision: current.resultRevision });
+        this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+        const evidencePath = join(artifactDir(current.id, "controller"), "gate-quality-coverage.log");
+        writeFileSync(evidencePath,
+          `No required quality checks are configured for this project.\n[revision: ${current.resultRevision}]\n`,
+          { mode: 0o600 });
+        this.records.recordGate({
+          taskId: current.id, attemptId: this.implementationAttempt(current.id)?.id ?? null,
+          stageRunId: stage.id, jobId: stage.id, name: QUALITY_COVERAGE_GATE, status: "SKIPPED",
+          required: false, command: "", toolVersion: null, revision: current.resultRevision,
+          evidencePath, durationMs: 0, waiverId: null, inputFingerprint: stage.inputFingerprint,
+        });
+        this.finishStage(stage, { state: "succeeded", taskState: "CHECKING" });
+      }
+      await this.completeChecks(current, project);
+      return;
+    }
+    const next = project.checkCommands
+      .map((spec, index) => ({ spec, index, inputFingerprint: this.checkFingerprint(current, spec, index) }))
+      .find((item) => !gates.some((gate) => gate.inputFingerprint === item.inputFingerprint));
+    if (!next) {
+      await this.completeChecks(current, project);
+      return;
+    }
+    const stage = this.reserveStage(current, "check", `${current.id}:check:${next.index}:${current.resultRevision}`, {
+      revision: current.resultRevision,
+      index: next.index,
+      spec: next.spec,
+    }, {
+      revision: current.resultRevision,
+      environmentFingerprint: this.records.latestEnvironmentCheck(current.id)?.runtimeFingerprint ?? null,
+    });
+    const lease = this.records.reserveAdmission({
+      stageRunId: stage.id,
+      controllerId: this.options.controllerId,
+      resources: ["gate", "cpu", `worktree:${current.id}`],
+    });
+    this.records.activateAdmission(lease.id, lease.fencingToken);
+    await launchGateJob({ taskId: current.id, stageRunId: stage.id, worktreePath: current.worktreePath, spec: next.spec });
+    this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+  }
+
+  private async reconcileGateStages(): Promise<void> {
+    for (const stage of this.records.listActiveStageRuns().filter((candidate) => candidate.stage === "check")) {
+      const task = this.records.getTask(stage.taskId);
+      if (!task || !task.resultRevision || !task.worktreePath) continue;
+      const project = this.records.getProject(task.projectId);
+      if (!project) continue;
+      const entry = project.checkCommands
+        .map((spec, index) => ({ spec, index, inputFingerprint: this.checkFingerprint(task, spec, index) }))
+        .find((item) => item.inputFingerprint === stage.inputFingerprint);
+      if (!entry) {
+        if (stage.state !== "waiting" && stage.state !== "unknown") {
+          this.finishStage(stage, { state: "unknown", failureClass: "CONFIG", failureDetail: "The registered check changed while its stage was active." });
+        }
+        continue;
+      }
+      if (stage.state === "waiting" || stage.state === "unknown") continue;
+      if (stage.state === "reserved") {
+        let lease = this.records.admissionForStage(stage.id);
+        if (!lease) {
+          lease = this.records.reserveAdmission({
+            stageRunId: stage.id,
+            controllerId: this.options.controllerId,
+            resources: ["gate", "cpu", `worktree:${task.id}`],
+          });
+        }
+        if (lease.status === "reserved") this.records.activateAdmission(lease.id, lease.fencingToken);
+        await launchGateJob({ taskId: task.id, stageRunId: stage.id, worktreePath: task.worktreePath, spec: entry.spec });
+        this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+        continue;
+      }
+      const handle = gateJobHandle(task.id, stage.id);
+      let status = gateJobStatus(handle);
+      const stageAgeMs = Date.now() - Date.parse(stage.startedAt ?? stage.reservedAt);
+      if ((status === "running" || status === "unknown") && stageAgeMs < 150) {
+        const graceDeadline = Date.now() + 100;
+        while ((status === "running" || status === "unknown") && Date.now() < graceDeadline) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          status = gateJobStatus(handle);
+        }
+      }
+      if (status === "running") continue;
+      if (status === "unknown") {
+        if (Date.now() - Date.parse(stage.startedAt ?? stage.reservedAt) <= this.options.leaseTimeoutMs) continue;
+        // A launch spec without a trustworthy marker is an ambiguous crash
+        // boundary. Never create a second process to make it look recovered.
+        this.recordObligationOnce({
+          taskId: task.id, kind: "gate_failure", severity: "blocking", blocking: true,
+          sourceKey: `check-launch-unknown:${stage.id}`,
+          summary: `Check ${entry.spec.name} has an ambiguous launch marker; operator reconciliation is required.`,
+          introducedRevision: task.resultRevision,
+          evidenceRefs: [handle.specPath],
+        });
+        this.finishStage(stage, { state: "unknown", failureClass: "INFRA", failureDetail: `Ambiguous launch for check ${entry.spec.name}.` });
+        continue;
+      }
+      if (status === "lost") {
+        const detail = `Check job ${entry.spec.name} disappeared before writing a completion envelope.`;
+        try { this.records.consumeRecovery(stage.episodeId, stage.id, detail); } catch { /* the bounded limit is reflected by the durable episode */ }
+        this.recordObligationOnce({
+          taskId: task.id, kind: "gate_failure", severity: "blocking", blocking: true,
+          sourceKey: `check-job-lost:${stage.id}`, summary: detail,
+          introducedRevision: task.resultRevision, evidenceRefs: [handle.specPath, handle.markerPath],
+        });
+        this.finishStage(stage, { state: "waiting", failureClass: "INFRA", failureDetail: detail });
+        continue;
+      }
+      const { gate } = collectGateJob({
+        records: this.records,
+        task,
+        attemptId: this.implementationAttempt(task.id)?.id ?? null,
+        stageRunId: stage.id,
+        revision: task.resultRevision,
+        spec: entry.spec,
+        environmentFingerprint: stage.environmentFingerprint,
+        inputFingerprint: stage.inputFingerprint,
+      });
+      this.finishStage(stage, { state: "succeeded", taskState: "CHECKING" });
+      this.records.recordEvent({
+        kind: "gate.collected", projectId: task.projectId, taskId: task.id,
+        attemptId: gate.attemptId, data: { stageRunId: stage.id, gateId: gate.id, jobId: stage.id },
+      });
+      await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
+    }
+  }
+
+  private resolveValidatedGateObligations(taskId: string, revision: string, gates: GateResult[]): void {
+    const evidence = gates.filter((gate) => gate.status === "PASS").map((gate) => `gate:${gate.id}:PASS`);
+    if (evidence.length === 0) return;
+    for (const obligation of this.records.getContinuation(taskId).openObligations) {
+      if ((obligation.kind === "gate_failure" || obligation.kind === "code_defect") && obligation.sourceReviewId === null) {
+        this.records.resolveObligation({ obligationId: obligation.id, state: "resolved", resolvedRevision: revision }, evidence);
+      }
+    }
+  }
+
+  private async completeChecks(task: Task, project: Project): Promise<void> {
+    const current = this.records.getTask(task.id) as Task;
+    if (!current.resultRevision) return;
+    const collected = this.records.gatesForRevision(current.id, current.resultRevision);
+    const latest = new Map<string, GateResult>();
+    for (const gate of collected) latest.set(gate.inputFingerprint ?? gate.name, gate);
+    const gates = [...latest.values()];
+    const failedRequired = gates.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null);
+    const configured = project.checkCommands.filter((spec) => spec.required).length;
+    if (failedRequired.length === 0) {
+      this.resolveValidatedGateObligations(current.id, current.resultRevision, gates);
+      const notConfigured = configured === 0;
+      if (notConfigured) {
+        this.records.recordEvent({
+          kind: "quality.not_configured", projectId: project.id, taskId: current.id,
+          data: { revision: current.resultRevision, note: "No required quality checks are registered for this project." },
+        });
+      }
+      const attempt = this.implementationAttempt(current.id);
+      if (!attempt) {
+        await this.acceptTask(current, notConfigured ? "Mechanical task has no configured quality coverage." : "Mechanical checks passed.", gates);
+        return;
+      }
+      const changedFiles = await workspaceChangedFiles(current.worktreePath as string, current.baseRevision ?? attempt.baseRevision ?? current.resultRevision);
+      const diffText = (await workspaceDiff(current.worktreePath as string, current.baseRevision ?? attempt.baseRevision ?? current.resultRevision, current.resultRevision)).slice(0, 400_000);
+      const decision = this.reviewDecision(current, project, { changedFiles, diffText });
+      this.records.recordEvent({
+        kind: "review.decision",
+        projectId: project.id,
+        taskId: current.id,
+        attemptId: attempt.id,
+        data: {
+          review: decision.review,
+          reason: decision.reason,
+          matchedRules: decision.matchedRules,
+          policy: describeReviewPolicy(project.reviewPolicy),
+          changedFiles: changedFiles.length,
+        },
+      });
+      this.records.recordCheckpoint({
+        taskId: current.id, attemptId: attempt.id,
+        kind: notConfigured ? "quality_not_configured" : "checks_passed",
+        summary: notConfigured ? "No required quality checks are configured; this revision has no quality evidence." : `All ${configured} required checks passed.`,
+        resultRevision: current.resultRevision, changedFiles,
+        findings: notConfigured ? ["[major] Quality coverage is not configured."] : [],
+        nextAction: decision.review ? `Run independent revision-bound review. ${decision.reason}` : `Complete task. ${decision.reason}`,
+        evidence: gates.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
+      });
+      if (decision.review) await this.beginReview(current, project, attempt, decision);
+      else await this.acceptTask(current, decision.reason, gates);
+      return;
+    }
+
+    const findings = failedRequired.map((gate) => `${gate.name}: ${gate.status} (${gate.evidencePath ?? "no evidence"})`);
+    for (const gate of failedRequired) {
+      this.recordObligationOnce({
+        taskId: current.id,
+        kind: gate.failureDiagnosis?.category === "product_code" ? "code_defect" : "gate_failure",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `gate:${gate.id}`,
+        summary: `${gate.name}: ${gate.failureDiagnosis?.symptom ?? gate.status}`,
+        sourceGateId: gate.id,
+        introducedRevision: current.resultRevision,
+        evidenceRefs: [gate.evidencePath, gate.jobId ? gateJobHandle(current.id, gate.jobId).completionPath : null].filter((item): item is string => Boolean(item)),
+      });
+    }
+    this.records.recordCheckpoint({
+      taskId: current.id, attemptId: this.implementationAttempt(current.id)?.id,
+      kind: "checks_failed", summary: "One or more required checks failed.",
+      resultRevision: current.resultRevision, findings,
+      nextAction: "Repair proven code defects; operational failures retain their obligations for readiness recovery.",
+      evidence: failedRequired.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
+    });
+    const diagnoses = failedRequired.map((gate) => gate.failureDiagnosis).filter((item): item is FailureDiagnosis => item !== null && item !== undefined);
+    const codeFailure = diagnoses.some((item) => item.consumesCodeRepair);
+    if (codeFailure && current.repairsUsed < current.repairLimit) {
+      this.records.transition(current.id, "RUNNING", { repairs_used: current.repairsUsed + 1 }, { reason: "evidenced required gate defect" });
+      await this.launchAttempt(this.records.getTask(current.id) as Task, project, "repair", findings);
+      return;
+    }
+    const diagnosis = diagnoses.find((item) => !item.consumesCodeRepair) ?? diagnoses[0];
+    const failure = diagnosis ? failureClassForCategory(diagnosis.category) : codeFailure ? "CODE" : "INFRA";
+    if (codeFailure) {
+      this.records.transition(current.id, "FAILED", {
+        failure_class: failure,
+        blocked_reason: `Repair limit exhausted. ${findings.join("; ")}`,
+        claimed_by: null,
+        claimed_at: null,
+      });
+    } else {
+      this.blockTask(current, failure, `${diagnosis?.recoveryAction ?? "Resolve the operational check failure."} ${findings.join("; ")}`);
+    }
+  }
+
+  private async acceptTask(task: Task, reason: string, gates: GateResult[]): Promise<void> {
+    const current = this.records.getTask(task.id) as Task;
+    const blocking = this.records.getContinuation(current.id).openObligations.filter((item) => item.blocking);
+    if (blocking.length > 0) {
+      this.blockTask(current, "CONTRACT", `Acceptance is waiting on ${blocking.length} durable obligation(s).`);
+      return;
+    }
+    const stage = this.reserveStage(current, "accept", `${current.id}:accept:${current.resultRevision ?? "none"}`, {
+      revision: current.resultRevision,
+      obligations: [],
+      gates: gates.map((gate) => gate.id),
+    }, { revision: current.resultRevision });
+    this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+    this.finishStage(stage, { state: "succeeded" });
+    this.records.updateTaskFields(current.id, { claimed_by: null, claimed_at: null });
+    const done = this.records.getTask(current.id) as Task;
+    this.records.recordEvent({ kind: "task.accepted", projectId: current.projectId, taskId: current.id, data: { reason, stageRunId: stage.id } });
+    this.records.completeFeedbackForTask(current.id, done.resultSummary ?? "Response task completed without a summary.");
+  }
+
   private async reconcileAttempts(): Promise<void> {
     for (const attempt of this.records.listRunningAttempts()) {
       const task = this.records.getTask(attempt.taskId);
@@ -363,7 +885,11 @@ export class Controller {
       const adapter = this.adapters.get(attempt.adapter);
       if (!adapter) {
         this.records.finishAttempt({ attemptId: attempt.id, state: "failed", failureClass: "CONFIG", reason: "Adapter is no longer configured." });
-        this.blockTask(task, "CONFIG", `Adapter ${attempt.adapter} is not configured; explicit rerouting is required.`);
+        if (attempt.kind === "review") {
+          await this.handleReviewFailure(task, "CONFIG", `Adapter ${attempt.adapter} is not configured; explicit rerouting is required.`, attempt.adapter);
+        } else {
+          this.blockTask(task, "CONFIG", `Adapter ${attempt.adapter} is not configured; explicit rerouting is required.`);
+        }
         continue;
       }
       const status = await adapter.status(this.handleOf(attempt));
@@ -383,6 +909,8 @@ export class Controller {
       }
       await this.collectAttempt(task, attempt, adapter);
     }
+
+    await this.reconcileOrphanStages();
 
     // A restart can expose a claim made before workspace preparation. Once its
     // lease-age window has elapsed and no attempt exists, release only the claim.
@@ -406,7 +934,109 @@ export class Controller {
       ...this.records.listTasks({ state: "REVIEWING" }),
     ]) {
       if (this.records.listAttempts(task.id).some((attempt) => attempt.state === "running")) continue;
+      const stage = this.records.getContinuation(task.id).currentStage;
+      if (stage && ["reserved", "launching", "running", "waiting", "unknown"].includes(stage.state)) continue;
       this.blockTask(task, "INFRA", `Controller recovered ${task.state} without a live attempt; inspect the preserved worktree before retrying.`);
+    }
+  }
+
+  private async reconcileOrphanStages(): Promise<void> {
+    for (const stage of this.records.listActiveStageRuns().filter((candidate) => candidate.stage !== "check")) {
+      if (stage.state === "waiting" || stage.state === "unknown") continue;
+      const task = this.records.getTask(stage.taskId);
+      if (!task) continue;
+      const project = this.records.getProject(task.projectId);
+      if (!project) continue;
+      const boundAttempt = stage.attemptId ? this.records.getAttempt(stage.attemptId) : null;
+      if (boundAttempt?.state === "running") continue;
+      if (boundAttempt && ["implement", "repair", "review"].includes(stage.stage)) {
+        this.finishStage(stage, {
+          state: boundAttempt.state === "succeeded" ? "succeeded" : boundAttempt.state === "cancelled" ? "cancelled" : "failed",
+          failureClass: boundAttempt.failureClass,
+          failureDetail: boundAttempt.reason,
+          taskState: task.state,
+        });
+        continue;
+      }
+      if (stage.stage === "prepare_workspace") {
+        try {
+          if (stage.state === "reserved" || stage.state === "launching") this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+          const workspace = await this.prepareTaskWorkspace(project, task);
+          this.records.updateTaskFields(task.id, {
+            branch: workspace.branch,
+            worktree_path: workspace.path,
+            base_revision: workspace.baseRevision,
+          });
+          this.finishStage(stage, { state: "succeeded", taskState: "RUNNING" });
+          const launchId = stage.launchKey.endsWith(":prepare") ? stage.launchKey.slice(0, -":prepare".length) : ids.launch();
+          if (await this.runPreflight(this.records.getTask(task.id) as Task, project, launchId)) {
+            if (task.taskClass === "mechanical") {
+              const revision = await workspaceRevision(workspace.path);
+              this.records.transition(task.id, "CHECKING", { result_revision: revision });
+              await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
+            } else {
+              const selection = this.selectTaskRoute(this.records.getTask(task.id) as Task);
+              if (selection.chosen) await this.launchAttempt(this.records.getTask(task.id) as Task, project, "initial", [], launchId, selection);
+            }
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.finishStage(stage, { state: "unknown", failureClass: "INFRA", failureDetail: detail, taskState: "BLOCKED" });
+        }
+        continue;
+      }
+      if (stage.stage === "preflight") {
+        const launchId = stage.launchKey.endsWith(":preflight") ? stage.launchKey.slice(0, -":preflight".length) : ids.launch();
+        if (await this.runPreflight(task, project, launchId) && task.taskClass !== "mechanical") {
+          const current = this.records.getTask(task.id) as Task;
+          const selection = this.selectTaskRoute(current);
+          if (selection.chosen) await this.launchAttempt(current, project, "initial", [], launchId, selection);
+        }
+        continue;
+      }
+      if (stage.stage === "finalize") {
+        const sourceAttempt = this.records.listAttempts(task.id).findLast((attempt) => attempt.state === "succeeded" && attempt.kind !== "review");
+        if (!sourceAttempt || !task.worktreePath) continue;
+        const finalized = await finalizeWorkspace(task.worktreePath, task);
+        this.records.updateTaskFields(task.id, { result_revision: finalized.revision });
+        this.finishStage(stage, { state: "succeeded", taskState: "CHECKING" });
+        await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
+        continue;
+      }
+      if (stage.stage === "accept") {
+        const blockers = this.records.getContinuation(task.id).openObligations.filter((item) => item.blocking);
+        if (blockers.length === 0 && stage.revision === task.resultRevision) {
+          if (stage.state === "reserved" || stage.state === "launching") {
+            this.records.recordLaunchStarted(stage.id, stage.fencingToken);
+          }
+          this.finishStage(this.records.getStageRun(stage.id) ?? stage, { state: "succeeded" });
+          this.records.updateTaskFields(task.id, { claimed_by: null, claimed_at: null });
+        } else {
+          this.finishStage(stage, {
+            state: "waiting",
+            failureClass: "CONTRACT",
+            failureDetail: "Acceptance reservation no longer matches the revision or durable obligations.",
+            taskState: "BLOCKED",
+          });
+        }
+        continue;
+      }
+      // A reserved provider stage without an attempt may be in the crash window
+      // after OS launch. Its status is ambiguous, so fencing forbids relaunch.
+      if (!boundAttempt) {
+        const detail = `Recovered ${stage.stage} reservation without a bound attempt; launch status is ambiguous.`;
+        this.recordObligationOnce({
+          taskId: task.id,
+          kind: stage.stage === "review" ? "requirement_evidence" : "gate_failure",
+          severity: "blocking",
+          blocking: true,
+          sourceKey: `launch-unknown:${stage.id}`,
+          summary: detail,
+          introducedRevision: stage.revision,
+          evidenceRefs: [],
+        });
+        this.finishStage(stage, { state: "unknown", failureClass: "INFRA", failureDetail: detail, taskState: "BLOCKED" });
+      }
     }
   }
 
@@ -416,21 +1046,36 @@ export class Controller {
       this.blockTask(task, "CONFIG", "Cannot collect a worker result without its recorded worktree.");
       return;
     }
-    const collected = await adapter.collectResult(this.handleOf(attempt), task.worktreePath);
-    const output = collected.validation.output;
     const resultArtifact = join(artifactDir(task.id, attempt.id), "worker-result.json");
     const worktreeResult = join(task.worktreePath, ".mabs", "result.json");
+    // If a crash happened after preserving the contract result but before the
+    // finalization transaction completed, restore only that attempt's envelope
+    // long enough for the adapter to validate it again. It is removed before
+    // any workspace diff or commit.
+    if (!existsSync(worktreeResult) && existsSync(resultArtifact)) copyFileSync(resultArtifact, worktreeResult);
+    const collected = await adapter.collectResult(this.handleOf(attempt), task.worktreePath);
+    const output = collected.validation.output;
     if (existsSync(worktreeResult)) {
       copyFileSync(worktreeResult, resultArtifact);
-      rmSync(worktreeResult, { force: true });
     }
     const usage = collected.launch?.usage
       ? { ...collected.launch.usage, reported_model: collected.launch.reportedModel }
       : null;
 
     if ((collected.failureClass && output?.outcome !== "failed") || !collected.validation.ok || !output) {
-      const failure = collected.failureClass ?? "CONTRACT";
       const reason = collected.error ?? collected.validation.violations.map((item) => `${item.path}: ${item.message}`).join("; ");
+      const diagnosis = diagnoseFailure({
+        stage: attempt.kind === "review" ? "review" : "implement",
+        source: collected.failureClass === "CONTRACT" || (!collected.failureClass && !collected.validation.ok)
+          ? "contract"
+          : attempt.kind === "review" ? "review" : "worker",
+        exitCode: collected.launch?.exitCode ?? null,
+        timedOut: collected.launch?.timedOut ?? false,
+        text: reason,
+        legacyFailureClass: collected.failureClass,
+        evidenceIds: [this.handleOf(attempt).completionPath],
+      });
+      const failure = collected.failureClass === "CONTRACT" ? "CONTRACT" : failureClassForCategory(diagnosis.category);
       this.records.finishAttempt({
         attemptId: attempt.id,
         state: "failed",
@@ -440,12 +1085,22 @@ export class Controller {
         usage,
         outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
+      if (attempt.stageRunId) {
+        const stage = this.records.getStageRun(attempt.stageRunId);
+        if (stage && ["reserved", "launching", "running"].includes(stage.state)) {
+          this.finishStage(stage, { state: "failed", failureClass: failure, failureDetail: reason, taskState: task.state });
+        }
+      }
+      rmSync(worktreeResult, { force: true });
       if (attempt.kind === "review") await this.handleReviewFailure(task, failure, reason, attempt.adapter);
       else await this.handleFailure(task, failure, reason, attempt.adapter);
       return;
     }
 
     if (attempt.kind === "review") {
+      // The contract envelope is controller plumbing, not a reviewer edit.
+      // Remove it before enforcing the reviewer's read-only workspace policy.
+      rmSync(worktreeResult, { force: true });
       await this.collectReview(task, attempt, output, resultArtifact, usage, collected.launch?.exitCode ?? 0);
       return;
     }
@@ -460,6 +1115,13 @@ export class Controller {
         usage,
         outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
+      if (attempt.stageRunId) {
+        const stage = this.records.getStageRun(attempt.stageRunId);
+        if (stage && ["reserved", "launching", "running"].includes(stage.state)) {
+          this.finishStage(stage, { state: "waiting", failureClass: "CONTRACT", failureDetail: output.reason, taskState: "BLOCKED" });
+        }
+      }
+      rmSync(worktreeResult, { force: true });
       this.records.recordCheckpoint({
         taskId: task.id, attemptId: attempt.id, kind: "worker_blocked", summary: output.summary,
         baseRevision: attempt.baseRevision, findings: output.follow_up.unresolved,
@@ -475,7 +1137,16 @@ export class Controller {
       return;
     }
     if (output.outcome === "failed") {
-      const failure: FailureClass = collected.failureClass ?? "CODE";
+      const diagnosis = diagnoseFailure({
+        stage: attempt.kind === "repair" ? "repair" : "implement",
+        source: "worker",
+        exitCode: collected.launch?.exitCode ?? 0,
+        timedOut: collected.launch?.timedOut ?? false,
+        text: `${output.reason}\n${output.summary}`,
+        legacyFailureClass: collected.failureClass,
+        evidenceIds: [resultArtifact],
+      });
+      const failure: FailureClass = failureClassForCategory(diagnosis.category);
       this.records.finishAttempt({
         attemptId: attempt.id,
         state: "failed",
@@ -486,10 +1157,26 @@ export class Controller {
         usage,
         outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
       });
+      if (attempt.stageRunId) {
+        const stage = this.records.getStageRun(attempt.stageRunId);
+        if (stage && ["reserved", "launching", "running"].includes(stage.state)) {
+          this.finishStage(stage, { state: "failed", failureClass: failure, failureDetail: output.reason, taskState: task.state });
+        }
+      }
+      rmSync(worktreeResult, { force: true });
       await this.handleFailure(task, failure, output.reason, attempt.adapter);
       return;
     }
 
+    rmSync(worktreeResult, { force: true });
+    const attemptStage = attempt.stageRunId ? this.records.getStageRun(attempt.stageRunId) : null;
+    const finalizeStage = this.reserveStage(
+      this.records.getTask(task.id) as Task,
+      "finalize",
+      `${attempt.launchId}:finalize`,
+      { attemptId: attempt.id, baseRevision: attempt.baseRevision, worktreePath: task.worktreePath },
+    );
+    if (finalizeStage.state === "reserved") this.records.recordLaunchStarted(finalizeStage.id, finalizeStage.fencingToken);
     let finalized: Awaited<ReturnType<typeof finalizeWorkspace>>;
     try {
       finalized = await finalizeWorkspace(task.worktreePath, task);
@@ -498,6 +1185,12 @@ export class Controller {
       const failure: FailureClass = detail.startsWith("Worker changed files outside the allowed scope") ? "CONTRACT" : "INFRA";
       const reason = `Could not create the revision to check: ${detail}`;
       this.records.finishAttempt({ attemptId: attempt.id, state: "failed", outcome: output.outcome, failureClass: failure, reason, usage });
+      if (["reserved", "launching", "running"].includes(finalizeStage.state)) {
+        this.finishStage(finalizeStage, { state: "failed", failureClass: failure, failureDetail: reason, taskState: "BLOCKED" });
+      }
+      if (attemptStage && ["reserved", "launching", "running"].includes(attemptStage.state)) {
+        this.finishStage(attemptStage, { state: "failed", failureClass: failure, failureDetail: reason, taskState: "BLOCKED" });
+      }
       this.blockTask(task, failure, reason);
       return;
     }
@@ -511,6 +1204,10 @@ export class Controller {
       usage,
       outputPath: existsSync(resultArtifact) ? resultArtifact : this.handleOf(attempt).completionPath,
     });
+    rmSync(worktreeResult, { force: true });
+    if (attemptStage && ["reserved", "launching", "running"].includes(attemptStage.state)) {
+      this.finishStage(attemptStage, { state: "succeeded", taskState: "RUNNING" });
+    }
     this.records.invalidateApprovals(task.id, "Task revision changed after implementation or repair.", finalized.revision);
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: attempt.id, kind: attempt.kind === "repair" ? "repair_complete" : "implementation_complete",
@@ -519,90 +1216,16 @@ export class Controller {
       unresolved: output.follow_up.decisions_requested, nextAction: output.follow_up.next_step,
       evidence: [resultArtifact, ...output.evidence.artifacts],
     });
-    const checking = this.records.transition(task.id, "CHECKING", {
+    this.records.updateTaskFields(task.id, {
       result_revision: finalized.revision,
       result_summary: output.summary,
       blocked_reason: null,
       failure_class: null,
-    }, { changedFiles: finalized.changedFiles });
+    });
+    this.finishStage(this.records.getStageRun(finalizeStage.id) ?? finalizeStage, { state: "succeeded", taskState: "CHECKING" });
     const project = this.records.getProject(task.projectId);
     if (!project) throw new Error(`Unknown project ${task.projectId}`);
-    const gates = await runGates({
-      records: this.records,
-      task: checking,
-      attemptId: attempt.id,
-      worktreePath: task.worktreePath,
-      revision: finalized.revision,
-      specs: project.checkCommands,
-    });
-    if (gates.passed) {
-      const notConfigured = gates.status === "not_configured";
-      if (notConfigured) {
-        this.records.recordEvent({
-          kind: "quality.not_configured",
-          projectId: project.id,
-          taskId: task.id,
-          attemptId: attempt.id,
-          data: { revision: finalized.revision, note: "No required quality checks are registered for this project." },
-        });
-      }
-      // The reviewer decision needs the real change, so it is computed from the
-      // controller's own diff of the revision it just created.
-      const diffText = (await workspaceDiff(task.worktreePath, task.baseRevision ?? attempt.baseRevision ?? finalized.revision, finalized.revision)).slice(0, 400_000);
-      const decision = this.reviewDecision(checking, project, { changedFiles: finalized.changedFiles, diffText });
-      this.records.recordEvent({
-        kind: "review.decision",
-        projectId: project.id,
-        taskId: task.id,
-        attemptId: attempt.id,
-        data: {
-          review: decision.review,
-          reason: decision.reason,
-          matchedRules: decision.matchedRules,
-          policy: describeReviewPolicy(project.reviewPolicy),
-          changedFiles: finalized.changedFiles.length,
-        },
-      });
-      this.records.recordCheckpoint({
-        taskId: task.id, attemptId: attempt.id,
-        kind: notConfigured ? "quality_not_configured" : "checks_passed",
-        summary: notConfigured
-          ? "No required quality checks are configured; this revision has no quality evidence."
-          : `All ${gates.requiredConfigured} required checks passed.`,
-        resultRevision: finalized.revision, changedFiles: finalized.changedFiles,
-        findings: notConfigured
-          ? ["[major] Quality coverage is not configured; register build, lint, typecheck, or test checks before treating this revision as ready."]
-          : [],
-        nextAction: decision.review ? `Run independent revision-bound review. ${decision.reason}` : `Complete task. ${decision.reason}`,
-        evidence: gates.results.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
-      });
-      if (decision.review) {
-        await this.beginReview(this.records.getTask(task.id) as Task, project, attempt, decision);
-      } else {
-        const done = this.records.transition(task.id, "DONE", { claimed_by: null, claimed_at: null }, { review: decision.reason, gates: gates.results.length, quality: gates.status });
-        this.records.completeFeedbackForTask(task.id, done.resultSummary ?? "Response task completed without a summary.");
-      }
-      return;
-    }
-    const finding = gates.failedRequired.map((gate) => `${gate.name}: ${gate.status} (${gate.evidencePath ?? "no evidence"})`).join("; ");
-    this.records.recordCheckpoint({
-      taskId: task.id, attemptId: attempt.id, kind: "checks_failed", summary: "One or more required checks failed.",
-      resultRevision: finalized.revision, changedFiles: finalized.changedFiles, findings: [finding],
-      nextAction: "Repair the failed required checks and rerun all required checks.",
-      evidence: gates.failedRequired.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
-    });
-    const current = this.records.getTask(task.id) as Task;
-    if (current.repairsUsed < current.repairLimit) {
-      this.records.transition(task.id, "RUNNING", { repairs_used: current.repairsUsed + 1 }, { reason: "required gate failed" });
-      await this.launchAttempt(this.records.getTask(task.id) as Task, project, "repair", [finding]);
-    } else {
-      this.records.transition(task.id, "FAILED", {
-        failure_class: "CODE",
-        blocked_reason: `Repair limit exhausted. ${finding}`,
-        claimed_by: null,
-        claimed_at: null,
-      });
-    }
+    await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
   }
 
   private async beginReview(task: Task, project: Project, implementationAttempt: Attempt, decision: ReviewDecision): Promise<void> {
@@ -651,6 +1274,8 @@ export class Controller {
     for (const task of this.records.listTasks({ state: "BLOCKED" })) {
       if (!task.blockedReason?.startsWith(REVIEW_PENDING_PREFIX)) continue;
       if (!task.resultRevision || !task.worktreePath) continue;
+      const episode = this.records.getContinuation(task.id).episode;
+      if (episode && episode.recoveriesConsumed >= episode.recoveryLimit) continue;
       const project = this.records.getProject(task.projectId);
       if (!project || project.status !== "active") continue;
       const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
@@ -719,6 +1344,42 @@ export class Controller {
       policyVersion: project.reviewPolicy.version,
       contextFingerprint: this.records.reviewContextFingerprint(task.id),
     });
+    for (const obligation of this.records.getContinuation(task.id).openObligations) {
+      if (obligation.sourceKey.startsWith("review-recovery:")) {
+        this.records.resolveObligation(
+          { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
+          [`review:${review.id}:collected`],
+        );
+      }
+    }
+    for (const [index, finding] of classified.blocking.entries()) {
+      const decision = /decision required|needs? (?:a )?user decision|unanswered requirement/i.test(finding);
+      const missingRequirementEvidence = /did not verify mandatory requirement/i.test(finding);
+      this.recordObligationOnce({
+        taskId: task.id,
+        kind: decision ? "decision_needed" : missingRequirementEvidence ? "requirement_evidence" : "code_defect",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `review:${review.id}:blocking:${index}`,
+        summary: finding,
+        sourceReviewId: review.id,
+        introducedRevision: revision,
+        evidenceRefs: [review.evidencePath].filter((path): path is string => path !== null),
+      });
+    }
+    for (const [index, finding] of classified.advisory.entries()) {
+      this.recordObligationOnce({
+        taskId: task.id,
+        kind: "advisory",
+        severity: "advisory",
+        blocking: false,
+        sourceKey: `review:${review.id}:advisory:${index}`,
+        summary: finding,
+        sourceReviewId: review.id,
+        introducedRevision: revision,
+        evidenceRefs: [review.evidencePath].filter((path): path is string => path !== null),
+      });
+    }
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: attempt.id, kind: `review_${verdict}`, summary: output.summary,
       resultRevision: revision, changedFiles: this.records.changedFilesForTask(task.id), findings,
@@ -740,27 +1401,44 @@ export class Controller {
       usage,
       outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
     });
+    rmSync(join(task.worktreePath, ".mabs", "result.json"), { force: true });
+    if (attempt.stageRunId) {
+      const stage = this.records.getStageRun(attempt.stageRunId);
+      if (stage && ["reserved", "launching", "running"].includes(stage.state)) {
+        this.finishStage(stage, {
+          state: verdict === "blocked" ? "waiting" : "succeeded",
+          failureClass: verdict === "blocked" ? "CONTRACT" : null,
+          failureDetail: verdict === "blocked" ? output.reason : null,
+          taskState: verdict === "blocked" ? "BLOCKED" : "REVIEWING",
+        });
+      }
+    }
 
     if (verdict === "blocked") {
-      this.records.transition(task.id, "BLOCKED", {
-        blocked_reason: `Independent review blocked: ${output.reason}`,
-        claimed_by: null,
-        claimed_at: null,
-      });
+      this.records.updateTaskFields(task.id, { claimed_by: null, claimed_at: null });
       return;
     }
     if (verdict === "approved") {
-      const done = this.records.transition(task.id, "DONE", {
-        claimed_by: null,
-        claimed_at: null,
-        blocked_reason: null,
-        failure_class: null,
-      }, { reviewId: this.records.reviewsForTask(task.id).at(-1)?.id, revision, advisoryFindings: classified.advisory });
-      this.records.completeFeedbackForTask(task.id, done.resultSummary ?? output.summary);
+      for (const obligation of this.records.getContinuation(task.id).openObligations) {
+        if (obligation.kind === "code_defect" && obligation.sourceReviewId !== review.id) {
+          this.records.resolveObligation(
+            { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
+            [`review:${review.id}:approved`],
+          );
+        }
+      }
+      await this.acceptTask(this.records.getTask(task.id) as Task, `Independent review ${review.id} approved ${revision}.`, this.records.gatesForRevision(task.id, revision));
       return;
     }
 
     const current = this.records.getTask(task.id) as Task;
+    const decisionBlockers = this.records.getContinuation(task.id).openObligations.filter((item) =>
+      item.blocking && (item.kind === "decision_needed" || item.kind === "requirement_evidence"),
+    );
+    if (decisionBlockers.length > 0) {
+      this.blockTask(current, "CONTRACT", `Independent review is waiting on ${decisionBlockers.length} requirement decision/evidence obligation(s).`);
+      return;
+    }
     if (current.repairsUsed >= current.repairLimit) {
       this.records.transition(task.id, "FAILED", {
         failure_class: "CODE",
@@ -807,12 +1485,34 @@ export class Controller {
         return;
       }
     }
-    this.blockTask(current, failure, `Independent review failed: ${reason}`);
+    this.recordObligationOnce({
+      taskId: current.id,
+      kind: "requirement_evidence",
+      severity: "blocking",
+      blocking: true,
+      sourceKey: `review-recovery:${current.resultRevision ?? "unknown"}:${failure}`,
+      summary: `Independent review could not run: ${reason}`,
+      introducedRevision: current.resultRevision,
+      evidenceRefs: [latestAttempt?.outputPath].filter((path): path is string => path !== null),
+    });
+    this.blockTask(current, failure, `${REVIEW_RECOVERY_PREFIX} ${reason}`);
   }
 
   private async handleFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
     const current = this.records.getTask(task.id) ?? task;
     const latestAttempt = this.records.listAttempts(task.id).at(-1);
+    if (consumesRepairBudget(failure) && latestAttempt) {
+      this.recordObligationOnce({
+        taskId: current.id,
+        kind: "code_defect",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `attempt:${latestAttempt.id}:code-failure`,
+        summary: reason,
+        introducedRevision: current.resultRevision ?? latestAttempt.baseRevision,
+        evidenceRefs: [latestAttempt.outputPath].filter((path): path is string => path !== null),
+      });
+    }
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: latestAttempt?.id, kind: "attempt_failed",
       summary: `${failure}: ${reason}`, baseRevision: latestAttempt?.baseRevision ?? null,
@@ -878,15 +1578,43 @@ export class Controller {
   }
 
   private promoteTasks(): void {
-    for (const task of this.records.listTasks({ state: "QUEUED" })) {
+    const candidates = [
+      ...this.records.listTasks({ state: "QUEUED" }),
+      ...this.records.listTasks({ state: "BLOCKED" }).filter((task) => task.blockedReason?.startsWith("Dependency ")),
+    ];
+    for (const task of candidates) {
       const project = this.records.getProject(task.projectId);
       if (!project || project.status !== "active") continue;
       const dependencies = this.records.dependenciesOf(task.id).map((id) => this.records.getTask(id)).filter((item): item is Task => item !== null);
       const failed = dependencies.find((dependency) => ["FAILED", "CANCELLED"].includes(dependency.state));
       if (failed) {
-        this.records.transition(task.id, "BLOCKED", { blocked_reason: `Dependency ${failed.id} is ${failed.state}.` });
+        this.recordObligationOnce({
+          taskId: task.id,
+          kind: "requirement_evidence",
+          severity: "blocking",
+          blocking: true,
+          sourceKey: `dependency:${failed.id}`,
+          summary: `Dependency ${failed.id} must complete successfully; it is ${failed.state}.`,
+          introducedRevision: failed.resultRevision,
+          evidenceRefs: [`task:${failed.id}:${failed.state}`],
+        });
+        if (task.state !== "BLOCKED") {
+          this.records.transition(task.id, "BLOCKED", { blocked_reason: `Dependency ${failed.id} is ${failed.state}.` });
+        }
       } else if (dependencies.every((dependency) => dependency.state === "DONE")) {
-        this.records.transition(task.id, "READY");
+        for (const obligation of this.records.getContinuation(task.id).openObligations) {
+          if (!obligation.sourceKey.startsWith("dependency:")) continue;
+          const dependencyId = obligation.sourceKey.slice("dependency:".length);
+          const dependency = this.records.getTask(dependencyId);
+          if (dependency?.state === "DONE") {
+            this.records.resolveObligation(
+              { obligationId: obligation.id, state: "resolved", resolvedRevision: dependency.resultRevision },
+              [`task:${dependency.id}:DONE`],
+            );
+          }
+        }
+        const remaining = this.records.getContinuation(task.id).openObligations.filter((item) => item.blocking);
+        if (remaining.length === 0) this.records.transition(task.id, "READY", { blocked_reason: null, failure_class: null });
       }
     }
   }
@@ -931,6 +1659,21 @@ export class Controller {
           }
         }
         if (project?.status === "active" && this.executionResourcesAvailable(task)) {
+          const continuation = this.records.getContinuation(task.id);
+          if (continuation.episode && continuation.episode.repairsConsumed >= continuation.episode.repairLimit &&
+              continuation.openObligations.some((item) => item.blocking && item.kind === "code_defect")) {
+            this.blockTask(task, "CODE", "The active execution episode exhausted its repair budget; a new authorized episode is required.");
+            if (tasks.length === 0) perProject.delete(projectId);
+            continue;
+          }
+          if (await this.resumeOperationalTask(task, project)) {
+            this.records.markProjectDispatched(projectId);
+            activeProjectIds.add(projectId);
+            if (this.records.listRunningAttempts().some((attempt) => attempt.taskId === task.id)) available -= 1;
+            dispatchedInRound = true;
+            if (tasks.length === 0) perProject.delete(projectId);
+            continue;
+          }
           const selection = this.selectTaskRoute(task);
           if (task.taskClass === "mechanical") {
             await this.dispatchMechanical(task, project);
@@ -1024,13 +1767,20 @@ export class Controller {
     const claimed = this.records.claimTask(task.id, launchId);
     if (!claimed) return false;
     try {
+      const prepareStage = this.reserveStage(claimed, "prepare_workspace", `${launchId}:prepare`, {
+        projectId: project.id,
+        taskId: claimed.id,
+        dependencies: this.records.dependenciesOf(claimed.id),
+      });
+      this.records.recordLaunchStarted(prepareStage.id, prepareStage.fencingToken);
       const workspace = await this.prepareTaskWorkspace(project, claimed);
       this.records.updateTaskFields(task.id, {
         branch: workspace.branch,
         worktree_path: workspace.path,
         base_revision: workspace.baseRevision,
       });
-      this.records.transition(task.id, "RUNNING");
+      this.finishStage(prepareStage, { state: "succeeded", taskState: "RUNNING" });
+      if (!await this.runPreflight(this.records.getTask(task.id) as Task, project, launchId)) return false;
       const kind: Attempt["kind"] = task.failureClass !== null && isProviderUnavailable(task.failureClass) ? "reroute" : "initial";
       await this.launchAttempt(this.records.getTask(task.id) as Task, project, kind, [], launchId, selection);
       return this.records.listAttempts(task.id).some((attempt) => attempt.state === "running");
@@ -1047,23 +1797,25 @@ export class Controller {
     const claimed = this.records.claimTask(task.id, launchId);
     if (!claimed) return;
     try {
+      const prepareStage = this.reserveStage(claimed, "prepare_workspace", `${launchId}:prepare`, {
+        projectId: project.id,
+        taskId: claimed.id,
+        dependencies: this.records.dependenciesOf(claimed.id),
+      });
+      this.records.recordLaunchStarted(prepareStage.id, prepareStage.fencingToken);
       const workspace = await this.prepareTaskWorkspace(project, claimed);
       this.records.updateTaskFields(task.id, {
         branch: workspace.branch,
         worktree_path: workspace.path,
         base_revision: workspace.baseRevision,
       });
-      this.records.transition(task.id, "RUNNING", {}, { routing: "deterministic; no model inference" });
+      this.finishStage(prepareStage, { state: "succeeded", taskState: "RUNNING" });
+      if (!await this.runPreflight(this.records.getTask(task.id) as Task, project, launchId)) return;
       const revision = await workspaceRevision(workspace.path);
-      const checking = this.records.transition(task.id, "CHECKING", { result_revision: revision });
-      const gates = await runGates({
-        records: this.records,
-        task: checking,
-        attemptId: null,
-        worktreePath: workspace.path,
-        revision,
-        specs: project.checkCommands,
-      });
+      this.records.transition(task.id, "CHECKING", {
+        result_revision: revision,
+        result_summary: "Registered deterministic gates scheduled without model inference.",
+      }, { routing: "deterministic; no model inference" });
       this.records.recordRouting({
         taskId: task.id,
         rule: this.routingPolicy.version,
@@ -1071,20 +1823,7 @@ export class Controller {
         eligible: [],
         chosen: "deterministic",
       });
-      if (gates.passed) {
-        this.records.transition(task.id, "DONE", {
-          result_summary: "Registered deterministic gates passed without model inference.",
-          claimed_by: null,
-          claimed_at: null,
-        });
-      } else {
-        this.records.transition(task.id, "FAILED", {
-          failure_class: "CODE",
-          blocked_reason: "One or more required deterministic gates failed.",
-          claimed_by: null,
-          claimed_at: null,
-        });
-      }
+      await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
     } catch (error) {
       const current = this.records.getTask(task.id) as Task;
       this.blockTask(current, "INFRA", error instanceof Error ? error.message : String(error));
@@ -1111,6 +1850,32 @@ export class Controller {
       effort: candidate.effort,
       authMode: adapter.authMode,
     };
+    const priorAttempt = this.records.listAttempts(task.id).at(-1);
+    const priorStage = priorAttempt?.stageRunId ? this.records.getStageRun(priorAttempt.stageRunId) : null;
+    const executionStage: ExecutionStage = kind === "review"
+      ? "review"
+      : kind === "repair" || (kind === "reroute" && priorStage?.stage === "repair")
+        ? "repair"
+        : "implement";
+    const stage = this.reserveStage(task, executionStage, `${launchId}:${executionStage}`, {
+      kind,
+      adapter: adapter.name,
+      model: execution.model,
+      effort: execution.effort,
+      revision: executionStage === "review" ? task.resultRevision : task.baseRevision,
+      obligations: this.records.getContinuation(task.id).openObligations.map((item) => item.id),
+    }, {
+      revision: executionStage === "review" ? task.resultRevision : task.baseRevision,
+      consumeRepair: kind !== "reroute",
+    });
+    const admission = this.records.reserveAdmission({
+      stageRunId: stage.id,
+      controllerId: this.options.controllerId,
+      provider: adapter.name,
+      quotaDomain: adapter.authMode,
+      resources: ["model-worker", `provider:${adapter.name}`, `worktree:${task.id}`],
+    });
+    this.records.activateAdmission(admission.id, admission.fencingToken);
     const attemptId = ids.attempt();
     const dir = artifactDir(task.id, attemptId);
     const completionPath = join(dir, "completion.json");
@@ -1150,6 +1915,9 @@ export class Controller {
           .filter((path): path is string => path !== null),
       );
     }
+    const obligationFindings = this.records.getContinuation(task.id).openObligations.map((obligation) =>
+      `[${obligation.severity}] Obligation ${obligation.id}: ${obligation.summary}`,
+    );
     const packet = buildContextPacket({
       records: this.records,
       project,
@@ -1161,7 +1929,7 @@ export class Controller {
         baseRevision: kind === "review" ? (task.resultRevision as string) : task.baseRevision,
       },
       execution,
-      previousFindings,
+      previousFindings: [...new Set([...previousFindings, ...obligationFindings])],
       purpose: kind === "review" ? "review" : "implementation",
       additionalArtifacts: reviewArtifacts,
     });
@@ -1180,6 +1948,12 @@ export class Controller {
       outputPath: completionPath,
       promptVersion: WORKER_PROMPT_VERSION,
       skillVersions: guidanceForAttempt(task, kind),
+      stageRunId: stage.id,
+      requestedModel: execution.model,
+      configuredModel: execution.model,
+      requestedEffort: execution.effort,
+      configuredEffort: execution.effort,
+      engineVersion: ENGINE_REVISION,
     });
     this.records.updateTaskFields(task.id, { claimed_by: launchId, claimed_at: new Date().toISOString() });
     this.records.recordRouting({
@@ -1216,10 +1990,21 @@ export class Controller {
         completionPath,
       });
       this.records.setAttemptProcess(attempt.id, handle.pid, handle.sessionId);
+      this.records.recordLaunchStarted(stage.id, stage.fencingToken, { attemptId: attempt.id });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.records.finishAttempt({ attemptId, state: "failed", failureClass: "INFRA", reason });
-      this.blockTask(task, "INFRA", reason);
+      const diagnosis = diagnoseFailure({
+        stage: executionStage,
+        source: kind === "review" ? "review" : "worker",
+        exitCode: null,
+        text: reason,
+      });
+      const failure = failureClassForCategory(diagnosis.category);
+      this.records.finishAttempt({ attemptId, state: "failed", failureClass: failure, reason });
+      try { this.records.consumeRecovery(stage.episodeId, stage.id, reason); } catch { /* bounded exhaustion is enforced before another automatic resume */ }
+      this.finishStage(stage, { state: "failed", failureClass: failure, failureDetail: reason, taskState: task.state });
+      if (kind === "review") await this.handleReviewFailure(task, failure, reason, adapter.name);
+      else await this.handleFailure(task, failure, reason, adapter.name);
     }
   }
 

@@ -25,7 +25,7 @@ import {
 } from "../review/policy.ts";
 import type { ReviewMode, ReviewPolicy, ReviewPreset, ReviewTrigger } from "../review/policy.ts";
 import { QUALITY_COVERAGE_GATE } from "../gates/runner.ts";
-import type { FailureClass } from "../core/failure.ts";
+import type { FailureClass, FailureDiagnosis } from "../core/failure.ts";
 import { TASK_CLASSES } from "../routing/router.ts";
 import type { Ambiguity, ChangeRisk, Complexity, TaskClass } from "../routing/router.ts";
 import {
@@ -188,6 +188,15 @@ export interface GateResult {
   evidencePath: string | null;
   durationMs: number | null;
   waiverId: string | null;
+  stageRunId?: string | null;
+  jobId?: string | null;
+  environmentFingerprint?: string | null;
+  commandFingerprint?: string | null;
+  inputFingerprint?: string | null;
+  rawExitStatus?: number | null;
+  rawSignal?: string | null;
+  timedOut?: boolean | null;
+  failureDiagnosis?: FailureDiagnosis | null;
   createdAt: string;
 }
 
@@ -792,6 +801,15 @@ function toGate(row: Row): GateResult {
     evidencePath: (row.evidence_path as string) ?? null,
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
     waiverId: (row.waiver_id as string) ?? null,
+    stageRunId: (row.stage_run_id as string) ?? null,
+    jobId: (row.job_id as string) ?? null,
+    environmentFingerprint: (row.environment_fingerprint as string) ?? null,
+    commandFingerprint: (row.command_fingerprint as string) ?? null,
+    inputFingerprint: (row.input_fingerprint as string) ?? null,
+    rawExitStatus: row.raw_exit_status === null || row.raw_exit_status === undefined ? null : Number(row.raw_exit_status),
+    rawSignal: (row.raw_signal as string) ?? null,
+    timedOut: row.timed_out === null || row.timed_out === undefined ? null : Number(row.timed_out) === 1,
+    failureDiagnosis: fromJson<FailureDiagnosis | null>(row.failure_diagnosis, null),
     createdAt: row.created_at as string,
   };
 }
@@ -1601,6 +1619,8 @@ export class Records {
     engineRevision: string;
     expectedTaskVersion: number;
     fencingToken?: string;
+    /** A provider reroute of an already-reserved repair keeps its allocation. */
+    consumeRepair?: boolean;
   }): StageRun {
     if (!EXECUTION_STAGES.includes(input.stage)) throw new Error(`Unknown execution stage: ${input.stage}`);
     if (!Number.isSafeInteger(input.ordinal) || input.ordinal < 1) throw new Error("Stage ordinal must be a positive integer.");
@@ -1618,7 +1638,7 @@ export class Records {
       if (["DONE", "CANCELLED"].includes(task.state)) throw new Error(`Task ${task.id} is ${task.state}; no stage can be reserved.`);
       const episode = this.store.get("SELECT * FROM execution_episodes WHERE id = ? AND task_id = ?", input.episodeId, task.id);
       if (!episode || episode.status !== "active") throw new Error(`Execution episode ${input.episodeId} is not active for task ${task.id}.`);
-      if (input.stage === "repair") {
+      if (input.stage === "repair" && input.consumeRepair !== false) {
         if (Number(episode.repairs_consumed) >= Number(episode.repair_limit)) throw new Error(`Repair limit reached for episode ${input.episodeId}.`);
         this.store.run("UPDATE execution_episodes SET repairs_consumed = repairs_consumed + 1 WHERE id = ?", input.episodeId);
       }
@@ -1642,6 +1662,51 @@ export class Records {
         data: { schemaVersion: 1, stageRunId: id, episodeId: input.episodeId, stage: input.stage, ordinal: input.ordinal, launchKey: input.launchKey },
       });
       return toStageRun(this.store.get("SELECT * FROM stage_runs WHERE id = ?", id) as Row);
+    });
+  }
+
+  getStageRun(stageId: string): StageRun | null {
+    const row = this.store.get("SELECT * FROM stage_runs WHERE id = ?", stageId);
+    return row ? toStageRun(row) : null;
+  }
+
+  stageRunsForTask(taskId: string): StageRun[] {
+    return this.store.all("SELECT * FROM stage_runs WHERE task_id = ? ORDER BY ordinal, rowid", taskId).map(toStageRun);
+  }
+
+  listActiveStageRuns(): StageRun[] {
+    return this.store.all(
+      "SELECT * FROM stage_runs WHERE state IN ('reserved','launching','running','waiting','unknown') ORDER BY reserved_at, rowid",
+    ).map(toStageRun);
+  }
+
+  stageByLaunchKey(launchKey: string): StageRun | null {
+    const row = this.store.get("SELECT * FROM stage_runs WHERE launch_key = ?", launchKey);
+    return row ? toStageRun(row) : null;
+  }
+
+  admissionForStage(stageRunId: string): AdmissionLease | null {
+    const row = this.store.get("SELECT * FROM admission_leases WHERE stage_run_id = ?", stageRunId);
+    return row ? toAdmissionLease(row) : null;
+  }
+
+  /** Charge an operational recovery independently from the code-repair budget. */
+  consumeRecovery(episodeId: string, stageRunId: string, reason: string): ExecutionEpisode {
+    return this.store.tx(() => {
+      const episode = this.store.get("SELECT * FROM execution_episodes WHERE id = ?", episodeId);
+      if (!episode) throw new Error(`Unknown execution episode ${episodeId}`);
+      if (episode.status !== "active") throw new Error(`Execution episode ${episodeId} is ${String(episode.status)}.`);
+      if (Number(episode.recoveries_consumed) >= Number(episode.recovery_limit)) {
+        throw new Error(`Recovery limit reached for episode ${episodeId}.`);
+      }
+      this.store.run("UPDATE execution_episodes SET recoveries_consumed = recoveries_consumed + 1 WHERE id = ?", episodeId);
+      const stage = this.getStageRun(stageRunId);
+      const task = stage ? this.getTask(stage.taskId) : null;
+      this.recordEvent({
+        kind: "execution.recovery_consumed", projectId: task?.projectId ?? null, taskId: task?.id ?? null,
+        data: { schemaVersion: 1, episodeId, stageRunId, reason },
+      });
+      return toEpisode(this.store.get("SELECT * FROM execution_episodes WHERE id = ?", episodeId) as Row);
     });
   }
 
@@ -1703,8 +1768,15 @@ export class Records {
       ).run(outcome.state, outcome.failureClass ?? null, outcome.failureDetail ?? null, at, at, stageId, fencingToken);
       if (Number(updated.changes) !== 1) throw new Error(`Stage ${stageId} completion was fenced by another owner.`);
       this.store.run(
-        "UPDATE tasks SET state = ?, record_version = record_version + 1, updated_at = ?, blocked_reason = ? WHERE id = ?",
-        nextTaskState, at, nextTaskState === "BLOCKED" ? outcome.failureDetail ?? null : null, task.id,
+        `UPDATE tasks SET state = ?, record_version = record_version + 1, updated_at = ?,
+           blocked_reason = ?, failure_class = ?, claimed_by = ?, claimed_at = ? WHERE id = ?`,
+        nextTaskState,
+        at,
+        nextTaskState === "BLOCKED" ? outcome.failureDetail ?? null : null,
+        nextTaskState === "BLOCKED" ? outcome.failureClass ?? task.failureClass : task.failureClass,
+        nextTaskState === "BLOCKED" ? null : task.claimedBy,
+        nextTaskState === "BLOCKED" ? null : task.claimedAt,
+        task.id,
       );
       if (stage.stage === "accept" && outcome.state === "succeeded") {
         this.store.run("UPDATE execution_episodes SET status = 'completed', ended_at = ? WHERE id = ?", at, stage.episode_id);
@@ -1806,6 +1878,14 @@ export class Records {
       });
       return toEnvironmentCheck(this.store.get("SELECT * FROM environment_checks WHERE id = ?", id) as Row);
     });
+  }
+
+  latestEnvironmentCheck(taskId: string): EnvironmentCheck | null {
+    const row = this.store.get(
+      "SELECT * FROM environment_checks WHERE task_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1",
+      taskId,
+    );
+    return row ? toEnvironmentCheck(row) : null;
   }
 
   reserveAdmission(input: {
@@ -2152,12 +2232,24 @@ export class Records {
   // --- gates --------------------------------------------------------------
 
   recordGate(input: Omit<GateResult, "id" | "createdAt">): GateResult {
+    if (input.stageRunId) {
+      const existing = this.store.get("SELECT * FROM gate_results WHERE stage_run_id = ?", input.stageRunId);
+      if (existing) {
+        const gate = toGate(existing);
+        if (gate.taskId !== input.taskId || gate.revision !== input.revision || gate.name !== input.name ||
+            (gate.inputFingerprint ?? null) !== (input.inputFingerprint ?? null)) {
+          throw new Error(`Gate stage ${input.stageRunId} already collected different evidence.`);
+        }
+        return gate;
+      }
+    }
     const id = ids.gate();
     this.store.tx(() => {
       this.store.run(
         `INSERT INTO gate_results(id, task_id, attempt_id, name, status, required, command, tool_version,
-           revision, evidence_path, duration_ms, waiver_id, created_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           revision, evidence_path, duration_ms, waiver_id, stage_run_id, job_id, environment_fingerprint,
+           command_fingerprint, input_fingerprint, raw_exit_status, raw_signal, timed_out, failure_diagnosis, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.taskId,
         input.attemptId,
@@ -2170,8 +2262,23 @@ export class Records {
         input.evidencePath,
         input.durationMs,
         input.waiverId,
+        input.stageRunId ?? null,
+        input.jobId ?? null,
+        input.environmentFingerprint ?? null,
+        input.commandFingerprint ?? null,
+        input.inputFingerprint ?? null,
+        input.rawExitStatus ?? null,
+        input.rawSignal ?? null,
+        input.timedOut === null || input.timedOut === undefined ? null : input.timedOut ? 1 : 0,
+        input.failureDiagnosis ? toJson(input.failureDiagnosis) : null,
         nowIso(),
       );
+      if (input.stageRunId) {
+        const bound = this.store.db.prepare(
+          "UPDATE stage_runs SET gate_id = ?, last_progress_at = ? WHERE id = ? AND gate_id IS NULL",
+        ).run(id, nowIso(), input.stageRunId);
+        if (Number(bound.changes) !== 1) throw new Error(`Gate stage ${input.stageRunId} could not bind result ${id}.`);
+      }
       this.recordEvent({
         kind: "gate.result",
         taskId: input.taskId,
@@ -2258,7 +2365,10 @@ export class Records {
     const project = this.getProject(task.projectId);
     if (!project) throw new Error(`Unknown project ${task.projectId}`);
     const required = project.checkCommands.filter((spec) => spec.required);
-    const gates = this.gatesForRevision(taskId, revision);
+    const allGates = this.gatesForRevision(taskId, revision);
+    const latestByIdentity = new Map<string, GateResult>();
+    for (const gate of allGates) latestByIdentity.set(gate.inputFingerprint ?? gate.name, gate);
+    const gates = [...latestByIdentity.values()];
     const missing = required.filter((spec) => !gates.some((gate) => gate.name === spec.name)).map((spec) => spec.name);
     const failing = gates.filter((gate) => gate.required && gate.status !== "PASS" && gate.waiverId === null).map((gate) => gate.name);
     const waiver = this.listApprovals("approved").find((approval) =>
@@ -2992,6 +3102,14 @@ export class Records {
     policyVersion?: string | null;
     contextFingerprint?: string | null;
   }): ReviewResult {
+    const prior = this.store.get("SELECT * FROM review_results WHERE attempt_id = ? ORDER BY created_at LIMIT 1", input.attemptId);
+    if (prior) {
+      const review = toReview(prior);
+      if (review.taskId !== input.taskId || review.revision !== input.revision) {
+        throw new Error(`Review attempt ${input.attemptId} is already bound to different review evidence.`);
+      }
+      return review;
+    }
     const id = ids.review();
     const classified = classifyFindings(input.findings);
     const blocking = input.blockingFindings ?? classified.blocking;
