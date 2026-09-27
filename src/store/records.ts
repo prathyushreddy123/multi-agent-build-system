@@ -1204,11 +1204,30 @@ export class Records {
           throw new Error("Only an explicit human decision may reclassify a client project; automation cannot relabel it to weaken review.");
         }
       }
+      const nextVersion = expectedVersion + 1;
+      const currentProject = input.projectId ? this.getProject(input.projectId) as Project : null;
+      const decidedGovernance: ProjectGovernance | null = currentProject ? {
+        ...currentProject.governance,
+        projectType: input.projectType,
+        reviewChoice: input.reviewChoice,
+        decisionState: "confirmed",
+        decisionId: id,
+        version: nextVersion,
+      } : null;
+      // Governance fixes the review trigger but does not erase compatible,
+      // explicitly configured scope, routing, risk rules, or capacity
+      // behavior. A conflicting policy is replaced with the safe canonical
+      // policy for the new decision, so review-off can never survive a
+      // client/required classification.
+      const projectReviewPolicy = currentProject && decidedGovernance &&
+          evaluateProjectReadiness(decidedGovernance, currentProject.reviewPolicy).conflicts.length === 0
+        ? currentProject.reviewPolicy
+        : reviewPolicyForGovernance(input.projectType, input.reviewChoice);
       const resolvedPolicy = input.resolvedPolicy ?? {
         policyVersion: PROJECT_POLICY_VERSION,
         projectType: input.projectType,
         reviewChoice: input.reviewChoice,
-        reviewPolicy: reviewPolicyForGovernance(input.projectType, input.reviewChoice),
+        reviewPolicy: projectReviewPolicy,
       };
       this.store.run(
         `INSERT INTO project_policy_decisions(
@@ -1219,7 +1238,6 @@ export class Records {
         input.projectType, input.reviewChoice, toJson(resolvedPolicy), input.actor, input.source,
         input.sourceRef ?? null, at,
       );
-      const nextVersion = expectedVersion + 1;
       const result = this.store.db.prepare(
         `UPDATE ${table} SET project_type = ?, review_choice = ?, governance_decision_id = ?,
            governance_version = ?, updated_at = ? WHERE id = ? AND governance_version = ?`,
@@ -1231,10 +1249,9 @@ export class Records {
         const project = this.getProject(input.projectId) as Project;
         const parentId = project.configVersion;
         configVersion = ids.config();
-        const policy = reviewPolicyForGovernance(input.projectType, input.reviewChoice);
         this.store.run(
           "UPDATE projects SET review_policy = ?, config_version = ? WHERE id = ?",
-          toJson(policy), configVersion, input.projectId,
+          toJson(projectReviewPolicy), configVersion, input.projectId,
         );
         this.invalidateProjectApprovals(input.projectId, "Project governance changed.");
         this.recordCurrentProjectConfig(input.projectId, configVersion, "governance-decision", parentId);
