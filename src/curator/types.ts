@@ -86,6 +86,30 @@ export interface CuratorSignals {
   providerFailures: number;
   repeatedQuestions: number;
   rejectedFingerprints: string[];
+  /**
+   * Failures re-diagnosed as the task's own product code. Environment,
+   * provider, and controller failures are excluded: they call for a
+   * different remedy than a longer implementation prompt.
+   */
+  productCodeFailures?: number;
+  /** Systemic incident occurrences by diagnosed category. */
+  incidentsByCategory?: Record<string, number>;
+}
+
+export type RecommendationMechanism = "environment_setup" | "provider_capacity" | "engine_fix" | "worker_contract" | "investigate";
+
+/** A proposal-only recommendation. It never changes configuration by itself. */
+export interface CuratorRecommendation {
+  mechanism: RecommendationMechanism;
+  category: string;
+  signature: string;
+  symptom: string;
+  occurrences: number;
+  /** Lesson status of the underlying incident; unknown until it is imported. */
+  lessonStatus: "verified" | "hypothesis" | "not_imported";
+  incidentId: string | null;
+  action: string;
+  evidence: string[];
 }
 
 export interface ProposalInput {

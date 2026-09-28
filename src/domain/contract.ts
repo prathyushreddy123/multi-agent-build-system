@@ -75,6 +75,8 @@ export interface WorkerInput {
       summary: string;
     }[];
     previous_findings: string[];
+    /** At most three project lessons, each labeled verified or hypothesis. */
+    lessons?: { incident_id: string; status: "verified" | "hypothesis"; text: string }[];
     /** The most recent operational failure (quota, auth, environment). It is not a code finding. */
     last_operational_failure?: string | null;
     artifacts: string[];

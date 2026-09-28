@@ -7,6 +7,7 @@ import { artifactDir } from "../core/paths.ts";
 import { CONTRACT_VERSION } from "../domain/contract.ts";
 import type { WorkerInput, WorkerRole } from "../domain/contract.ts";
 import type { TaskObligation } from "../domain/execution.ts";
+import { lessonsForTask } from "../incidents/lessons.ts";
 import { assembleWorkerPrompt } from "../prompts/roles.ts";
 import { guidanceForAttempt, guidanceText } from "../prompts/versions.ts";
 import type { Project, Records, Task, TaskCheckpoint } from "../store/records.ts";
@@ -191,6 +192,8 @@ export function buildContextPacket(input: {
   }));
   const selectedGuidance = guidanceForAttempt(input.task, purpose === "review" ? "review" : purpose === "repair" ? "repair" : "initial");
   const role: WorkerRole = purpose === "review" ? "reviewer" : roleOf(input.task.role);
+  const lessons = lessonsForTask(input.records, input.task, purpose)
+    .map((lesson) => ({ incident_id: lesson.incidentId, status: lesson.status, text: lesson.text }));
   const dir = artifactDir(input.task.id, input.attemptId);
 
   const composeInput = (files: RetrievedFile[], omitted: { path: string; reason: string }[], inspected: string | null,
@@ -262,6 +265,7 @@ export function buildContextPacket(input: {
         estimated_tokens: file.estimatedTokens,
       })),
       previous_findings: previousFindings,
+      lessons,
       last_operational_failure: input.operationalFailure ?? null,
       artifacts,
       checkpoint: checkpointContext,

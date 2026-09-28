@@ -17,7 +17,10 @@ import {
   proposalDetail,
   requestActivationApproval,
   requestRevertApproval,
+  curatorRecommendations,
 } from "./curator/service.ts";
+import { importIncidentHistory } from "./incidents/projection.ts";
+import { INCIDENT_CONFIDENCE } from "./incidents/types.ts";
 import { projectConfigSnapshot } from "./domain/config.ts";
 import {
   GovernanceNeedsInputError,
@@ -214,6 +217,13 @@ MAINTENANCE
 
 OCCASIONAL — tuning and measurement
   curator analyze|snapshot|suggest <project>
+  curator recommend <project>                   Evidence-backed remedies for recurring incidents (proposal only)
+  incident import-history [--project=<id>] [--dry-run]
+                                                Deterministic, idempotent incident projection
+  incident list [--project=<id>] | incident show <incident>
+  incident hypothesize <incident> --text=... --confidence=low|medium|high --by=<person>
+  incident verify <incident> --cause=... --fix=<ref> --test=<ref> --by=<person>
+  incident supersede <incident> --reason=... --by=<person>
   curator propose <project> <config.json> --title=... --rationale=...
   curator list [project] | curator show <proposal>
   curator evaluate|reject|request-activation <proposal>
@@ -990,6 +1000,66 @@ async function main(): Promise<void> {
       const response = textOption(args, "response");
       if (!id || !response) throw new Error("Usage: mabs feedback answer <id> --response=...");
       console.log(JSON.stringify(records.answerFeedback(id, response, textOption(args, "by", "local-cli") as string), null, 2));
+      return;
+    }
+    if (area === "curator" && action === "recommend") {
+      const project = rest[0] ? resolveProject(records, rest[0]) : null;
+      if (!project) throw new Error("Usage: mabs curator recommend <project>");
+      console.log(JSON.stringify(curatorRecommendations(records, project.id), null, 2));
+      return;
+    }
+    if (area === "incident" && action === "import-history") {
+      const args = parseArgs(rest);
+      const projectValue = textOption(args, "project");
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      if (projectValue && !project) throw new Error(`Unknown project ${projectValue}`);
+      console.log(JSON.stringify(importIncidentHistory(records, { projectId: project?.id, dryRun: args.options.has("dry-run") }), null, 2));
+      return;
+    }
+    if (area === "incident" && action === "list") {
+      const args = parseArgs(rest);
+      const projectValue = textOption(args, "project");
+      const project = projectValue ? resolveProject(records, projectValue) : null;
+      console.log(JSON.stringify(records.listIncidents({ projectId: project?.id }).map((incident) => ({
+        ...incident, occurrences: records.incidentOccurrences(incident.id).length,
+      })), null, 2));
+      return;
+    }
+    if (area === "incident" && action === "show") {
+      const incident = rest[0] ? records.getIncident(rest[0]) : null;
+      if (!incident) throw new Error("Usage: mabs incident show <incident>");
+      console.log(JSON.stringify({ incident, occurrences: records.incidentOccurrences(incident.id) }, null, 2));
+      return;
+    }
+    if (area === "incident" && (action === "hypothesize" || action === "verify" || action === "supersede")) {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const by = textOption(args, "by");
+      if (!id || !by?.trim()) throw new Error(`Usage: mabs incident ${action} <incident> ... --by=<person>`);
+      if (action === "hypothesize") {
+        const confidence = textOption(args, "confidence") ?? "low";
+        if (!["low", "medium", "high"].includes(confidence) || !INCIDENT_CONFIDENCE.includes(confidence as never)) {
+          throw new Error("--confidence must be low, medium, or high; verified requires `incident verify`.");
+        }
+        const text = textOption(args, "text");
+        if (!text?.trim()) throw new Error("--text is required");
+        console.log(JSON.stringify(records.updateIncident(id, { hypothesis: text, confidence: confidence as "low", lifecycle: "investigating" }, by), null, 2));
+      } else if (action === "verify") {
+        const cause = textOption(args, "cause");
+        const fix = textOption(args, "fix");
+        const testRef = textOption(args, "test");
+        if (!cause?.trim() || !fix?.trim() || !testRef?.trim()) throw new Error("--cause, --fix, and --test are all required to verify a lesson.");
+        console.log(JSON.stringify(records.updateIncident(id, {
+          confirmedCause: cause, confidence: "verified", lifecycle: "resolved", fixRefs: [fix], testRefs: [testRef],
+        }, by), null, 2));
+      } else {
+        const reason = textOption(args, "reason");
+        if (!reason?.trim()) throw new Error("--reason is required");
+        const current = records.getIncident(id);
+        console.log(JSON.stringify(records.updateIncident(id, {
+          lifecycle: "superseded", lessonRefs: [...(current?.lessonRefs ?? []), `superseded: ${reason}`],
+        }, by), null, 2));
+      }
       return;
     }
     if (area === "curator" && action === "analyze") {

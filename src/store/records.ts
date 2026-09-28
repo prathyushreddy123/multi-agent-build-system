@@ -2360,12 +2360,30 @@ export class Records {
         throw new Error(`Incident signature ${input.signature} already belongs to ${String(incidentRow.id)}.`);
       }
       const incident = toIncident(incidentRow as Row);
+      // Idempotent: one source event is one occurrence, however often it is imported.
+      const existing = this.store.get(
+        "SELECT * FROM incident_occurrences WHERE incident_id = ? AND source_key = ?", incident.id, input.sourceKey,
+      );
+      if (existing) return toIncidentOccurrence(existing);
+      const observedAt = input.observedAt ?? nowIso();
+      // A new occurrence after a fix was recorded is a recurrence: the lesson
+      // reopens and loses its verified status rather than being trusted blindly.
+      if ((incident.lifecycle === "resolved" || incident.lifecycle === "mitigated") && Date.parse(observedAt) > Date.parse(incident.updatedAt)) {
+        this.store.run(
+          "UPDATE incidents SET lifecycle = 'open', confidence = ?, updated_at = ? WHERE id = ?",
+          incident.confidence === "verified" ? "medium" : incident.confidence, nowIso(), incident.id,
+        );
+        this.recordEvent({
+          kind: "incident.recurred", taskId: input.taskId ?? null,
+          data: { incidentId: incident.id, previousLifecycle: incident.lifecycle, previousConfidence: incident.confidence, sourceKey: input.sourceKey },
+        });
+      }
       this.store.run(
         `INSERT INTO incident_occurrences(
            id, incident_id, source_key, task_id, stage_run_id, attempt_id, revision, evidence_refs, observed_at
          ) VALUES(?,?,?,?,?,?,?,?,?)`,
         occurrenceId, incident.id, input.sourceKey, input.taskId ?? null, input.stageRunId ?? null,
-        input.attemptId ?? null, input.revision ?? null, toJson(input.evidenceRefs ?? []), input.observedAt ?? nowIso(),
+        input.attemptId ?? null, input.revision ?? null, toJson(input.evidenceRefs ?? []), observedAt,
       );
       const projectId = input.taskId ? this.getTask(input.taskId)?.projectId ?? null : null;
       this.recordEvent({
@@ -2379,6 +2397,68 @@ export class Records {
   getIncident(id: string): Incident | null {
     const row = this.store.get("SELECT * FROM incidents WHERE id = ?", id);
     return row ? toIncident(row) : null;
+  }
+
+  /** Incidents, optionally only those with an occurrence in one project's tasks. */
+  listIncidents(filter: { projectId?: string; lifecycle?: Incident["lifecycle"] } = {}): Incident[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filter.projectId) {
+      clauses.push(`id IN (SELECT o.incident_id FROM incident_occurrences o JOIN tasks t ON t.id = o.task_id WHERE t.project_id = ?)`);
+      params.push(filter.projectId);
+    }
+    if (filter.lifecycle) {
+      clauses.push("lifecycle = ?");
+      params.push(filter.lifecycle);
+    }
+    return this.store.all(
+      `SELECT * FROM incidents${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""} ORDER BY updated_at DESC, id`,
+      ...params,
+    ).map(toIncident);
+  }
+
+  /**
+   * Change an incident's lesson. `verified` confidence is accepted only with
+   * both a fix reference and a test reference; a hypothesis never claims more.
+   */
+  updateIncident(id: string, patch: {
+    hypothesis?: string | null;
+    confirmedCause?: string | null;
+    confidence?: Incident["confidence"];
+    lifecycle?: Incident["lifecycle"];
+    fixRefs?: string[];
+    testRefs?: string[];
+    lessonRefs?: string[];
+    affectedVersionEnd?: string | null;
+  }, actor: string): Incident {
+    return this.store.tx(() => {
+      const current = this.getIncident(id);
+      if (!current) throw new Error(`Unknown incident ${id}`);
+      const next = {
+        hypothesis: patch.hypothesis !== undefined ? patch.hypothesis : current.hypothesis,
+        confirmedCause: patch.confirmedCause !== undefined ? patch.confirmedCause : current.confirmedCause,
+        confidence: patch.confidence ?? current.confidence,
+        lifecycle: patch.lifecycle ?? current.lifecycle,
+        fixRefs: patch.fixRefs ?? current.fixRefs,
+        testRefs: patch.testRefs ?? current.testRefs,
+        lessonRefs: patch.lessonRefs ?? current.lessonRefs,
+        affectedVersionEnd: patch.affectedVersionEnd !== undefined ? patch.affectedVersionEnd : current.affectedVersionEnd,
+      };
+      if (next.confidence === "verified" && (!next.confirmedCause || next.fixRefs.length === 0 || next.testRefs.length === 0)) {
+        throw new Error("A verified lesson requires a confirmed cause, a fix reference, and a test reference.");
+      }
+      if (next.lifecycle === "resolved" && next.confidence !== "verified") {
+        throw new Error("Only a verified lesson can mark an incident resolved; use mitigated or investigating otherwise.");
+      }
+      this.store.run(
+        `UPDATE incidents SET hypothesis = ?, confirmed_cause = ?, confidence = ?, lifecycle = ?, fix_refs = ?, test_refs = ?,
+           lesson_refs = ?, affected_version_end = ?, updated_at = ? WHERE id = ?`,
+        next.hypothesis, next.confirmedCause, next.confidence, next.lifecycle, toJson(next.fixRefs), toJson(next.testRefs),
+        toJson(next.lessonRefs), next.affectedVersionEnd, nowIso(), id,
+      );
+      this.recordEvent({ kind: "incident.updated", data: { incidentId: id, actor, from: { lifecycle: current.lifecycle, confidence: current.confidence }, to: { lifecycle: next.lifecycle, confidence: next.confidence } } });
+      return this.getIncident(id) as Incident;
+    });
   }
 
   incidentOccurrences(incidentId: string): IncidentOccurrence[] {

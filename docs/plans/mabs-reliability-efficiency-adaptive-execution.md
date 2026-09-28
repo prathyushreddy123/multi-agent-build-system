@@ -1321,6 +1321,44 @@ level.
 
 **Acceptance:** import is idempotent; copied checkpoint prose is not several incidents; infrastructure failures do not suggest generic prompt inflation; no unverified lesson is reported as proven; client governance and exact-version activation remain enforced; no periodic model loop.
 
+#### T12 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation;
+no incident import has been run against the live database.
+
+- `src/incidents/projection.ts` (`mabs.incidents.v1`): a deterministic projection of systemic failures
+  from failed attempts, failing gates (from their diagnosis or evidence tail), and controller-level stage
+  failures. Product-code and requirement failures are excluded; they are the task's obligations.
+  Occurrences are keyed by source record (`attempt:`, `gate:`, `stage:`), so checkpoint prose that
+  copies a failure never adds occurrences. Signatures hash category, layer, and a normalized symptom
+  (paths, ids, hashes, times, and numbers removed).
+- `importIncidentHistory` (`mabs incident import-history [--project] [--dry-run]`) is idempotent and
+  never rewrites source rows. A dry run reports what it would write and writes nothing.
+  `recordIncidentOccurrence` now returns the existing occurrence for a repeated source instead of
+  failing on the unique constraint; the T02 store test was updated to assert that idempotency.
+- Lessons are versioned states on the incident: an imported incident carries the classifier's remedy
+  as a hypothesis with at most `medium` confidence. `incident hypothesize|verify|supersede` update it;
+  `verified` confidence requires a confirmed cause plus fix and test references, and only a verified
+  lesson can be `resolved`. A new occurrence after resolution reopens the incident, lowers `verified` to
+  `medium`, and records `incident.recurred`.
+- `lessonsForTask`: at most three lessons observed in the task's project, relevant to the packet's
+  purpose, never superseded, each labeled `[verified]` or `[hypothesis, <confidence>, unverified]`;
+  included in context packets as `context.lessons`.
+- Curator: `analyzeProject` adds `productCodeFailures` (historical `CODE` attempt failures are
+  re-diagnosed; a task-level label with no attempt evidence stands) and `incidentsByCategory`. The
+  implementation-prompt suggestion now counts only product-code and contract failures, so a missing
+  compiler no longer yields a longer prompt. `curatorRecommendations` (`mabs curator recommend`)
+  maps recurring incidents to a mechanism (`environment_setup`, `provider_capacity`, `engine_fix`,
+  `worker_contract`, `investigate`) with occurrence evidence; it never creates a proposal or changes
+  configuration. Proposal, approval, governance, and exact-version activation flows are unchanged.
+- Nothing runs periodically; projection and recommendation run only on request.
+- Evidence: `test/incidents.test.ts` (LRN-01..04, grouping, product-code exclusion, gate projection,
+  no configuration change).
+
+Known limits: grouping is by normalized text, so a provider that rewords one failure creates a second
+signature until the classifier version is revised; lesson retrieval is scoped to the project, not
+yet to repository components.
+
 ### T13 — Bounded optimizer experiments
 
 **Milestone:** M4. **Depends on:** T12. **Risk:** high. **Mode:** sequential.

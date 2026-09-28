@@ -405,10 +405,10 @@ test("obligations, usage projections, and incidents are keyed by their source", 
   assert.equal(second.incidentId, first.incidentId);
   assert.equal(db.incidentOccurrences(first.incidentId).length, 2);
   assert.equal(db.getIncident(first.incidentId)?.confidence, "unknown");
-  assert.throws(
-    () => db.recordIncidentOccurrence({ ...signature, sourceKey: "gate-2", taskId: task.id }),
-    /UNIQUE|constraint/i,
-  );
+  // One source is one occurrence: recording it again is idempotent (T12 import).
+  const repeated = db.recordIncidentOccurrence({ ...signature, sourceKey: "gate-2", taskId: task.id });
+  assert.equal(repeated.id, second.id);
+  assert.equal(db.incidentOccurrences(first.incidentId).length, 2);
   assert.throws(
     () => db.recordIncidentOccurrence({ ...signature, incidentId: "inc_other", sourceKey: "gate-3" }),
     /already belongs to/,

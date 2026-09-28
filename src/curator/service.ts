@@ -13,11 +13,22 @@ import {
   type ProjectConfigSnapshot,
 } from "../domain/config.ts";
 import { DEFAULT_POLICY } from "../domain/policy.ts";
+import { diagnoseFailure } from "../core/failure.ts";
+import { projectIncidents } from "../incidents/projection.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES } from "../routing/router.ts";
 import type { Records } from "../store/records.ts";
 import { summarizeDurations, summarizeUsage } from "../usage/summary.ts";
 import type { DurationSubtotal, UsageSubtotal } from "../usage/types.ts";
-import type { CuratorEvaluation, CuratorProposal, CuratorSignals, EvaluationCase, EvaluationMetrics, ProposalInput } from "./types.ts";
+import type {
+  CuratorEvaluation,
+  CuratorProposal,
+  CuratorRecommendation,
+  CuratorSignals,
+  EvaluationCase,
+  EvaluationMetrics,
+  ProposalInput,
+  RecommendationMechanism,
+} from "./types.ts";
 
 export const CURATOR_SUITE_VERSION = "policy-replay-v1";
 
@@ -38,6 +49,7 @@ export function analyzeProject(records: Records, projectId: string): CuratorSign
   const failuresByClass: Record<string, number> = {};
   let repairs = 0;
   let reviewChangesRequested = 0;
+  let productCodeFailures = 0;
   for (const task of tasks) {
     repairs += task.repairsUsed;
     const failedAttempts = records.listAttempts(task.id).filter((attempt) => attempt.failureClass !== null);
@@ -45,9 +57,18 @@ export function analyzeProject(records: Records, projectId: string): CuratorSign
       for (const attempt of failedAttempts) {
         const failure = attempt.failureClass as string;
         failuresByClass[failure] = (failuresByClass[failure] ?? 0) + 1;
+        // A historical CODE label may predate environment diagnosis ("tsc:
+        // not found" was once CODE). Re-diagnose before treating it as a
+        // product-code signal.
+        if (failure === "CODE") {
+          const diagnosis = diagnoseFailure({ stage: "implement", source: "worker", exitCode: attempt.exitStatus, text: attempt.reason ?? "", legacyFailureClass: "CODE" });
+          if (diagnosis.category === "product_code") productCodeFailures += 1;
+        }
       }
     } else if (task.failureClass) {
       failuresByClass[task.failureClass] = (failuresByClass[task.failureClass] ?? 0) + 1;
+      // No attempt evidence exists to re-diagnose, so the recorded label stands.
+      if (task.failureClass === "CODE") productCodeFailures += 1;
     }
     reviewChangesRequested += records.reviewsForTask(task.id).filter((review) => review.verdict === "request_changes").length;
   }
@@ -75,6 +96,11 @@ export function analyzeProject(records: Records, projectId: string): CuratorSign
     rejectedFingerprints: records.listCuratorProposals(projectId)
       .filter((proposal) => proposal.status === "rejected")
       .map((proposal) => proposal.fingerprint),
+    productCodeFailures,
+    incidentsByCategory: projectIncidents(records, { projectId }).reduce<Record<string, number>>((counts, item) => {
+      counts[item.category] = (counts[item.category] ?? 0) + 1;
+      return counts;
+    }, {}),
   };
   const path = join(artifactDir("curator", projectId, `analysis-${Date.now()}`), "signals.json");
   writeFileSync(path, JSON.stringify(signals, null, 2), { mode: 0o600 });
@@ -90,10 +116,13 @@ export function suggestProjectConfig(records: Records, projectId: string, signal
   if (!project) throw new Error(`Unknown project ${projectId}`);
   const config = JSON.parse(canonicalConfig(projectConfigSnapshot(project))) as ProjectConfigSnapshot;
   const reasons: string[] = [];
-  const implementationFailures = (signals.failuresByClass.CODE ?? 0) + (signals.failuresByClass.CONTRACT ?? 0);
+  // Only failures in the worker's own output justify more implementation
+  // guidance. Environment and provider incidents get their own remedies
+  // (see curatorRecommendations), never a longer prompt.
+  const implementationFailures = (signals.productCodeFailures ?? signals.failuresByClass.CODE ?? 0) + (signals.failuresByClass.CONTRACT ?? 0);
   if (implementationFailures > 0 && !config.promptProfile.implementationAddendum) {
     config.promptProfile.implementationAddendum = "Before reporting completion, inspect the actual diff, run registered checks, and reconcile changed files with every acceptance criterion.";
-    reasons.push(`${implementationFailures} code or contract failure(s) were observed.`);
+    reasons.push(`${implementationFailures} product-code or contract failure(s) were observed.`);
   }
   if (signals.reviewChangesRequested > 0 && !config.promptProfile.reviewAddendum) {
     config.promptProfile.reviewAddendum = "Prioritize correctness and requirement violations; cite exact files and evidence for every actionable finding.";
@@ -109,6 +138,51 @@ export function suggestProjectConfig(records: Records, projectId: string, signal
   }
   if (reasons.length === 0) throw new Error("No recurring evidence currently supports a rules-first configuration suggestion");
   return { config, reasons };
+}
+
+const MECHANISM: Record<string, { mechanism: RecommendationMechanism; action: string }> = {
+  environment: { mechanism: "environment_setup", action: "Install or register the missing tool in the task worktree's environment (setup plan), then rerun readiness; do not change prompts or repair limits." },
+  host_runtime: { mechanism: "environment_setup", action: "Resolve host resource or runtime limits (disk, memory, permissions) before admitting more work." },
+  provider_capacity: { mechanism: "provider_capacity", action: "Review subscription capacity and quota-domain routing (capacity fallback, cooldowns); a model switch inside one account adds no capacity." },
+  provider_auth: { mechanism: "provider_capacity", action: "Restore provider authentication; no paid fallback is permitted." },
+  controller: { mechanism: "engine_fix", action: "File an engine defect with a regression test; do not compensate with prompt or budget changes." },
+  worker_contract: { mechanism: "worker_contract", action: "Tighten the worker contract or its instructions for the violated field; verify with a contract test." },
+  unknown: { mechanism: "investigate", action: "Investigate the evidence and record a hypothesis before proposing any change." },
+};
+
+/**
+ * Evidence-backed, proposal-only recommendations from recurring systemic
+ * incidents. Each names the mechanism that addresses the cause and cites its
+ * evidence; none changes configuration or activates anything.
+ */
+export function curatorRecommendations(records: Records, projectId: string, minimumOccurrences = 2): CuratorRecommendation[] {
+  const recorded = new Map(records.listIncidents({ projectId }).map((incident) => [incident.signature, incident]));
+  const groups = new Map<string, ReturnType<typeof projectIncidents>>();
+  for (const item of projectIncidents(records, { projectId })) {
+    const list = groups.get(item.signature) ?? [];
+    list.push(item);
+    groups.set(item.signature, list);
+  }
+  const recommendations: CuratorRecommendation[] = [];
+  for (const [signature, items] of groups) {
+    if (items.length < minimumOccurrences) continue;
+    const first = items[0] as (typeof items)[number];
+    const incident = recorded.get(signature) ?? null;
+    if (incident?.lifecycle === "superseded" || incident?.lifecycle === "resolved") continue;
+    const remedy = MECHANISM[first.category] ?? MECHANISM.unknown as { mechanism: RecommendationMechanism; action: string };
+    recommendations.push({
+      mechanism: remedy.mechanism,
+      category: first.category,
+      signature,
+      symptom: first.symptom,
+      occurrences: items.length,
+      lessonStatus: incident ? (incident.confidence === "verified" ? "verified" : "hypothesis") : "not_imported",
+      incidentId: incident?.id ?? null,
+      action: remedy.action,
+      evidence: items.slice(0, 10).map((item) => item.sourceKey),
+    });
+  }
+  return recommendations.sort((left, right) => right.occurrences - left.occurrences || left.signature.localeCompare(right.signature));
 }
 
 export async function createSuggestedProposal(records: Records, input: {
