@@ -18,7 +18,7 @@ import { ids } from "../core/ids.ts";
 import { scopesOverlap } from "../domain/plan.ts";
 import { requireProjectReadiness } from "../domain/project-policy.ts";
 import type { WorkerOutput } from "../domain/contract.ts";
-import { artifactDir } from "../core/paths.ts";
+import { artifactDir, stateDir } from "../core/paths.ts";
 import {
   QUALITY_COVERAGE_GATE,
   collectGateJob,
@@ -250,7 +250,15 @@ export class Controller {
       this.writeHealth(loopDelayMs, "running");
       // Export is detached from the loop: a slow or failing exporter can
       // neither delay nor fail a tick.
-      if (this.telemetry instanceof BoundedTelemetryQueue) void this.telemetry.flush();
+      if (this.telemetry instanceof BoundedTelemetryQueue) {
+        void this.telemetry.flush();
+        const stats = this.telemetry.stats();
+        if (stats.exporter) {
+          try {
+            writeFileSync(join(stateDir(), "telemetry-status.json"), JSON.stringify({ at: new Date().toISOString(), controllerId: this.options.controllerId, ...stats }, null, 2), { mode: 0o600 });
+          } catch { /* status is informational; it never fails a tick */ }
+        }
+      }
     } catch (error) {
       this.failedTicks += 1;
       // A lease loss is not this controller's health to report: the holder owns

@@ -1416,6 +1416,43 @@ results are reported instead, as the plan requires.
 
 **Acceptance:** unknown/missing decisions are actionable and never defaulted; requested/reported model/effort and missing usage are distinct; disabled review is not approved; exporter disabled means no network writes; native UI works without external services; no secret-bearing raw prompt is exported by default. Preserve existing protections without adding a new hardening project.
 
+#### T14 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation;
+no exporter is configured anywhere.
+
+- `src/diagnostics/views.ts` (`mabs.operator-views.v1`), read-only and paginated (page size capped at
+  500):
+  - `governancePrompts`: every project that cannot run new implementation, with its missing
+    decisions, questions with no preselected answer, and the exact command to answer.
+  - `taskScorecard`: the review label (`approved`, `not_required` — explicitly "not an approval",
+    `pending`, `changes_requested`, `blocked`, `not_yet_decided`); quality coverage; per-attempt model
+    and effort as requested / configured / reported, where a missing report is shown as "unknown (not
+    reported by the provider)"; usage coverage counting failed attempts; obligations; and provenance
+    (engine, prompt, config, and capability-registry versions).
+  - `queueExplanations`: why each waiting task waits (needs input, dependency, admission or review
+    capacity, blocked, admissible now).
+  - `taskTimeline`: the paged event history with evidence paths.
+  - `improvementBoard`: incidents, curator recommendations, experiments, and proposals.
+- CLI: `task scorecard`, `task timeline`, `queue explain`, `project readiness`, `improvements
+  <project>`, `telemetry status`. `mabs status` now includes `needsInput` and waiting counts by
+  reason; the Pi extension's existing `mabs_status` tool surfaces them without an extension API
+  change.
+- Workbench: `/api/tasks/:id/scorecard`, `/api/tasks/:id/timeline`, `/api/queue`, `/api/readiness`,
+  `/api/projects/:id/improvements`, plus a scorecard card on the task page. All local; no external
+  service.
+- Optional export (`src/telemetry/exporter.ts`): off unless `controller run --export=file:/abs/path`
+  or `--export=https://collector`. `redactEvent` keeps an allowlist of structural fields and drops
+  anything prompt-, excerpt-, credential-, or output-like. The HTTP exporter has a per-batch timeout.
+  A configured exporter writes `telemetry-status.json`; disabled export writes nothing and makes no
+  network request.
+- Evidence: `test/operator-views.test.ts` (OBS-03, OBS-04, OBS-05, queue, timeline, export disabled and
+  redaction, workbench endpoints over real HTTP).
+
+Known limits: the Pi extension gained no new tools; its extension API was deliberately not changed
+because the installed Pi documentation was not reviewed in this pass (the plan's prerequisite for
+extension API changes). The workbench scorecard is a basic table, not a redesigned UI.
+
 ### T15 — Integrated acceptance and rollout documentation
 
 **Milestone:** M5. **Depends on:** T14. **Risk:** high. **Mode:** sequential.

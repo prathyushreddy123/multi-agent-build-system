@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
+import { stateDir } from "./core/paths.ts";
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
 import { ADMISSION_PENDING_PREFIX, Controller, ControllerLeaseHeldError, REVIEW_PENDING_PREFIX } from "./controller/controller.ts";
 import { defaultAdapters } from "./adapters/harness.ts";
@@ -20,6 +21,9 @@ import {
   curatorRecommendations,
 } from "./curator/service.ts";
 import { importIncidentHistory } from "./incidents/projection.ts";
+import { governancePrompts, improvementBoard, queueExplanations, taskScorecard, taskTimeline } from "./diagnostics/views.ts";
+import { exporterFromSpec } from "./telemetry/exporter.ts";
+import { BoundedTelemetryQueue } from "./telemetry/sink.ts";
 import { INCIDENT_CONFIDENCE } from "./incidents/types.ts";
 import { projectConfigSnapshot } from "./domain/config.ts";
 import {
@@ -144,6 +148,7 @@ EVERYDAY
   controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
       [--model=...] [--effort=low|medium|high] [--capacity-fallback=allow|wait]
       [--workers=1] [--gate-limit=N] [--adaptive]   One model worker unless a pilot is approved
+      [--export=file:/abs/path|https://collector]  Optional redacted telemetry export (off by default)
   controller once [--adapter=codex]         Reconcile and dispatch one cycle
   task list [--project=id] [--state=READY]  What is queued, running, or blocked
   task show <id>                            One task with its evidence
@@ -178,6 +183,12 @@ PROJECTS AND TASKS
   task cancel <id> --version=<recordVersion>
   task watch [--project=<id>] [--interval=1000] [--json|--once]
   task steps <task>                            Recorded implementation steps
+  task scorecard <task>                        Review, quality, usage coverage, model/effort provenance
+  task timeline <task> [--limit=50] [--offset=0]
+  queue explain [--limit=50] [--offset=0]      Why each waiting task is waiting
+  project readiness                            Governance decisions still needed, with the command to answer
+  improvements <project>                       Incidents, remedies, experiments, and proposals
+  telemetry status                             Optional export state (disabled unless configured)
   obligation list <task>                       Durable findings, decisions, and their lifecycle
   obligation decide <obligation> --answer=... --by=<person>
                                                Record a human answer to a blocking decision
@@ -1206,6 +1217,40 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(records.listProviderCapacity(), null, 2));
       return;
     }
+    if (area === "task" && action === "scorecard") {
+      if (!rest[0]) throw new Error("Usage: mabs task scorecard <task>");
+      console.log(JSON.stringify(taskScorecard(records, rest[0]), null, 2));
+      return;
+    }
+    if (area === "task" && action === "timeline") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      if (!id) throw new Error("Usage: mabs task timeline <task> [--limit=50] [--offset=0]");
+      console.log(JSON.stringify(taskTimeline(records, id, { limit: numberOption(args, "limit", 50), offset: numberOption(args, "offset", 0) }), null, 2));
+      return;
+    }
+    if (area === "queue" && action === "explain") {
+      const args = parseArgs(rest);
+      console.log(JSON.stringify(queueExplanations(records, { limit: numberOption(args, "limit", 50), offset: numberOption(args, "offset", 0) }), null, 2));
+      return;
+    }
+    if (area === "project" && action === "readiness") {
+      console.log(JSON.stringify(governancePrompts(records), null, 2));
+      return;
+    }
+    if (area === "improvements") {
+      const project = action ? resolveProject(records, action) : null;
+      if (!project) throw new Error("Usage: mabs improvements <project>");
+      console.log(JSON.stringify(improvementBoard(records, project.id), null, 2));
+      return;
+    }
+    if (area === "telemetry" && action === "status") {
+      const path = join(stateDir(), "telemetry-status.json");
+      console.log(JSON.stringify(existsSync(path)
+        ? { enabled: true, ...JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown> }
+        : { enabled: false, note: "No exporter is configured. Local evidence is complete without one; nothing is sent anywhere." }, null, 2));
+      return;
+    }
     if (area === "obligation" && action === "list") {
       if (!rest[0]) throw new Error("Usage: mabs obligation list <task>");
       console.log(JSON.stringify(records.listObligations(rest[0]), null, 2));
@@ -1284,6 +1329,12 @@ async function main(): Promise<void> {
         // raw row cannot: a killed controller leaves "running" behind forever.
         controller: { ...controllerFreshness(records), liveness: controllerLiveness(records) },
         health: records.latestHealth() ?? null,
+        // Decisions only a person can make, never defaulted.
+        needsInput: governancePrompts(records),
+        waiting: queueExplanations(records, { limit: 500 }).items.reduce<Record<string, number>>((counts, item) => {
+          counts[item.category] = (counts[item.category] ?? 0) + 1;
+          return counts;
+        }, {}),
       }, null, 2));
       return;
     }
@@ -1457,6 +1508,8 @@ async function main(): Promise<void> {
         activeProjectLimit: numberOption(args, "active-projects", 2),
         perProjectWorkerLimit: numberOption(args, "per-project-workers", numberOption(args, "workers", 1)),
         gateLimit: args.options.has("gate-limit") ? numberOption(args, "gate-limit", 2) : undefined,
+        // Export is off unless a target is named; there is no default destination.
+        telemetry: new BoundedTelemetryQueue({ exporter: exporterFromSpec(textOption(args, "export")) }),
         adaptiveConcurrency: args.options.has("adaptive") ? {} : undefined,
         minFreeMemoryMb: numberOption(args, "min-free-memory-mb", 0),
         maxLoadPerCpu: numberOption(args, "max-load-per-cpu", Number.MAX_SAFE_INTEGER),
