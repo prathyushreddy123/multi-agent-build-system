@@ -52,6 +52,7 @@ import {
   type CapabilityRegistry,
 } from "../routing/capabilities.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
+import { getExperiment, trialBindingForTask, type TrialBinding } from "../optimization/experiments.ts";
 import type { Attempt, GateResult, GateSpec, Project, Records, Task } from "../store/records.ts";
 import type { ExecutionEpisode, ExecutionStage, StageRun, TaskObligation } from "../domain/execution.ts";
 import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceContainsRevision, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
@@ -398,6 +399,10 @@ export class Controller {
       delegation: DISABLED_DELEGATION,
       capacityFallback: this.options.capacityFallback,
     });
+    // A live experiment trial runs exactly its variant's route: no project or
+    // operator override may substitute another model into the measurement.
+    const trial = task.taskClass === "review" ? null : trialBindingForTask(this.records, task.id);
+    if (trial) return this.applyTrialRoute(selection, trial);
     const projectOverride = this.records.getProject(task.projectId)?.routingOverrides[task.taskClass];
     if (projectOverride) {
       const eligibleOverride = selection.eligible.find((candidate) =>
@@ -441,6 +446,47 @@ export class Controller {
     if (selection.chosen && (this.preferredAdapter || this.options.defaultModel || this.options.defaultEffort)) {
       selection.reason += ` Operator override: adapter=${this.preferredAdapter ?? "policy"}, model=${this.options.defaultModel ?? "policy"}, effort=${this.options.defaultEffort ?? "policy"}.`;
     }
+    return selection;
+  }
+
+  private applyTrialRoute(selection: RouteSelection, trial: TrialBinding): RouteSelection {
+    const applied = trial.appliedConfig as { adapter?: string; model?: string | null; effort?: string | null };
+    if (!applied.adapter && applied.model === undefined && applied.effort === undefined) return selection;
+    const base = selection.chosen ?? selection.eligible[0] ?? null;
+    const adapter = applied.adapter ?? base?.adapter;
+    if (!adapter) return selection;
+    const inherited = base && base.adapter === adapter ? base : null;
+    const pinned: RouteCandidate = {
+      adapter,
+      model: applied.model !== undefined ? applied.model : inherited?.model ?? null,
+      effort: applied.effort !== undefined ? applied.effort : inherited?.effort ?? null,
+      reason: `Experiment ${trial.experimentId} ${trial.variant} trial route.`,
+    };
+    const evaluation = evaluateCapability(this.capabilityRegistry, {
+      provider: pinned.adapter, model: pinned.model, effort: pinned.effort, delegation: DISABLED_DELEGATION,
+    });
+    selection.eligibility.push(evaluation.evidence);
+    if (!evaluation.evidence.eligible || !this.adapters.has(pinned.adapter)) {
+      const why = evaluation.evidence.eligible ? `adapter ${pinned.adapter} is not configured` : evaluation.evidence.reasons.join("; ");
+      selection.chosen = null;
+      selection.quotaDomain = null;
+      selection.decision = "no_route";
+      selection.reason = `Trial route ${pinned.adapter}:${pinned.model ?? "?"}@${pinned.effort ?? "?"} cannot launch: ${why}.`;
+      return selection;
+    }
+    // A pinned provider in cooldown waits; it never falls back to another
+    // route. Concurrency caps are enforced by admission like any launch.
+    const capacity = this.records.listProviderCapacity().find((provider) => provider.provider === pinned.adapter);
+    if (capacity && capacity.state !== "available") {
+      selection.chosen = null;
+      selection.deferred = [pinned];
+      selection.decision = "capacity_wait";
+      selection.reason = `Trial route ${pinned.adapter} is ${capacity.state}; the trial waits rather than change route.`;
+      return selection;
+    }
+    selection.chosen = pinned;
+    selection.quotaDomain = evaluation.evidence.quotaDomain;
+    selection.reason += ` Pinned to experiment ${trial.experimentId} ${trial.variant} route ${pinned.adapter}:${pinned.model}@${pinned.effort}.`;
     return selection;
   }
 
@@ -649,13 +695,19 @@ export class Controller {
     return true;
   }
 
-  private async retryOperationalCheck(task: Task, project: Project, obligation: TaskObligation): Promise<boolean> {
+  /**
+   * "waiting" means the recovery is valid but the shared gate cap is full: no
+   * state changed, no recovery budget was spent, and a later tick retries it.
+   */
+  private async retryOperationalCheck(task: Task, project: Project, obligation: TaskObligation): Promise<boolean | "waiting"> {
     if (!task.resultRevision || !task.worktreePath || !obligation.sourceGateId) return false;
     const failedGate = this.records.gatesForRevision(task.id, task.resultRevision).find((gate) => gate.id === obligation.sourceGateId);
     if (!failedGate || failedGate.failureDiagnosis?.consumesCodeRepair) return false;
     const index = project.checkCommands.findIndex((spec) => spec.name === failedGate.name);
     const spec = project.checkCommands[index];
     if (!spec || index < 0) return false;
+    // Recovery is a check launch like any other and holds no slot of its own.
+    if (!this.admit(task, "gate", null).admitted) return "waiting";
     const current = task.state === "READY"
       ? this.records.transition(task.id, "RUNNING", { blocked_reason: null, failure_class: null }, { reason: "retry operational check stage" })
       : task;
@@ -682,7 +734,7 @@ export class Controller {
     return true;
   }
 
-  private async resumeOperationalTask(task: Task, project: Project): Promise<boolean> {
+  private async resumeOperationalTask(task: Task, project: Project): Promise<boolean | "waiting"> {
     const obligations = this.records.getContinuation(task.id).openObligations.filter((item) => item.blocking);
     const recoveryAvailable = (): boolean => {
       const episode = this.records.getContinuation(task.id).episode;
@@ -1078,10 +1130,26 @@ export class Controller {
         }
         continue;
       }
-      const status = await adapter.status(this.handleOf(attempt));
+      const handle = this.handleOf(attempt);
+      const status = await adapter.status(handle, { launchGraceMs: this.options.launchMarkerGraceMs });
       if (status === "running") {
+        if (attempt.pid === null) this.adoptLaunchedAttempt(task, attempt, adapter, handle);
         this.records.heartbeat(attempt.id);
         this.observeProgress(task, attempt);
+        continue;
+      }
+      // The wrapper may not have identified itself yet; the attempt keeps its
+      // stage and admission lease, and no relaunch can overlap it.
+      if (status === "launching") continue;
+      if (status === "ambiguous") {
+        const detail = `Worker for attempt ${attempt.id} was launched but its process can neither be found nor ruled out; ` +
+          "its lease is held until an operator confirms it stopped (task cancel).";
+        this.recordObligationOnce({
+          taskId: task.id, kind: "gate_failure", severity: "blocking", blocking: true,
+          sourceKey: `worker-launch-unknown:${attempt.id}`, summary: detail,
+          introducedRevision: task.resultRevision ?? task.baseRevision, evidenceRefs: [handle.completionPath],
+        });
+        this.blockTask(task, "INFRA", detail);
         continue;
       }
       if (status === "lost") {
@@ -1127,6 +1195,25 @@ export class Controller {
     }
   }
 
+  /**
+   * A crash after spawn but before the PID write leaves a live worker the
+   * database cannot name. Adopt it: persist its PID and bind its stage, so the
+   * running process keeps its lease and is never relaunched beside itself.
+   */
+  private adoptLaunchedAttempt(task: Task, attempt: Attempt, adapter: WorkerAdapter, handle: AdapterHandle): void {
+    const recovered = adapter.recoverHandle?.(handle);
+    if (!recovered || recovered.pid === null) return;
+    this.records.setAttemptProcess(attempt.id, recovered.pid, attempt.sessionId);
+    const stage = attempt.stageRunId ? this.records.getStageRun(attempt.stageRunId) : null;
+    if (stage && (stage.state === "reserved" || stage.state === "launching")) {
+      this.records.recordLaunchStarted(stage.id, stage.fencingToken, { attemptId: attempt.id });
+    }
+    this.records.recordEvent({
+      kind: "attempt.process_adopted", projectId: task.projectId, taskId: task.id, attemptId: attempt.id,
+      data: { pid: recovered.pid, stageRunId: attempt.stageRunId },
+    });
+  }
+
   private async reconcileOrphanStages(): Promise<void> {
     for (const stage of this.records.listActiveStageRuns().filter((candidate) => candidate.stage !== "check")) {
       if (stage.state === "waiting" || stage.state === "unknown") continue;
@@ -1134,7 +1221,11 @@ export class Controller {
       if (!task) continue;
       const project = this.records.getProject(task.projectId);
       if (!project) continue;
-      const boundAttempt = stage.attemptId ? this.records.getAttempt(stage.attemptId) : null;
+      // A crash before recordLaunchStarted leaves the attempt pointing at its
+      // stage but not the reverse; either link binds them.
+      const boundAttempt = stage.attemptId
+        ? this.records.getAttempt(stage.attemptId)
+        : this.records.listAttempts(task.id).find((attempt) => attempt.stageRunId === stage.id) ?? null;
       if (boundAttempt?.state === "running") continue;
       if (boundAttempt && ["implement", "repair", "review"].includes(stage.stage)) {
         this.finishStage(stage, {
@@ -2102,7 +2193,9 @@ export class Controller {
         continue;
       }
       if (!this.admit(task, "model", selection.chosen.adapter).admitted) continue;
-      if (await this.resumeOperationalTask(task, project)) {
+      const resumed = await this.resumeOperationalTask(task, project);
+      if (resumed === "waiting") continue;
+      if (resumed) {
         this.records.markProjectDispatched(project.id);
         continue;
       }
@@ -2256,6 +2349,13 @@ export class Controller {
       throw new Error(selection.reason);
     }
     const candidate: RouteCandidate = selection.chosen;
+    // A trial's attempt budget is part of its authorized protocol.
+    const trial = trialBindingForTask(this.records, task.id);
+    const attemptCap = trial ? getExperiment(this.records, trial.experimentId)?.protocol?.budget.maxAttemptsPerTrial ?? null : null;
+    if (trial && attemptCap !== null && this.records.listAttempts(task.id).length >= attemptCap) {
+      this.blockTask(task, "CONFIG", `Experiment trial attempt budget of ${attemptCap} is spent; the trial ends interrupted.`);
+      return;
+    }
     // Every launch path, not only initial dispatch, passes the same admission.
     const admission = this.admit(task, "model", candidate.adapter);
     if (!admission.admitted) {
@@ -2364,7 +2464,14 @@ export class Controller {
         additionalArtifacts: reviewArtifacts,
       });
     } catch (error) {
-      if (!(error instanceof ContextBudgetExceededError)) throw error;
+      if (!(error instanceof ContextBudgetExceededError)) {
+        // Nothing launched. Release the stage and its admission lease now; left
+        // reserved, restart reconciliation would mistake it for a crashed launch.
+        const detail = error instanceof Error ? error.message : String(error);
+        this.finishStage(stage, { state: "failed", failureClass: "INFRA", failureDetail: detail, taskState: "BLOCKED" });
+        this.blockTask(this.records.getTask(task.id) ?? task, "INFRA", `Context packet could not be built: ${detail}`);
+        return;
+      }
       this.recordObligationOnce({
         taskId: task.id,
         kind: "decision_needed",

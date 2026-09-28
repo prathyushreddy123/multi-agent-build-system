@@ -20,6 +20,7 @@ import {
 import { projectConfigSnapshot, validateProjectConfig, type ProjectConfigSnapshot } from "../src/domain/config.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -92,7 +93,7 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
   const initialMain = git(repo, "rev-parse", "main");
   const candidate = cloneConfig(projectConfigSnapshot(project));
   candidate.routingProfile = "curated-v1";
-  candidate.routingOverrides.small_implementation = { adapter: "claude", model: "claude-sonnet-5", effort: null };
+  candidate.routingOverrides.small_implementation = { adapter: "claude", model: "claude-sonnet-5", effort: "medium" };
   candidate.promptProfile.implementationAddendum = "Prefer the smallest test-backed implementation that satisfies the accepted scope.";
   candidate.controllerSettings.defaultRepairLimit = 1;
   assert.deepEqual(validateProjectConfig(candidate), []);
@@ -143,7 +144,7 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
     acceptanceCriteria: ["route is visible"],
   });
   assert.equal(task.repairLimit, 1, "activated controller default must apply to new tasks");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["claude", claude], ["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
@@ -169,6 +170,45 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
   assert.equal(reverted?.promptProfile.implementationAddendum, null);
   assert.equal(records.listConfigActivations(project.id).length, 2);
   assert.equal(git(repo, "rev-parse", "main"), initialMain);
+});
+
+test("T08: the v2 context budget takes effect only through proposal, approval, and exact-version activation", async (t) => {
+  const { repo, records } = setup(t);
+  const project = records.createProject({ projectType: "personal", reviewChoice: "off",
+    name: "budget", repoPath: repo, reviewPolicy: { mode: "none", skipTaskClasses: [] },
+  });
+  assert.equal(project.controllerSettings.contextBudgetPolicy ?? "mabs.budget.v1", "mabs.budget.v1");
+  const candidate = cloneConfig(projectConfigSnapshot(project));
+  candidate.controllerSettings.contextBudgetPolicy = "mabs.budget.v2";
+  assert.deepEqual(validateProjectConfig(candidate), []);
+  const proposal = await createProposal(records, {
+    projectId: project.id, title: "Account for the complete rendered prompt",
+    rationale: "Adopt complete-budget continuation context.", config: candidate, proposedBy: "test-curator",
+    signals: analyzeProject(records, project.id),
+  });
+  assert.equal(records.getProject(project.id)?.controllerSettings.contextBudgetPolicy ?? "mabs.budget.v1", "mabs.budget.v1",
+    "a proposal alone changes nothing");
+  assert.equal(evaluateProposal(records, proposal.id).status, "passed");
+  assert.equal(records.getProject(project.id)?.controllerSettings.contextBudgetPolicy ?? "mabs.budget.v1", "mabs.budget.v1",
+    "a passing evaluation changes nothing");
+  const approval = requestActivationApproval(records, proposal.id, "Activate the v2 context budget.");
+  records.decideApproval(approval.id, "approved", "project-owner");
+  records.activateCuratorProposal(proposal.id, approval.id, "project-owner", "Budget activation.");
+  const active = records.getProject(project.id);
+  assert.equal(active?.configVersion, proposal.proposedConfigVersion);
+  assert.equal(active?.controllerSettings.contextBudgetPolicy, "mabs.budget.v2");
+
+  const codex = new CaptureAdapter("codex");
+  const task = records.createTask({ projectId: project.id, title: "budgeted", objective: "Use the activated budget.", acceptanceCriteria: ["ok"] });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
+  });
+  await controller.tick();
+  await controller.cancelTask(task.id);
+  await controller.stop();
+  const [packet] = records.packetsForTask(task.id);
+  assert.ok(packet, "the activated configuration built a packet");
+  assert.equal(packet.token_estimate, packet.prompt_token_estimate, "v2 budgets the complete rendered prompt");
 });
 
 test("curator rejects unsafe, duplicate, stale, and unevaluated proposals", async (t) => {

@@ -1071,11 +1071,15 @@ partial worktree edits were left unused. No live database migration or activatio
   launch silently used the user's global provider setting. Launches now carry it per invocation only:
   Codex `-c model_reasoning_effort="<effort>"`, Claude `--effort <effort>`. `~/.codex` and `~/.claude`
   are never edited. `claudeArgs`/`codexArgs` in `src/verify/launch.ts` are pure argv builders.
-- `src/routing/capabilities.ts` (`mabs.capabilities.v2`) is a versioned registry of exact
+  *Corrected after review:* as first committed, Claude routes kept `effort: null` and Codex routes
+  `model: null`, so both inherited the local default. Every launch now names both; see "Review
+  remediation" below.
+- `src/routing/capabilities.ts` (`mabs.capabilities.v3`) is a versioned registry of exact
   provider/model entries with supported efforts (`low|medium|high`; `xhigh`/`max` deliberately absent),
   auth modes, quota domain, entitlement, and delegation control. `evaluateCapability` fails closed: an
-  absent entry means entitlement is unknown and nothing launches. It runs in route selection, in operator
-  and project overrides, in `validateProjectConfig`, and again in `HarnessAdapter.start` before any spawn.
+  absent entry, a null model, or a null effort means nothing launches. It runs in route selection, in
+  operator and project overrides, in `validateProjectConfig`, and again in `HarnessAdapter.start` before
+  any spawn.
 - Native delegation is disabled on every launch: Codex `-c features.multi_agent=false` and
   `features.multi_agent_v2=false`; Claude `--disallowedTools Agent Task`. Claude's `subagent_stats` is
   recorded as observed child count; Codex reports none, so its count stays `null` ("unobservable"), never
@@ -1100,9 +1104,25 @@ partial worktree edits were left unused. No live database migration or activatio
 
 Known limits: `policyVersions.routing` stays `mabs.routing.v1` so existing project config fingerprints
 and approvals are not invalidated; the routing change is identified by the capability registry version
-instead. Claude routes keep `effort: null` (provider default, recorded as unknown) because changing
-their effort is a routing-policy change needing measured evidence. CLI versions are not yet captured
-per attempt.
+instead. CLI versions are not yet captured per attempt.
+
+**Review remediation (independent review of `d911f66..1e67fbd`, finding 1, critical).** The first
+commit treated `model: null` as a verified Codex capability and skipped effort validation when effort
+was null, so default routes inherited whatever `~/.codex/config.toml` or a global/managed Claude
+setting named. Now:
+
+- Registry `mabs.capabilities.v3` has no null-model entry. Codex routes pin `gpt-5.6-sol` with
+  entitlement `unknown`: Phase 0 ran on the local default, which `codex exec` does not report, so the
+  exact ID is unproven. `mabs routing verify-entitlement codex gpt-5.6-sol` makes one minimal call with
+  `-m` and, only on a clean answer, records the proof in `capability-entitlements.json` under the state
+  directory. That overlay can flip an existing entry to verified; it can never add a model. Until then,
+  Codex routes are skipped with the reason recorded, and Claude routes do the work.
+- Every Claude route names its effort (`medium` for small, research, and review work; `high` for
+  complex, diagnosis, planning, troubleshooting, and curation). A null model or null effort is
+  ineligible, and the argv builders throw rather than omit the flag.
+- A Claude attempt whose reported `modelUsage` shows a different model carrying the answer (a
+  configured fallback) fails as `CONFIG`. A small helper model beside the requested one does not.
+- Verification probes (`verify`, baseline) launch fixed explicit routes too.
 
 ### T08 — Complete-budget continuation context
 
@@ -1269,9 +1289,10 @@ the production controller setting stays one model worker.
   per-provider caps, per-project task cap, active-project cap (rechecked per reservation), a separate
   check-job cap, repository write locks (exclusive modes or overlapping scope within one canonical
   repository), and exclusive named resources. `collectActiveWork` derives active work from durable
-  state on every call, so a restart neither leaks nor forgets a slot.
+  state on every call, so a restart neither leaks nor forgets a slot. *Corrected after review:* that
+  held only once a worker's PID was recorded; see "Review remediation" below.
 - Every launch path asks it: initial dispatch, mechanical tasks, repair, reroute, review, pending-review
-  resume, and check jobs. Previously caps were checked only at initial dispatch. In-flight model work
+  resume, operational check recovery (added after review), and check jobs. Previously caps were checked only at initial dispatch. In-flight model work
   that is refused waits as `Admission pending: <kind>` (reviews as `Review pending:`), keeps its
   repository lock and repair allocation, and resumes before any new work is admitted. A provider at
   its concurrency limit during a repair now waits instead of throwing out of the controller tick
@@ -1310,6 +1331,24 @@ the production controller setting stays one model worker.
 Known limits: fairness is by dispatch count and waiting time, not by measured runtime; the ambiguous
 check-launch path after the grace period is unchanged and is not separately exercised at controller
 level.
+
+**Review remediation (findings 2 and 3).**
+
+- *Operational check recovery bypassed gate admission.* `retryOperationalCheck` reserved and
+  activated a gate lease without asking `admit(task, "gate")`. It now asks first. A denied recovery
+  returns `waiting`: nothing changes, no recovery budget is spent, and the dispatcher does not fall
+  through to a fresh model attempt. Test: "PAR-05: an operational check recovery waits for the gate
+  cap". The soak now runs with `gateLimit: 1` and asserts the active check count on every tick.
+- *A crash between spawn and the PID write orphaned a live worker (REC-06).* The worker wrapper now
+  writes `start-marker.json` (`attemptId`, `pid`) atomically before it starts any provider.
+  `HarnessAdapter.status` resolves a missing PID from the marker, or from a live process whose argv
+  names this launch's `launch.json`. It returns `launching` inside `launchMarkerGraceMs`, `lost` only
+  once nothing can have run, and `ambiguous` where no process table exists. On restart the controller
+  adopts a live worker (persists its PID, binds its stage, emits `attempt.process_adopted`) and keeps
+  its lease. An ambiguous launch blocks the task with the lease held. Orphan-stage reconciliation
+  follows the attempt's `stage_run_id` as well as the stage's `attempt_id`. `task retry` is refused
+  while any attempt is unresolved. Tests: the three `REC-06` cases in `test/model-routing.test.ts`,
+  including a real wrapper process adopted after a simulated crash.
 
 ### T12 — Incidents and curator learning
 
@@ -1381,8 +1420,9 @@ been run live and no provider was called.
   `tolerances`, and `safeguards` holding cases/repeats/missing-data/budget).
 - Schema 17 rebuilds `optimization_measurements` so its unique key includes `repeat_index` (SQLite
   cannot alter the old constraint), adding `trial_state` (`completed` | `failed` | `interrupted`),
-  `source` (`manual` | `live_trial` | `policy_replay`), and `task_id`. Existing rows are copied
-  unchanged.
+  `source` (`manual` | `live_trial` | `policy_replay`), and `task_id`. *Corrected after review:* the
+  first version's copy omitted those three columns, so replaying 17 over an already-rebuilt table
+  reset them. The runner now adds them first (`columnsBefore`), and the copy carries every column.
 - `compareExperiment` pairs by case and repeat. Missing pairs make the result `incomplete`, which never
   supports a proposal. Quality is judged per case, so one regressed case fails the safeguards even when
   the aggregate is equal. Only the primary metric can make a result `improved`, and every other metric
@@ -1395,16 +1435,47 @@ been run live and no provider was called.
   and returns a fingerprint. `optimization authorize --fingerprint --by` binds live execution to that
   exact manifest and refuses ineligible variants. `optimization record-trial` records a trial from a
   task that ran through normal governance and admission; it requires authorization and records every
-  outcome (a FAILED task becomes a failed, unaccepted trial).
+  outcome (a FAILED task becomes a failed, unaccepted trial). *Corrected after review:* as first
+  committed, that requirement was not enforced, and the budgets were declarative only; see "Review
+  remediation" below.
 - Results expose `supportsProposal`; completing an experiment never creates, approves, or activates a
   proposal.
 - Evidence: `test/optimizer-experiments.test.ts` (EVAL-01..05 plus protocol, authorization,
   eligibility, and replay cases) using `fixtures/optimization/`.
 
-Known limits: the controller cannot yet apply a variant's configuration to an individual trial task
-automatically; an operator runs each variant's tasks under the matching project configuration and
-records them with `record-trial`. No significance statistics are computed; repeats and per-case
-results are reported instead, as the plan requires.
+Known limits: live trials can vary only the route (`adapter`, `model`, `effort`); other dimensions
+are measured manually. No significance statistics are computed; repeats and per-case results are
+reported instead, as the plan requires.
+
+**Review remediation (findings 5, 6, and 7).**
+
+- *Binding.* Schema 18 adds `optimization_trial_bindings`, one row per manifest slot, each with a
+  unique task. `mabs optimization start-trial <experiment> <variant> <case> [--repeat]` creates the
+  case's task in the experiment's project, pinned to the case's `startingRevision`. It starts slots
+  in counterbalanced manifest order only and writes the binding. The controller runs that task
+  through normal governance, admission, checks, and review, but pins the variant's route: no project
+  or operator override applies, and a cooled-down pinned provider waits rather than falling back.
+- *Manifest.* `prepare-run` now also fingerprints `trialCases` (title, objective, starting revision),
+  the project's check commands, config version, review policy, and governance version, plus both
+  variant configurations. It lists `liveBlockers`, and a run with any blocker cannot be authorized.
+  A change to any fingerprinted input stops further trials.
+- *Recording.* `record-trial` requires all of the following:
+  - the binding for exactly that slot, under the current authorization;
+  - the experiment's project and the case's starting revision;
+  - a task at rest, with at least one controller stage;
+  - an admission lease on every attempt's stage;
+  - implementation attempts that ran the variant's adapter, model, and effort.
+
+  A manual `record` can no longer claim `live_trial`.
+- *Budgets.* A new `budget.maxAttemptsPerTrial` is required for live runs, and the controller blocks
+  the next launch at the cap (the trial is then recorded as `interrupted`). `start-trial` refuses
+  once `maxElapsedMs` has passed since authorization. A trial recorded late, or one that crosses the
+  usage warning or the attempt cap, carries a warning and an `optimization.budget_warning` event.
+  `compareExperiment` reports `budgetBreaches` and withholds `supportsProposal` whenever there is
+  any. `mabs optimization budget <experiment>` shows consumption.
+- Tests: `test/experiment-trials.test.ts` (controller-driven trials, slot/project/bypass refusals,
+  attempt cap, elapsed budget, fingerprint drift) and the schema-17 replay test in
+  `test/schema-migrations.test.ts`.
 
 ### T14 — Native operator views and optional export
 
@@ -1474,8 +1545,8 @@ activated: no live migration, engine switch, exporter, or concurrency change.
 | --- | --- |
 | `npm run typecheck` | pass |
 | `npm run typecheck:extensions` (Pi linked with `npm run link-pi`) | pass |
-| `npm test` (350 tests, fake adapters, disposable state) | pass, repeated runs |
-| Deterministic soak (`test/reliability-acceptance.test.ts`) | 16 tasks across 2 projects; 100+ stage transitions; injected quota faults, failing checks, review change requests, dependency integration; model/provider caps and repository locks asserted every tick; no leaked leases, duplicate obligations, or unbounded retries; 3/3 repeated runs |
+| `npm test` (fake adapters, disposable state) | pass |
+| Deterministic soak (`test/reliability-acceptance.test.ts`) | 16 tasks across 2 projects; 100+ stage transitions; injected quota faults, failing checks, review change requests, dependency integration; model/provider/gate caps and repository locks asserted every tick; no leaked leases, duplicate obligations, or unbounded retries; run under three fixed seeds on every `npm test` (replacing the earlier "3/3 repeated runs" session claim) |
 | Upgrade/restore rehearsal on a schema-14 fixture | pass (every pre-existing value preserved, schema 17, restore digest equal, source byte-identical) |
 | Upgrade/restore rehearsal on a read-only copy of the live database (2026-09-28) | pass: schema 14 → 17, 35 tables preserved, restore consistent; live `mabs.sqlite` and WAL hashes unchanged before/after. Both registered projects (`multi-agent-build-system`, `ai-engineering-study-assistant`) still need a project-type decision, so v3 would block their new implementation until classified, by design. |
 | `npm run verify` (live providers) | **not run**: it calls paid-subscription models and needs separate authorization |
@@ -1496,9 +1567,16 @@ activated: no live migration, engine switch, exporter, or concurrency change.
 
 - Gate A needs the MABS project's type and review choice (`mabs project readiness` shows the question).
 - Gate C one-worker canary: `controller run --workers=1` on the pinned v3 revision after Gate E.
-- Gate E: stop and drain the controller; `maintenance backup`; `scripts/validate-execution-upgrade.ts`
-  on the backup; pin the engine revision; start one controller on the intended database; confirm
-  `project readiness`, `queue explain`, and `telemetry status` (disabled).
+- Gate E: stop and drain the controller; `maintenance backup` (read-only: it copies the unmigrated
+  source); `scripts/validate-execution-upgrade.ts` on that backup; pin the engine revision; run
+  `maintenance migrate`. It refuses while a controller process is alive, takes and verifies its own
+  pre-migration backup (integrity, schema, and per-table row counts), then upgrades and prints the
+  restore command. Start one controller on the intended database, then confirm `project readiness`,
+  `queue explain`, and `telemetry status` (disabled). *Corrected after review:* before this, every
+  command, including `maintenance backup` and `status`, migrated the database as it opened it, so
+  the "pre-upgrade" backup was already upgraded. Operator commands and the controller now refuse an
+  older schema with an actionable message instead of migrating it. Tests:
+  `test/maintenance-migrate.test.ts`.
 - Gate F two-worker pilot (prepared, not activated): `controller run --workers=2 --claude-limit=1
   --codex-limit=1 --capacity-fallback=wait`.
 

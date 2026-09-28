@@ -6,6 +6,7 @@ import type { DelegationPolicy } from "../routing/capabilities.ts";
 import { launchClaude, launchCodex } from "../verify/launch.ts";
 
 interface ProcessSpec {
+  attemptId: string;
   harness: "claude" | "codex";
   cwd: string;
   prompt: string;
@@ -21,6 +22,12 @@ async function main(): Promise<void> {
   const specPath = process.argv[2];
   if (!specPath) throw new Error("worker-process requires a launch specification path");
   const spec = JSON.parse(readFileSync(specPath, "utf8")) as ProcessSpec;
+  // Identify this process durably before any provider exists, so a controller
+  // that crashed before persisting the PID can adopt it instead of relaunching.
+  const markerPath = join(dirname(spec.completionPath), "start-marker.json");
+  const markerTemporary = `${markerPath}.${process.pid}.tmp`;
+  writeFileSync(markerTemporary, JSON.stringify({ attemptId: spec.attemptId, pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
+  renameSync(markerTemporary, markerPath);
   const launch = spec.harness === "claude" ? launchClaude : launchCodex;
   let payload: Record<string, unknown>;
   try {

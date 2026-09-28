@@ -11,6 +11,7 @@ import { taskDiagnostics } from "../src/diagnostics/task.ts";
 import { validateWorkerOutput } from "../src/domain/contract.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -116,7 +117,7 @@ test("a controller tick reports and deduplicates stale-heartbeat health without 
     async collectResult(): Promise<CollectedResult> { throw new Error("not collected while hanging"); }
   }
 
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", new HangingAdapter()]]), defaultAdapter: "codex", workerLimit: 1, heartbeatStaleMs: 0,
   });
   await controller.tick();
@@ -156,7 +157,7 @@ test("many registered inactive projects consume no model calls while two active 
     });
   });
 
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters, defaultAdapter: "codex", workerLimit: 4, activeProjectLimit: 2,
     providerLimits: { codex: 2, claude: 2 },
   });
@@ -192,7 +193,7 @@ test("a database-lease error during a tick is counted, surfaced as degraded, and
   }
   const flaky = new FlakyRecords(records.store);
   flaky.failNext = true;
-  const controller = new Controller(flaky, {
+  const controller = new Controller(flaky, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", new StaticAdapter("codex")]]), defaultAdapter: "codex", workerLimit: 1,
   });
 

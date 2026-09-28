@@ -11,6 +11,7 @@ import { validateWorkerOutput, type WorkerOutput } from "../src/domain/contract.
 import { reviewPreset, triageReviewOutput, type ReviewPolicy } from "../src/review/policy.ts";
 import { Store } from "../src/store/db.ts";
 import { Records } from "../src/store/records.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 const H1 = JSON.parse(readFileSync(new URL("../fixtures/execution-history/advisory-clarification-review.json", import.meta.url), "utf8")) as {
   expected_obligation: string;
@@ -117,7 +118,7 @@ function setup(t: TestContext, options: {
 }
 
 async function run(records: Records, adapters: ScriptedAdapter[], taskId: string, until: (state: string) => boolean = (state) => ["DONE", "BLOCKED", "FAILED"].includes(state)) {
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>(adapters.map((adapter) => [adapter.name, adapter])),
     defaultAdapter: "codex", workerLimit: 1,
   });
@@ -295,7 +296,7 @@ test("REC-17: review evidence gathered under an older configuration is stale and
   const { records, project, task } = setup(t);
   const codex = new ScriptedAdapter("codex");
   const claude = new ScriptedAdapter("claude", [{}, {}]);
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), defaultAdapter: "codex", workerLimit: 1,
   });
   // Tick until the review has been launched but not yet collected.

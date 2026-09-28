@@ -19,6 +19,7 @@ import {
 } from "../src/scheduling/admission.ts";
 import { Store } from "../src/store/db.ts";
 import { Records, type GateSpec, type Task } from "../src/store/records.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 const limits = (overrides: Partial<SchedulingLimits> = {}): SchedulingLimits => ({
   modelWorkers: 2, providerLimits: { codex: 1, claude: 1 }, perProjectTasks: 2, activeProjects: 2, gateJobs: 1, childAgents: 0, ...overrides,
@@ -224,7 +225,7 @@ test("PAR-01: two independent tasks overlap under two slots, in disjoint worktre
   const b = records.createTask({ projectId: two.id, title: "b", objective: "task b", taskClass: "small_implementation" });
   const codex = new HoldingAdapter("codex");
   const claude = new HoldingAdapter("claude");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), defaultAdapter: "codex",
     workerLimit: 2, providerLimits: { codex: 1, claude: 1 },
   });
@@ -252,7 +253,7 @@ test("PAR-05: a repair triggered by an asynchronous check waits for admission in
   const codex = new HoldingAdapter("codex", (title, cwd) => {
     writeFileSync(join(cwd, "value.txt"), codex.started.filter((item) => item.taskTitle === title).length > 1 ? "repaired\n" : "first\n");
   });
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
@@ -275,6 +276,55 @@ test("PAR-05: a repair triggered by an asynchronous check waits for admission in
   assert.equal(codex.peak, 1, "never more than one model worker");
 });
 
+const activeChecks = (records: Records) =>
+  records.listActiveStageRuns().filter((stage) => stage.stage === "check" && ["launching", "running"].includes(stage.state)).length;
+
+test("PAR-05: an operational check recovery waits for the gate cap instead of launching past it", async (t) => {
+  const { root, records, repo, project } = fixture(t);
+  const flag = join(root, "tool-installed");
+  // Fails once as a missing tool (an environment cause, never a code repair), then passes.
+  const flaky: GateSpec = {
+    name: "env", required: true,
+    command: [process.execPath, "-e",
+      `const fs=require('fs');if(fs.existsSync(${JSON.stringify(flag)}))process.exit(0);console.error('sh: 1: lint-tool: command not found');process.exit(127)`],
+  };
+  const slow: GateSpec = { name: "slow", required: true, command: [process.execPath, "-e", "setTimeout(()=>process.exit(0),1500)"] };
+  const first = project("first", repo("first"), [flaky]);
+  const second = project("second", repo("second"), [slow]);
+  const codex = new HoldingAdapter("codex");
+  codex.autoRelease = true;
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 2, gateLimit: 1,
+    providerLimits: { codex: 2 },
+  });
+  const a = records.createTask({ projectId: first.id, title: "a", objective: "task a", taskClass: "small_implementation" });
+  await tickUntil(controller, () => records.getTask(a.id)?.state === "BLOCKED", 10_000);
+  assert.equal(records.getTask(a.id)?.state, "BLOCKED", records.getTask(a.id)?.blockedReason ?? "");
+  assert.equal(records.getTask(a.id)?.repairsUsed, 0, "an environment failure spends no code repair");
+  assert.ok(records.getContinuation(a.id).openObligations.some((item) => item.kind === "gate_failure" && item.sourceGateId !== null));
+
+  const b = records.createTask({ projectId: second.id, title: "b", objective: "task b", taskClass: "small_implementation" });
+  await tickUntil(controller, () => activeChecks(records) === 1, 10_000);
+  assert.equal(activeChecks(records), 1, "B's slow check holds the only gate slot");
+
+  writeFileSync(flag, "");
+  records.retryTask(a.id, records.getTask(a.id)?.recordVersion as number);
+  const startedBefore = codex.started.length;
+  for (let tick = 0; tick < 3; tick += 1) {
+    await controller.tick();
+    assert.ok(activeChecks(records) <= 1, "the gate cap holds during recovery");
+  }
+  if (activeChecks(records) === 1 && records.getTask(b.id)?.state !== "DONE") {
+    assert.equal(records.getTask(a.id)?.state, "READY", "recovery waits in READY while the gate cap is full");
+  }
+  assert.equal(codex.started.length, startedBefore, "a waiting recovery never falls through to a new model attempt");
+
+  await tickUntil(controller, () => records.getTask(a.id)?.state === "DONE" && records.getTask(b.id)?.state === "DONE", 15_000);
+  await controller.stop();
+  assert.equal(records.getTask(a.id)?.state, "DONE", records.getTask(a.id)?.blockedReason ?? "");
+  assert.equal(records.getTask(b.id)?.state, "DONE", records.getTask(b.id)?.blockedReason ?? "");
+});
+
 test("PAR-07: a blocked first task does not starve compatible work behind it", async (t) => {
   const { records, repo, project } = fixture(t);
   const other = project("other", repo("other"));
@@ -282,7 +332,7 @@ test("PAR-07: a blocked first task does not starve compatible work behind it", a
   const holder = records.createTask({ projectId: other.id, title: "h", objective: "holds the port", resources: ["port:3000"], taskClass: "small_implementation" });
   const codex = new HoldingAdapter("codex");
   const claude = new HoldingAdapter("claude");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), defaultAdapter: "codex",
     workerLimit: 2, providerLimits: { codex: 1, claude: 1 },
   });
@@ -310,7 +360,7 @@ test("PAR-04: projects registered on one repository never run exclusive work con
   const b = records.createTask({ projectId: second.id, title: "b", objective: "b", taskClass: "small_implementation" });
   const codex = new HoldingAdapter("codex");
   const claude = new HoldingAdapter("claude");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), defaultAdapter: "codex",
     workerLimit: 2, providerLimits: { codex: 1, claude: 1 },
   });
@@ -327,11 +377,11 @@ test("PAR-11: a restarted controller derives capacity from durable state and sta
   const a = records.createTask({ projectId: p.id, title: "a", objective: "a", taskClass: "small_implementation" });
   const b = records.createTask({ projectId: p.id, title: "b", objective: "b", taskClass: "small_implementation" });
   const codex = new HoldingAdapter("codex");
-  const first = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
+  const first = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
   await first.tick();
   await first.stop();
   assert.equal(running(records), 1);
-  const restarted = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
+  const restarted = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
   await restarted.tick();
   await restarted.tick();
   assert.equal(codex.started.length, 1, "no second worker and no duplicate of the first");
@@ -363,7 +413,7 @@ test("PAR-10: branches that pass alone but disagree at the join fail integration
   const client = records.createTask({ projectId: p.id, title: "client", objective: "consume api", executionMode: "parallel", allowedScope: ["client.js"], taskClass: "small_implementation" });
   const join_ = records.createTask({ projectId: p.id, title: "join", objective: "integrate", taskClass: "mechanical", executionMode: "single",
     executionReason: "Run the integration check on the combined revision.", dependsOn: [api.id, client.id], repairLimit: 0 });
-  const controller = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1 });
   await tickUntil(controller, () => ["DONE", "FAILED", "BLOCKED"].includes(records.getTask(join_.id)?.state ?? ""));
   await controller.stop();
   assert.equal(records.getTask(api.id)?.state, "DONE");

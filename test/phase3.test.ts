@@ -12,6 +12,7 @@ import { validateWorkerOutput, type WorkerOutput } from "../src/domain/contract.
 import { applyExecutionPlan, type ExecutionPlan } from "../src/domain/plan.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -153,7 +154,7 @@ test("substantive work passes gates, independent review, one review repair, and 
     acceptanceCriteria: ["registered gate passes", "independent review approves"], allowedScope: ["value.txt"], repairLimit: 2,
   });
   const adapter = new ReviewLoopAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
 
   for (let tick = 0; tick < 5; tick += 1) await controller.tick();
   const final = records.getTask(task.id);
@@ -197,7 +198,7 @@ test("failed required gates prevent review and completion and retain explanatory
     acceptanceCriteria: ["required gate passes"], allowedScope: ["value.txt"], repairLimit: 0,
   });
   const adapter = new FailingGateAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick(); await controller.tick();
   const failed = records.getTask(task.id);
   assert.equal(failed?.state, "FAILED", failed?.blockedReason ?? "task did not fail");
@@ -237,7 +238,7 @@ test("an unanswered feedback question is resolved by one on-demand response task
   });
   const responseTaskId = question.linkedTaskId as string;
   const adapter = new ResponseAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick(); await controller.tick();
   assert.equal(records.getTask(responseTaskId)?.state, "DONE");
   assert.equal(records.getFeedback(question.id)?.state, "answered");

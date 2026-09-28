@@ -15,6 +15,7 @@ import { reviewPolicyForGovernance } from "../src/review/policy.ts";
 import { canonicalRepoKey } from "../src/scheduling/admission.ts";
 import { SCHEMA_VERSION, Store, createLegacyBaselineDatabase } from "../src/store/db.ts";
 import { Records, type Task } from "../src/store/records.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function tempRoot(t: TestContext, prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -164,7 +165,8 @@ function git(cwd: string, ...args: string[]): void {
   execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@l", ...args], { cwd });
 }
 
-test("soak: two projects, hundreds of stage transitions, injected faults, and every invariant on every tick", async (t) => {
+// Three seeds: repeatability is an automated assertion, not a claim about past sessions.
+for (const seed of [20260928, 7, 424242]) test(`soak (seed ${seed}): two projects, hundreds of stage transitions, injected faults, and every invariant on every tick`, async (t) => {
   const root = tempRoot(t, "mabs-soak-");
   const previous = { state: process.env.MABS_STATE_DIR, worktrees: process.env.MABS_WORKTREE_ROOT };
   process.env.MABS_STATE_DIR = join(root, "state");
@@ -211,10 +213,10 @@ test("soak: two projects, hundreds of stage transitions, injected faults, and ev
       previousTask = created;
     }
   }
-  const rng = mulberry32(20260928);
-  const controller = new Controller(records, {
+  const rng = mulberry32(seed);
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", new SoakAdapter("codex", rng)], ["claude", new SoakAdapter("claude", rng)]]),
-    defaultAdapter: "codex", workerLimit: 2, providerLimits: { codex: 1, claude: 1 }, quotaCooldownMs: 40,
+    defaultAdapter: "codex", workerLimit: 2, providerLimits: { codex: 1, claude: 1 }, quotaCooldownMs: 40, gateLimit: 1,
   });
   const repoOf = new Map([[quiet.id, canonicalRepoKey(quiet.repoPath)], [reviewed.id, canonicalRepoKey(reviewed.repoPath)]]);
   const terminal = new Set(["DONE", "FAILED", "CANCELLED"]);
@@ -231,6 +233,8 @@ test("soak: two projects, hundreds of stage transitions, injected faults, and ev
     for (const provider of ["codex", "claude"]) {
       assert.ok(running.filter((attempt) => attempt.adapter === provider).length <= 1, `${provider} cap violated`);
     }
+    const checks = records.listActiveStageRuns().filter((stage) => stage.stage === "check" && ["launching", "running"].includes(stage.state));
+    assert.ok(checks.length <= 1, `gate cap violated: ${checks.length}`);
     const holders = records.listTasks().filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
     for (const key of repoOf.values()) {
       const inRepo = holders.filter((task) => repoOf.get(task.projectId) === key);

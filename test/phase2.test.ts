@@ -12,6 +12,7 @@ import { validateWorkerOutput } from "../src/domain/contract.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
 import { integrateDependencyRevisions } from "../src/workspace/git.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 class Phase2Records extends Records {
   override createProject(input: Parameters<Records["createProject"]>[0]) {
@@ -187,7 +188,7 @@ test("two projects dispatch independently while global and provider caps hold", 
   const tasks = projects.map((project, index) => records.createTask({
     projectId: project.id, title: `task-${index}`, objective: "change value", acceptanceCriteria: ["committed"],
   }));
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters, defaultAdapter: "codex", workerLimit: 2, activeProjectLimit: 2,
     providerLimits: { codex: 1, claude: 1 },
   });
@@ -215,7 +216,7 @@ test("task-class policy chooses its evidence-based route unless explicitly overr
   });
   const codex = new Phase2Adapter("codex");
   const claude = new Phase2Adapter("claude");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]),
     workerLimit: 1, providerLimits: { codex: 1, claude: 1 },
   });
@@ -234,7 +235,7 @@ test("routing rejects a task when a required local tool is unavailable", async (
     requiredTools: ["mabs-tool-that-does-not-exist"],
   });
   const codex = new Phase2Adapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
@@ -253,7 +254,7 @@ test("controller rejects worker edits outside the declared repository scope", as
     allowedScope: ["docs"],
   });
   const codex = new Phase2Adapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
@@ -276,7 +277,7 @@ test("mechanical tasks run registered gates without a model worker", async (t) =
     taskClass: "mechanical", executionMode: "single", executionReason: "No code change or model reasoning is required.",
   });
   const codex = new Phase2Adapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await tickWhileChecking(controller, records, task.id);
@@ -293,7 +294,7 @@ test("machine backpressure leaves work READY and reports the constraint", async 
   const project = records.createProject({ projectType: "personal", reviewChoice: "risk", name: "backpressure", repoPath: repo });
   const task = records.createTask({ projectId: project.id, title: "wait", objective: "wait for capacity", acceptanceCriteria: ["done"] });
   const codex = new Phase2Adapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
     minFreeMemoryMb: Number.MAX_SAFE_INTEGER,
   });
@@ -317,7 +318,7 @@ test("fair scheduling gives the next slot to the less-dispatched project", async
     records.createTask({ projectId: project.id, title: `${project.name}-1`, objective: "change value", acceptanceCriteria: ["done"] });
     records.createTask({ projectId: project.id, title: `${project.name}-2`, objective: "change value again", acceptanceCriteria: ["done"] });
   }
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters, defaultAdapter: "codex", workerLimit: 1, activeProjectLimit: 2, providerLimits: { codex: 1 },
   });
   await controller.tick();
@@ -339,7 +340,7 @@ test("quota failure reroutes at an attempt boundary without spending repair budg
   const task = records.createTask({ projectId: project.id, title: "fallback", objective: "change value", acceptanceCriteria: ["committed"] });
   const codex = new Phase2Adapter("codex"); codex.failWithQuota = true;
   const claude = new Phase2Adapter("claude");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]),
     defaultAdapter: "codex", workerLimit: 2, providerLimits: { codex: 1, claude: 1 }, quotaCooldownMs: 60_000,
   });

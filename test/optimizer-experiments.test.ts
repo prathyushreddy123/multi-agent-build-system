@@ -139,25 +139,20 @@ test("protocols demand one changed dimension, a budget that fits, and in-suite m
   }), /not in the fixed protocol suite/);
 });
 
-test("live trials require authorization bound to the exact manifest, and failed trials are counted", (t) => {
+test("a live run cannot be authorized without fixed trial cases, revisions, and an attempt budget", (t) => {
   const { records, root } = setup(t);
   const project = records.createProject({ name: "exp", repoPath: root, projectType: "personal", reviewChoice: "off" });
   const experiment = load(records, { ...fixture("paired-cases.json"), measurements: [] }, {}, project.id);
-  const task = records.createTask({ projectId: project.id, title: "trial", objective: "o" });
-  records.transition(task.id, "READY");
-  records.transition(task.id, "RUNNING");
-  records.transition(task.id, "FAILED", { failure_class: "CODE", blocked_reason: "trial failed" });
-
-  assert.throws(() => recordTrialFromTask(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0, taskId: task.id }),
-    /require an authorized run manifest/);
   assert.throws(() => authorizeRun(records, experiment.id, { fingerprint: "sha256:stale", authorizedBy: "owner" }), /does not match the current run manifest/);
-  const { fingerprint } = prepareRun(records, experiment.id);
-  authorizeRun(records, experiment.id, { fingerprint, authorizedBy: "owner" });
-  const trial = recordTrialFromTask(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0, taskId: task.id });
-  assert.equal(trial.trialState, "failed");
-  assert.equal(trial.accepted, false);
-  assert.equal(trial.source, "live_trial");
-  assert.equal(trial.taskId, task.id);
+  const { fingerprint, manifest } = prepareRun(records, experiment.id);
+  assert.match(manifest.liveBlockers.join(" "), /maxAttemptsPerTrial is required/);
+  assert.match(manifest.liveBlockers.join(" "), /Case case-a needs a starting revision/);
+  assert.throws(() => authorizeRun(records, experiment.id, { fingerprint, authorizedBy: "owner" }), /Cannot authorize a live run/);
+  assert.throws(() => recordMeasurement(records, {
+    experimentId: experiment.id, variant: "baseline", caseKey: "case-a", accepted: true, requirementViolations: 0, repairs: 0,
+    interventions: 0, durationMs: null, reportedInputTokens: null, reportedOutputTokens: null, relevantFiles: 0, warnings: 0,
+    evidencePath: null, source: "live_trial",
+  }), /recorded only from a bound trial task/);
 });
 
 test("an ineligible model variant cannot be authorized for a live run", (t) => {

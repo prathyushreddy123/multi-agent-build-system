@@ -14,6 +14,8 @@ import { Records } from "../src/store/records.ts";
 import { BoundedTelemetryQueue, type TelemetryEvent } from "../src/telemetry/sink.ts";
 import { LineAssembler, LiveLog, ProviderStreamParser, readProgress, telemetryGap } from "../src/telemetry/stream.ts";
 import { launchCodex } from "../src/verify/launch.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
+import { CODEX_MODEL } from "../src/routing/capabilities.ts";
 
 const sleep = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 
@@ -98,7 +100,7 @@ test("OBS-01: provider output is on disk and in the progress record before the p
   const cwd = tempRoot(t, "mabs-stream-cwd-");
   const evidencePath = join(cwd, "worker.log");
   const progressPath = join(cwd, "progress.json");
-  const running = launchCodex({ cwd, prompt: "p", effort: "low", timeoutMs: 20_000, evidencePath, progressPath });
+  const running = launchCodex({ cwd, prompt: "p", model: CODEX_MODEL, effort: "low", timeoutMs: 20_000, evidencePath, progressPath });
   let midway = readProgress(progressPath);
   const deadline = Date.now() + 1_200;
   while (!midway && Date.now() < deadline) {
@@ -154,8 +156,8 @@ function controllerFixture(t: TestContext) {
 test("OBS-01: the controller records live progress separately from liveness, and usage only once", async (t) => {
   slowCodex(t, 2_000);
   const { records, task } = controllerFixture(t);
-  const controller = new Controller(records, {
-    adapters: new Map<string, WorkerAdapter>([["codex", new HarnessAdapter("codex")]]), defaultAdapter: "codex", workerLimit: 1,
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["codex", new HarnessAdapter("codex", VERIFIED_REGISTRY)]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
   const attempt = records.listAttempts(task.id)[0];
@@ -231,7 +233,7 @@ test("OBS-02: an exporter outage never stops execution, and loss is counted", as
   assert.equal(stats.lastExportError, "collector unreachable");
   assert.equal(stats.queued, 3, "the failed batch is retained up to the bound");
 
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", new ImmediateAdapter()]]), defaultAdapter: "codex", workerLimit: 1, telemetry: queue,
   });
   for (let tick = 0; tick < 3; tick += 1) await controller.tick();

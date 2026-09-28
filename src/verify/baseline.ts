@@ -17,7 +17,7 @@ import { exec } from "../core/exec.ts";
 import { classifyFailure, classifyFromEnvelope, type FailureClass } from "../core/failure.ts";
 import { stateDir } from "../core/paths.ts";
 import { validateWorkerOutput, WORKER_OUTPUT_SCHEMA, CONTRACT_VERSION } from "../domain/contract.ts";
-import { launchClaude, launchCodex } from "./launch.ts";
+import { launchClaude, launchCodex, PROBE_ROUTES } from "./launch.ts";
 import { createFixture, fixtureTestsPass, gitStatus } from "./fixture.ts";
 
 const RESULT_FILE = ".mabs/result.json";
@@ -164,6 +164,7 @@ export async function runBaseline(options: { only?: string[]; harnesses?: string
       const result = await launch({
         cwd: fixture.path,
         prompt: contractPrompt(task.prompt),
+        ...PROBE_ROUTES[harness as keyof typeof PROBE_ROUTES],
         timeoutMs: 12 * 60_000,
         evidencePath: evidence,
       });

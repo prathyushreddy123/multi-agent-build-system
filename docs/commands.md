@@ -24,13 +24,13 @@ Run commands from the MABS checkout. This is a curated reference; `node src/cli.
 | `node src/cli.ts task timeline TASK_ID --limit=50` | Paged event history with evidence paths |
 | `node src/cli.ts queue explain` | Why each waiting task is waiting |
 | `node src/cli.ts scheduler explain TASK_ID` | The admission decision for one task under the current active work |
-| `node src/cli.ts routing capabilities` | The versioned model/effort/quota-domain registry |
+| `node src/cli.ts routing capabilities` | The versioned model/effort/quota-domain registry, with recorded entitlement proofs applied |
 | `node src/cli.ts routing explain TASK_ID` | Recorded route decisions plus a launch-free dry selection |
 | `node src/cli.ts obligation list TASK_ID` | Durable findings and decisions with their lifecycle |
 | `node src/cli.ts improvements PROJECT` | Incidents, curator recommendations, experiments, and proposals |
 | `node src/cli.ts telemetry status` | Optional export state; disabled unless configured |
 
-Inspection commands do not launch workers. Commands that open MABS records can initialize or migrate the local database; they are not a promise of zero filesystem writes.
+Inspection commands do not launch workers. Commands that open MABS records can initialize a new local database, but never migrate an existing one: a database behind this build's schema is refused with an instruction to run `maintenance migrate`. They are not a promise of zero filesystem writes.
 
 ## Control work
 
@@ -43,9 +43,10 @@ Inspection commands do not launch workers. Commands that open MABS records can i
 | `node src/cli.ts controller once` | Reconcile and dispatch one cycle; **not** a dry run |
 | `node src/cli.ts project status PROJECT paused` | Prevent new dispatch for this project; does not cancel existing workers |
 | `node src/cli.ts project status PROJECT active` | Allow the project to progress |
-| `node src/cli.ts task retry TASK_ID --version=N` | Retry a blocked/failed task using its latest record version |
+| `node src/cli.ts task retry TASK_ID --version=N` | Retry a blocked/failed task using its latest record version; refused while a worker attempt is unresolved |
 | `node src/cli.ts task cancel TASK_ID --version=N` | Cancel the task and its worker process group |
 | `node src/cli.ts provider reset codex` | Clear recorded provider unavailability after fixing the cause |
+| `node src/cli.ts routing verify-entitlement codex gpt-5.6-sol` | **One real provider call** on that exact registered route; only a clean answer records entitlement, making its routes eligible |
 | `node src/cli.ts obligation decide OBLIGATION_ID --answer=... --by=NAME` | Answer a blocking review decision; resuming is a separate `task retry` |
 | `node src/cli.ts incident import-history --dry-run` | Project systemic incidents from history; drop `--dry-run` to record them (idempotent) |
 | `node src/cli.ts incident verify INCIDENT_ID --cause=... --fix=REF --test=REF --by=NAME` | Mark a lesson verified; requires fix and test evidence |
@@ -85,7 +86,9 @@ Flags on `controller run` or `controller once`:
 | `node src/cli.ts optimization routing PROJECT` | Inspect recorded routing outcomes, not remaining quota or actual spend |
 | `node src/cli.ts optimization prepare-run EXPERIMENT_ID --dry-run` | Counterbalanced trial manifest, budget, and eligibility; zero provider calls |
 | `node src/cli.ts optimization authorize EXPERIMENT_ID --fingerprint=... --by=NAME` | Bind live trials to that exact manifest |
-| `node src/cli.ts optimization record-trial EXPERIMENT_ID VARIANT CASE TASK_ID --repeat=N` | Record a live trial from a normal task, including failed ones |
+| `node src/cli.ts optimization start-trial EXPERIMENT_ID VARIANT CASE --repeat=N` | Create the next manifest slot's trial task, pinned to the case revision and the variant's route; the controller runs it |
+| `node src/cli.ts optimization record-trial EXPERIMENT_ID VARIANT CASE TASK_ID --repeat=N` | Record the bound trial task for that slot once it is at rest, including failed ones |
+| `node src/cli.ts optimization budget EXPERIMENT_ID` | Elapsed time, reported usage, and attempts against the authorized budget |
 | `node src/cli.ts curator recommend PROJECT` | Evidence-backed remedies for recurring incidents; proposal only |
 
 `ops prepare` also accepts `deployment`, `monitoring`, `scheduling`, `delivery`, and `costs`. None of these preparations executes an external action.
@@ -97,7 +100,8 @@ Use the [curator guide](curator.md) for configuration proposal, approval, activa
 | Command | Effect |
 | --- | --- |
 | `node src/cli.ts maintenance policy` | Show retention defaults |
-| `node src/cli.ts maintenance backup` | Create a consistent SQLite copy; rotate old backups beyond the newest 14 |
+| `node src/cli.ts maintenance backup` | Create a consistent SQLite copy of the database as it is, without migrating it; rotate old backups beyond the newest 14 |
+| `node src/cli.ts maintenance migrate` | With the controller stopped: take and verify a pre-migration backup, then upgrade the schema; prints the restore command |
 | `node src/cli.ts maintenance prune` | Preview eligible artifact deletion; dry-run by default |
 | `node src/cli.ts maintenance prune --apply` | **Delete** eligible artifact files after you have reviewed the preview |
 

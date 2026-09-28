@@ -1,12 +1,14 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { artifactDir } from "../core/paths.ts";
 import { ids } from "../core/ids.ts";
-import { DEFAULT_CAPABILITY_REGISTRY, evaluateCapability } from "../routing/capabilities.ts";
+import { evaluateCapability, loadCapabilityRegistry } from "../routing/capabilities.ts";
 import { fromJson, nowIso, toJson, type Row } from "../store/db.ts";
-import type { Records } from "../store/records.ts";
+import type { TaskClass } from "../routing/router.ts";
+import type { Records, Task } from "../store/records.ts";
 import { normalizeAttemptUsage } from "../usage/summary.ts";
 
 export const EXPERIMENT_PROTOCOL_VERSION = "mabs.experiment-protocol.v1";
@@ -27,8 +29,33 @@ export interface ExperimentProtocol {
   repeats: number;
   /** "strict": any missing usage makes usage claims incomplete. "known_subtotal": report known subtotals, never savings. */
   missingData: "strict" | "known_subtotal";
-  budget: { maxTrials: number; maxElapsedMs: number; usageWarningInputTokens: number | null };
+  budget: {
+    maxTrials: number;
+    maxElapsedMs: number;
+    usageWarningInputTokens: number | null;
+    /** Provider attempts one trial task may consume; required for a live run. */
+    maxAttemptsPerTrial?: number;
+  };
+  /**
+   * The fixed work each case performs in a live run: the same objective from
+   * the same starting revision for both variants. Required for a live run.
+   */
+  trialCases?: Record<string, TrialCase>;
 }
+
+export interface TrialCase {
+  startingRevision: string;
+  title: string;
+  objective: string;
+  acceptanceCriteria?: string[];
+  taskClass?: TaskClass;
+}
+
+/**
+ * The only configuration a live trial can apply per task. Anything else
+ * changes shared project state, so it is measured manually, never live.
+ */
+export const LIVE_TRIAL_KEYS = ["adapter", "model", "effort"] as const;
 
 /** Defaults for experiments recorded before protocols existed. */
 const LEGACY_TOLERANCES: Partial<Record<ExperimentMetric, number>> = {
@@ -102,6 +129,8 @@ export interface ExperimentComparison {
   tradeOffsWithinTolerance: boolean;
   trials: { total: number; failed: number; interrupted: number };
   sources: string[];
+  /** Declared budget limits the live run exceeded; any breach withholds proposal support. */
+  budgetBreaches: string[];
   /** A result may support a curator proposal; it never approves or activates anything. */
   supportsProposal: boolean;
   reasons: string[];
@@ -183,6 +212,11 @@ export function validateProtocol(protocol: ExperimentProtocol, baseline: Record<
   if (!protocol.budget || !Number.isSafeInteger(protocol.budget.maxTrials) || protocol.budget.maxTrials < 1) errors.push("budget.maxTrials is required.");
   else if (trials > protocol.budget.maxTrials) errors.push(`The protocol needs ${trials} trials, above budget.maxTrials ${protocol.budget.maxTrials}.`);
   if (!protocol.budget || !Number.isSafeInteger(protocol.budget.maxElapsedMs) || protocol.budget.maxElapsedMs < 1) errors.push("budget.maxElapsedMs is required.");
+  const maxAttempts = protocol.budget?.maxAttemptsPerTrial;
+  if (maxAttempts !== undefined && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1)) errors.push("budget.maxAttemptsPerTrial must be a positive integer.");
+  for (const caseKey of Object.keys(protocol.trialCases ?? {})) {
+    if (!protocol.cases?.includes(caseKey)) errors.push(`trialCases names ${caseKey}, which is not a declared case.`);
+  }
   const changed = changedDimensions(baseline, candidate);
   if (changed.length !== 1) {
     errors.push(`Exactly one primary dimension may change between variants; found ${changed.length}${changed.length ? ` (${changed.join(", ")})` : ""}.`);
@@ -219,7 +253,7 @@ export function createExperiment(records: Records, input: {
     protocol ? EXPERIMENT_PROTOCOL_VERSION : null,
     protocol?.primaryMetric ?? null,
     protocol ? toJson(protocol.tolerances) : null,
-    protocol ? toJson({ cases: protocol.cases, repeats: protocol.repeats, missingData: protocol.missingData, budget: protocol.budget }) : null,
+    protocol ? toJson({ cases: protocol.cases, repeats: protocol.repeats, missingData: protocol.missingData, budget: protocol.budget, trialCases: protocol.trialCases }) : null,
   );
   records.recordEvent({ kind: "optimization.created", projectId: input.projectId, data: { experimentId: id, dimension: input.dimension } });
   return getExperiment(records, id) as OptimizationExperiment;
@@ -240,7 +274,13 @@ export function listExperiments(records: Records, projectId?: string): Optimizat
 type MeasurementInput = Omit<OptimizationMeasurement, "id" | "createdAt" | "repeatIndex" | "trialState" | "source" | "usageCoverage" | "taskId"> &
   Partial<Pick<OptimizationMeasurement, "repeatIndex" | "trialState" | "source" | "usageCoverage" | "taskId">>;
 
+/** Manual or replay evidence. Live-trial evidence is recorded only by recordTrialFromTask. */
 export function recordMeasurement(records: Records, input: MeasurementInput): OptimizationMeasurement {
+  if (input.source === "live_trial") throw new Error("Live-trial measurements are recorded only from a bound trial task (optimization record-trial).");
+  return insertMeasurement(records, input);
+}
+
+function insertMeasurement(records: Records, input: MeasurementInput): OptimizationMeasurement {
   const current = getExperiment(records, input.experimentId);
   if (!current) throw new Error(`Unknown experiment ${input.experimentId}`);
   if (current.status === "completed") throw new Error("Completed experiments are immutable");
@@ -422,36 +462,53 @@ export function compareExperiment(records: Records, experimentId: string): Exper
     if (safeguardsPassed && tradeOffsWithinTolerance) reasons.push("Candidate was non-regressing but did not demonstrate the stated improvement or limitation resolution.");
   }
   if (trials.failed + trials.interrupted > 0) reasons.push(`${trials.failed} failed and ${trials.interrupted} interrupted trial(s) are retained and counted as not accepted.`);
+  // A run that overspent its declared budget is not the run that was authorized.
+  const budgetBreaches = protocol && current.runAuthorization ? experimentBudgetState(records, experimentId).reasons : [];
+  if (budgetBreaches.length > 0) reasons.push(`Budget exceeded, so this result cannot support a proposal: ${budgetBreaches.join(" ")}`);
   return {
     result, evidence, comparableCases: cases, missingPairs, perCase, primaryMetric: primary, baseline, candidate,
     safeguardsPassed, tradeOffsWithinTolerance, trials, sources,
-    supportsProposal: result === "improved" || result === "limitation_resolved",
+    budgetBreaches,
+    supportsProposal: (result === "improved" || result === "limitation_resolved") && budgetBreaches.length === 0,
     reasons,
   };
 }
 
-/**
- * Plan a run without executing it: the exact trials, their counterbalanced
- * order, the budget, and model eligibility. Zero provider calls. The returned
- * fingerprint is what an operator authorizes.
- */
-export function prepareRun(records: Records, experimentId: string): {
-  manifest: {
-    experimentId: string;
-    protocolVersion: string;
-    trials: { caseKey: string; repeatIndex: number; variant: ExperimentVariant; order: number }[];
-    budget: ExperimentProtocol["budget"];
-    eligibility: { variant: ExperimentVariant; eligible: boolean; reasons: string[] }[];
-    providerCalls: 0;
-  };
-  fingerprint: string;
-  manifestPath: string;
-} {
-  const current = getExperiment(records, experimentId);
-  if (!current) throw new Error(`Unknown experiment ${experimentId}`);
+export interface RunManifest {
+  experimentId: string;
+  protocolVersion: string;
+  projectId: string | null;
+  trials: { caseKey: string; repeatIndex: number; variant: ExperimentVariant; order: number }[];
+  budget: ExperimentProtocol["budget"];
+  eligibility: { variant: ExperimentVariant; eligible: boolean; reasons: string[] }[];
+  /** Exactly what each variant applies to its trial tasks. */
+  variants: Record<ExperimentVariant, Record<string, unknown>>;
+  trialCases: Record<string, TrialCase> | null;
+  /** The project's checks, configuration, and review/governance policy every trial runs under. */
+  environment: { configVersion: string | null; checkCommands: unknown; reviewPolicy: unknown; governanceVersion: number | null } | null;
+  /** Why this manifest cannot be authorized for live trials; empty when it can. */
+  liveBlockers: string[];
+  providerCalls: 0;
+}
+
+function fingerprintOf(manifest: RunManifest): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(manifest)).digest("hex")}`;
+}
+
+function revisionExists(repoPath: string, revision: string): boolean {
+  try {
+    execFileSync("git", ["-C", repoPath, "cat-file", "-e", `${revision}^{commit}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The deterministic manifest, with no file or event written. */
+function buildManifest(records: Records, current: OptimizationExperiment): RunManifest {
   if (!current.protocol) throw new Error("A run manifest requires a declared experiment protocol.");
   const protocol = current.protocol;
-  const trials: { caseKey: string; repeatIndex: number; variant: ExperimentVariant; order: number }[] = [];
+  const trials: RunManifest["trials"] = [];
   let order = 0;
   protocol.cases.forEach((caseKey, caseIndex) => {
     for (let repeatIndex = 0; repeatIndex < protocol.repeats; repeatIndex += 1) {
@@ -461,24 +518,71 @@ export function prepareRun(records: Records, experimentId: string): {
       trials.push({ caseKey, repeatIndex, variant: first, order: order++ }, { caseKey, repeatIndex, variant: second, order: order++ });
     }
   });
+  const registry = loadCapabilityRegistry();
   const eligibility = (["baseline", "candidate"] as const).map((variant) => {
     const config = (variant === "baseline" ? current.baselineConfig : current.candidateConfig) as { adapter?: string; model?: string | null; effort?: string | null };
     if (!config.adapter) return { variant, eligible: true, reasons: ["variant does not change the launch route"] };
-    const evidence = evaluateCapability(DEFAULT_CAPABILITY_REGISTRY, { provider: config.adapter, model: config.model ?? null, effort: config.effort ?? null }).evidence;
+    const evidence = evaluateCapability(registry, { provider: config.adapter, model: config.model ?? null, effort: config.effort ?? null }).evidence;
     return { variant, eligible: evidence.eligible, reasons: evidence.reasons };
   });
   if (trials.length > protocol.budget.maxTrials) throw new Error(`Run needs ${trials.length} trials, above budget.maxTrials ${protocol.budget.maxTrials}.`);
-  const manifest = {
-    experimentId, protocolVersion: current.protocolVersion ?? EXPERIMENT_PROTOCOL_VERSION, trials, budget: protocol.budget, eligibility, providerCalls: 0 as const,
+
+  const project = current.projectId ? records.getProject(current.projectId) : null;
+  const liveBlockers: string[] = [];
+  if (!project) liveBlockers.push("A live run needs the experiment's project; trials run under its governance and checks.");
+  for (const variant of ["baseline", "candidate"] as const) {
+    const keys = Object.keys(variant === "baseline" ? current.baselineConfig : current.candidateConfig);
+    const unsupported = keys.filter((key) => !(LIVE_TRIAL_KEYS as readonly string[]).includes(key));
+    if (unsupported.length > 0) liveBlockers.push(`${variant} changes ${unsupported.join(", ")}, which a live trial cannot apply per task; measure it manually.`);
+  }
+  const maxAttempts = protocol.budget.maxAttemptsPerTrial;
+  if (!Number.isSafeInteger(maxAttempts) || (maxAttempts as number) < 1) liveBlockers.push("budget.maxAttemptsPerTrial is required for a live run.");
+  for (const caseKey of protocol.cases) {
+    const trialCase = protocol.trialCases?.[caseKey];
+    if (!trialCase?.startingRevision || !trialCase.objective?.trim() || !trialCase.title?.trim()) {
+      liveBlockers.push(`Case ${caseKey} needs a starting revision, title, and objective for a live run.`);
+    } else if (project && !revisionExists(project.repoPath, trialCase.startingRevision)) {
+      liveBlockers.push(`Case ${caseKey} starting revision ${trialCase.startingRevision} is not a commit in ${project.repoPath}.`);
+    }
+  }
+  return {
+    experimentId: current.id,
+    protocolVersion: current.protocolVersion ?? EXPERIMENT_PROTOCOL_VERSION,
+    projectId: current.projectId,
+    trials,
+    budget: protocol.budget,
+    eligibility,
+    variants: { baseline: current.baselineConfig, candidate: current.candidateConfig },
+    trialCases: protocol.trialCases ?? null,
+    environment: project ? {
+      configVersion: project.configVersion ?? null,
+      checkCommands: project.checkCommands,
+      reviewPolicy: project.reviewPolicy,
+      governanceVersion: project.governance?.version ?? null,
+    } : null,
+    liveBlockers,
+    providerCalls: 0 as const,
   };
-  const fingerprint = `sha256:${createHash("sha256").update(JSON.stringify({ manifest, baseline: current.baselineConfig, candidate: current.candidateConfig })).digest("hex")}`;
+}
+
+/**
+ * Plan a run without executing it: the exact trials, their counterbalanced
+ * order, the work and starting revision of each case, the project checks and
+ * review policy they run under, the budget, and model eligibility. Zero
+ * provider calls. The returned fingerprint is what an operator authorizes.
+ */
+export function prepareRun(records: Records, experimentId: string): { manifest: RunManifest; fingerprint: string; manifestPath: string } {
+  const current = getExperiment(records, experimentId);
+  if (!current) throw new Error(`Unknown experiment ${experimentId}`);
+  const manifest = buildManifest(records, current);
+  const fingerprint = fingerprintOf(manifest);
   const manifestPath = join(artifactDir("optimization", experimentId), "run-manifest.json");
   writeFileSync(manifestPath, JSON.stringify({ fingerprint, manifest }, null, 2), { mode: 0o600 });
-  records.recordEvent({ kind: "optimization.run_prepared", projectId: current.projectId, data: { experimentId, fingerprint, trials: trials.length, providerCalls: 0 } });
+  records.recordEvent({ kind: "optimization.run_prepared", projectId: current.projectId, data: { experimentId, fingerprint, trials: manifest.trials.length, providerCalls: 0 } });
   return { manifest, fingerprint, manifestPath };
 }
 
-/** Bind live execution to one exact manifest. Ineligible variants cannot be authorized. */
+/** Bind live execution to one exact manifest. Ineligible or incompletely specified runs cannot be authorized. */
 export function authorizeRun(records: Records, experimentId: string, input: { fingerprint: string; authorizedBy: string }): OptimizationExperiment {
   if (!input.authorizedBy.trim()) throw new Error("Authorization requires a named person.");
   const prepared = prepareRun(records, experimentId);
@@ -487,6 +591,7 @@ export function authorizeRun(records: Records, experimentId: string, input: { fi
   }
   const ineligible = prepared.manifest.eligibility.filter((item) => !item.eligible);
   if (ineligible.length > 0) throw new Error(`Cannot authorize: ${ineligible.map((item) => `${item.variant}: ${item.reasons.join("; ")}`).join(" | ")}`);
+  if (prepared.manifest.liveBlockers.length > 0) throw new Error(`Cannot authorize a live run: ${prepared.manifest.liveBlockers.join(" ")}`);
   const authorization = { fingerprint: input.fingerprint, authorizedBy: input.authorizedBy, at: nowIso() };
   records.store.run("UPDATE optimization_experiments SET run_authorization = ? WHERE id = ?", toJson(authorization), experimentId);
   const current = getExperiment(records, experimentId) as OptimizationExperiment;
@@ -494,11 +599,152 @@ export function authorizeRun(records: Records, experimentId: string, input: { fi
   return current;
 }
 
+export interface TrialBinding {
+  experimentId: string;
+  variant: ExperimentVariant;
+  caseKey: string;
+  repeatIndex: number;
+  taskId: string;
+  manifestFingerprint: string;
+  startingRevision: string;
+  appliedConfig: Record<string, unknown>;
+  createdAt: string;
+}
+
+function binding(row: Row): TrialBinding {
+  return {
+    experimentId: row.experiment_id as string, variant: row.variant as ExperimentVariant, caseKey: row.case_key as string,
+    repeatIndex: Number(row.repeat_index), taskId: row.task_id as string, manifestFingerprint: row.manifest_fingerprint as string,
+    startingRevision: row.starting_revision as string, appliedConfig: fromJson(row.applied_config, {}), createdAt: row.created_at as string,
+  };
+}
+
+export function trialBindingForTask(records: Records, taskId: string): TrialBinding | null {
+  const row = records.store.get("SELECT * FROM optimization_trial_bindings WHERE task_id = ?", taskId);
+  return row ? binding(row) : null;
+}
+
+export function listTrialBindings(records: Records, experimentId: string): TrialBinding[] {
+  return records.store.all("SELECT * FROM optimization_trial_bindings WHERE experiment_id = ? ORDER BY created_at, rowid", experimentId).map(binding);
+}
+
+/** The authorized manifest, re-derived: live trials stop the moment anything it fingerprints has changed. */
+function authorizedManifest(records: Records, current: OptimizationExperiment): RunManifest {
+  if (!current.runAuthorization) throw new Error("Live trials require an authorized run manifest.");
+  const manifest = buildManifest(records, current);
+  if (fingerprintOf(manifest) !== current.runAuthorization.fingerprint) {
+    throw new Error("The run manifest changed after authorization (cases, revisions, checks, review policy, or variants); prepare and authorize it again.");
+  }
+  return manifest;
+}
+
+export interface ExperimentBudgetState {
+  authorizedAt: string | null;
+  elapsedMs: number | null;
+  maxElapsedMs: number;
+  elapsedExceeded: boolean;
+  /** Live trials recorded after the elapsed budget ran out. */
+  lateTrials: number;
+  reportedInputTokens: number;
+  usageWarningInputTokens: number | null;
+  usageWarning: boolean;
+  maxAttemptsPerTrial: number | null;
+  attemptsByTask: Record<string, number>;
+  attemptCapExceeded: boolean;
+  reasons: string[];
+}
+
+/** What a live run has consumed against its declared budget. */
+export function experimentBudgetState(records: Records, experimentId: string, now = new Date()): ExperimentBudgetState {
+  const current = getExperiment(records, experimentId);
+  if (!current?.protocol) throw new Error(`Experiment ${experimentId} has no protocol budget`);
+  const budget = current.protocol.budget;
+  const authorizedAt = current.runAuthorization?.at ?? null;
+  const elapsedMs = authorizedAt ? now.getTime() - Date.parse(authorizedAt) : null;
+  const deadline = authorizedAt ? Date.parse(authorizedAt) + budget.maxElapsedMs : null;
+  const live = listMeasurements(records, experimentId).filter((item) => item.source === "live_trial");
+  const lateTrials = deadline === null ? 0 : live.filter((item) => Date.parse(item.createdAt) > deadline).length;
+  const reportedInputTokens = live.reduce((total, item) => total + (item.reportedInputTokens ?? 0), 0);
+  const attemptsByTask = Object.fromEntries(listTrialBindings(records, experimentId).map((item) => [item.taskId, records.listAttempts(item.taskId).length]));
+  const maxAttemptsPerTrial = budget.maxAttemptsPerTrial ?? null;
+  const state: ExperimentBudgetState = {
+    authorizedAt, elapsedMs, maxElapsedMs: budget.maxElapsedMs,
+    elapsedExceeded: elapsedMs !== null && elapsedMs >= budget.maxElapsedMs,
+    lateTrials, reportedInputTokens, usageWarningInputTokens: budget.usageWarningInputTokens,
+    usageWarning: budget.usageWarningInputTokens !== null && reportedInputTokens > budget.usageWarningInputTokens,
+    maxAttemptsPerTrial, attemptsByTask,
+    attemptCapExceeded: maxAttemptsPerTrial !== null && Object.values(attemptsByTask).some((count) => count > maxAttemptsPerTrial),
+    reasons: [],
+  };
+  if (lateTrials > 0) state.reasons.push(`${lateTrials} live trial(s) finished after the ${budget.maxElapsedMs} ms elapsed budget.`);
+  if (state.usageWarning) state.reasons.push(`Reported input tokens ${reportedInputTokens} exceeded the ${budget.usageWarningInputTokens} warning threshold.`);
+  if (state.attemptCapExceeded) state.reasons.push(`A trial used more than ${maxAttemptsPerTrial} provider attempt(s).`);
+  return state;
+}
+
 /**
- * Record a live trial from a task that ran through normal governance and
- * admission. Only an authorized run accepts live trials. Every outcome is
- * recorded: a failed or interrupted task becomes a failed or interrupted,
- * unaccepted trial, never a dropped one.
+ * Start one live trial: create the case's task in the experiment's project,
+ * pinned to the case's starting revision and bound to exactly this manifest
+ * slot. The controller then runs it through normal governance, admission,
+ * checks, and review, applying the variant's route and attempt budget.
+ */
+export function startTrial(records: Records, input: {
+  experimentId: string;
+  variant: ExperimentVariant;
+  caseKey: string;
+  repeatIndex: number;
+}, now = new Date()): { task: Task; binding: TrialBinding } {
+  const current = getExperiment(records, input.experimentId);
+  if (!current) throw new Error(`Unknown experiment ${input.experimentId}`);
+  if (current.status === "completed") throw new Error("Completed experiments are immutable");
+  const manifest = authorizedManifest(records, current);
+  const slot = manifest.trials.find((item) => item.variant === input.variant && item.caseKey === input.caseKey && item.repeatIndex === input.repeatIndex);
+  if (!slot) throw new Error(`${input.variant} ${input.caseKey}#${input.repeatIndex} is not a slot in the authorized manifest.`);
+  const bound = listTrialBindings(records, current.id);
+  const key = (item: { variant: string; caseKey: string; repeatIndex: number }) => `${item.variant}:${item.caseKey}#${item.repeatIndex}`;
+  const boundKeys = new Set(bound.map(key));
+  if (boundKeys.has(key(input))) throw new Error(`Slot ${key(input)} already has a trial task.`);
+  // Counterbalancing only holds if trials start in manifest order.
+  const next = manifest.trials.find((item) => !boundKeys.has(key(item)));
+  if (next && next.order !== slot.order) throw new Error(`Trials start in manifest order; the next slot is ${key(next)}.`);
+  const budget = experimentBudgetState(records, current.id, now);
+  if (budget.elapsedExceeded) throw new Error(`The ${budget.maxElapsedMs} ms elapsed budget is spent; no further trials start.`);
+  if (bound.length >= manifest.budget.maxTrials) throw new Error(`budget.maxTrials ${manifest.budget.maxTrials} is spent.`);
+  const trialCase = manifest.trialCases?.[input.caseKey] as TrialCase;
+  const appliedConfig = manifest.variants[input.variant];
+  return records.store.tx(() => {
+    const task = records.createTask({
+      projectId: current.projectId as string,
+      title: `${trialCase.title} [trial ${current.id} ${input.variant} ${input.caseKey}#${input.repeatIndex}]`,
+      objective: trialCase.objective,
+      acceptanceCriteria: trialCase.acceptanceCriteria ?? [],
+      taskClass: trialCase.taskClass,
+    });
+    // Both variants of a case start from the same fixed revision.
+    records.updateTaskFields(task.id, { base_revision: trialCase.startingRevision });
+    const createdAt = nowIso();
+    records.store.run(
+      `INSERT INTO optimization_trial_bindings(experiment_id, variant, case_key, repeat_index, task_id,
+         manifest_fingerprint, starting_revision, applied_config, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+      current.id, input.variant, input.caseKey, input.repeatIndex, task.id,
+      current.runAuthorization?.fingerprint, trialCase.startingRevision, toJson(appliedConfig), createdAt,
+    );
+    records.recordEvent({
+      kind: "optimization.trial_started", projectId: current.projectId, taskId: task.id,
+      data: { experimentId: current.id, variant: input.variant, caseKey: input.caseKey, repeatIndex: input.repeatIndex, appliedConfig },
+    });
+    return { task: records.getTask(task.id) as Task, binding: trialBindingForTask(records, task.id) as TrialBinding };
+  });
+}
+
+const RESTING_STATES = new Set(["DONE", "FAILED", "CANCELLED", "BLOCKED"]);
+
+/**
+ * Record the live trial of a task that `startTrial` created for exactly this
+ * slot. The task must belong to the experiment's project, start from the
+ * case's revision, and have run through the controller on the variant's
+ * route. Every outcome is recorded: a failed or interrupted task becomes a
+ * failed or interrupted, unaccepted trial, never a dropped one.
  */
 export function recordTrialFromTask(records: Records, input: {
   experimentId: string;
@@ -506,15 +752,40 @@ export function recordTrialFromTask(records: Records, input: {
   caseKey: string;
   repeatIndex: number;
   taskId: string;
-}): OptimizationMeasurement {
+}, now = new Date()): OptimizationMeasurement {
   const current = getExperiment(records, input.experimentId);
   if (!current) throw new Error(`Unknown experiment ${input.experimentId}`);
   if (!current.runAuthorization) throw new Error("Live trials require an authorized run manifest.");
   const task = records.getTask(input.taskId);
   if (!task) throw new Error(`Unknown task ${input.taskId}`);
+  const bound = trialBindingForTask(records, task.id);
+  const slot = `${input.variant} ${input.caseKey}#${input.repeatIndex}`;
+  if (!bound || bound.experimentId !== current.id) throw new Error(`Task ${task.id} was not started as a trial of ${current.id}; only startTrial tasks are live evidence.`);
+  if (bound.variant !== input.variant || bound.caseKey !== input.caseKey || bound.repeatIndex !== input.repeatIndex) {
+    throw new Error(`Task ${task.id} is bound to ${bound.variant} ${bound.caseKey}#${bound.repeatIndex}, not ${slot}.`);
+  }
+  if (bound.manifestFingerprint !== current.runAuthorization.fingerprint) throw new Error("The trial was started under a different authorization.");
+  if (task.projectId !== current.projectId) throw new Error(`Task ${task.id} belongs to ${task.projectId}, not the experiment's project ${current.projectId}.`);
+  if (task.baseRevision !== bound.startingRevision) throw new Error(`Task ${task.id} started from ${task.baseRevision}, not the case revision ${bound.startingRevision}.`);
+  if (!RESTING_STATES.has(task.state)) throw new Error(`Task ${task.id} is ${task.state}; a trial is recorded once it comes to rest.`);
+  const stages = records.stageRunsForTask(task.id);
+  if (stages.length === 0) throw new Error(`Task ${task.id} has no controller stage; it did not run through normal execution.`);
+  const attempts = records.listAttempts(task.id);
+  for (const attempt of attempts) {
+    if (!attempt.stageRunId || !records.admissionForStage(attempt.stageRunId)) {
+      throw new Error(`Attempt ${attempt.id} has no admitted stage; the trial bypassed controller admission.`);
+    }
+    if (attempt.kind === "review") continue;
+    const applied = bound.appliedConfig as { adapter?: string; model?: string | null; effort?: string | null };
+    const mismatch = [
+      applied.adapter !== undefined && attempt.adapter !== applied.adapter ? `adapter ${attempt.adapter}` : null,
+      applied.model !== undefined && attempt.requestedModel !== applied.model ? `model ${attempt.requestedModel}` : null,
+      applied.effort !== undefined && attempt.requestedEffort !== applied.effort ? `effort ${attempt.requestedEffort}` : null,
+    ].filter((item): item is string => item !== null);
+    if (mismatch.length > 0) throw new Error(`Attempt ${attempt.id} ran ${mismatch.join(", ")}, not the ${input.variant} configuration.`);
+  }
   const trialState: OptimizationMeasurement["trialState"] =
     task.state === "DONE" ? "completed" : task.state === "FAILED" || task.state === "CANCELLED" ? "failed" : "interrupted";
-  const attempts = records.listAttempts(task.id);
   const durations = attempts.map((attempt) => attempt.endedAt ? Date.parse(attempt.endedAt) - Date.parse(attempt.startedAt) : null);
   const usage = attempts.map((attempt) => normalizeAttemptUsage({ attemptId: attempt.id, adapter: attempt.adapter, raw: attempt.usage }));
   const complete = usage.every((item) => item.coverage === "complete");
@@ -522,7 +793,18 @@ export function recordTrialFromTask(records: Records, input: {
     const values = usage.map(pick);
     return complete && values.every((value) => value !== null) ? values.reduce<number>((total, value) => total + (value as number), 0) : null;
   };
-  return recordMeasurement(records, {
+  const reportedInputTokens = sumKnown((item) => item.knownInputEvents);
+  const before = experimentBudgetState(records, current.id, now);
+  const warnings: string[] = [];
+  if (before.elapsedExceeded) warnings.push(`recorded after the ${before.maxElapsedMs} ms elapsed budget`);
+  const budget = current.protocol?.budget;
+  if (budget?.usageWarningInputTokens != null && before.reportedInputTokens + (reportedInputTokens ?? 0) > budget.usageWarningInputTokens) {
+    warnings.push(`input tokens passed the ${budget.usageWarningInputTokens} warning threshold`);
+  }
+  if (budget?.maxAttemptsPerTrial != null && attempts.length > budget.maxAttemptsPerTrial) {
+    warnings.push(`${attempts.length} attempts exceeded the ${budget.maxAttemptsPerTrial}-attempt trial budget`);
+  }
+  const recorded = insertMeasurement(records, {
     experimentId: input.experimentId,
     variant: input.variant,
     caseKey: input.caseKey,
@@ -532,16 +814,23 @@ export function recordTrialFromTask(records: Records, input: {
     repairs: task.repairsUsed,
     interventions: records.listEventsOfKind(task.id, "task.retry_requested").length,
     durationMs: durations.every((value) => value !== null) ? durations.reduce<number>((total, value) => total + (value as number), 0) : null,
-    reportedInputTokens: sumKnown((item) => item.knownInputEvents),
+    reportedInputTokens,
     reportedOutputTokens: sumKnown((item) => item.outputTokens),
     relevantFiles: records.packetsForTask(task.id).reduce((total, packet) => total + (Array.isArray(packet.files) ? (packet.files as unknown[]).length : 0), 0),
-    warnings: 0,
+    warnings: warnings.length,
     evidencePath: null,
     trialState,
     source: "live_trial",
     usageCoverage: complete ? "complete" : "partial",
     taskId: task.id,
   });
+  if (warnings.length > 0) {
+    records.recordEvent({
+      kind: "optimization.budget_warning", projectId: current.projectId, taskId: task.id,
+      data: { experimentId: current.id, measurementId: recorded.id, warnings },
+    });
+  }
+  return recorded;
 }
 
 export function completeExperiment(records: Records, experimentId: string): { experiment: OptimizationExperiment; comparison: ExperimentComparison } {

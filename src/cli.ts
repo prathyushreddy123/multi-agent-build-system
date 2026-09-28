@@ -2,11 +2,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { stateDir } from "./core/paths.ts";
+import { artifactDir, dbPath, stateDir } from "./core/paths.ts";
+import { launchClaude, launchCodex, sameModel } from "./verify/launch.ts";
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
 import { ADMISSION_PENDING_PREFIX, Controller, ControllerLeaseHeldError, REVIEW_PENDING_PREFIX } from "./controller/controller.ts";
 import { defaultAdapters } from "./adapters/harness.ts";
-import { DEFAULT_CAPABILITY_REGISTRY } from "./routing/capabilities.ts";
+import { findCapability, loadCapabilityRegistry, recordEntitlementVerification } from "./routing/capabilities.ts";
 import { selectRoute } from "./routing/router.ts";
 import { SCHEDULING_POLICY_VERSION, canonicalRepoKey, collectActiveWork, evaluateAdmission } from "./scheduling/admission.ts";
 import {
@@ -62,6 +63,7 @@ import {
   type ReviewMode,
   type ReviewPreset,
 } from "./review/policy.ts";
+import { migrateDatabase } from "./maintenance/migrate.ts";
 import { createBackup, pruneArtifacts, pruneWorktrees, RETENTION_POLICY } from "./maintenance/retention.ts";
 import { getOperationsConfig, operationsStatus, prepareOperation, prepareOperationsConfig, requestExternalCostApproval, setOperationsConfig } from "./operations/service.ts";
 import type { Capability, OperationsConfig } from "./operations/types.ts";
@@ -70,11 +72,13 @@ import {
   authorizeRun,
   completeExperiment,
   createExperiment,
+  experimentBudgetState,
   experimentDetail,
   listExperiments,
   prepareRun,
   recordMeasurement,
   recordTrialFromTask,
+  startTrial,
   type ExperimentProtocol,
   type ExperimentVariant,
 } from "./optimization/experiments.ts";
@@ -91,7 +95,8 @@ import { parseOpenTarget } from "./operator/links.ts";
 import { readPreferences } from "./operator/preferences.ts";
 import { readViewerState, serveViewer, type SurfaceKey } from "./operator/viewer.ts";
 import { serveToolView, type ToolViewSurface } from "./operator/workspace/tool-view.ts";
-import { openRecords } from "./store/records.ts";
+import { openRecords, Records } from "./store/records.ts";
+import { Store } from "./store/db.ts";
 import { runBaseline } from "./verify/baseline.ts";
 import { runPhase0 } from "./verify/phase0.ts";
 import { createWorkbench } from "./workbench/server.ts";
@@ -376,6 +381,23 @@ async function main(): Promise<void> {
     const args = parseArgs(rest);
     const surface = (textOption(args, "surface", "code") ?? "code") as SurfaceKey;
     console.log(JSON.stringify({ surface, viewer: readViewerState(surface) }, null, 2));
+    return;
+  }
+
+  // Both run before openRecords, which would refuse an older schema. A backup
+  // reads the source without migrating it: a pre-upgrade backup must be the
+  // pre-upgrade database.
+  if (area === "maintenance" && action === "backup") {
+    const source = Store.openReadOnly(dbPath());
+    try {
+      console.log(await createBackup(new Records(source)));
+    } finally {
+      source.close();
+    }
+    return;
+  }
+  if (area === "maintenance" && action === "migrate") {
+    console.log(JSON.stringify(await migrateDatabase(), null, 2));
     return;
   }
 
@@ -1287,7 +1309,30 @@ async function main(): Promise<void> {
       return;
     }
     if (area === "routing" && action === "capabilities") {
-      console.log(JSON.stringify(DEFAULT_CAPABILITY_REGISTRY, null, 2));
+      console.log(JSON.stringify(loadCapabilityRegistry(), null, 2));
+      return;
+    }
+    if (area === "routing" && action === "verify-entitlement") {
+      // One minimal provider call on an exact registered route. Only a clean
+      // answer from that exact model records entitlement; nothing else does.
+      const [provider, model] = rest;
+      if ((provider !== "claude" && provider !== "codex") || !model) {
+        throw new Error("Usage: mabs routing verify-entitlement <claude|codex> <model>");
+      }
+      const capability = findCapability(loadCapabilityRegistry(), provider, model);
+      if (!capability) throw new Error(`${provider}:${model} is not a registered route; the registry is a reviewed code change`);
+      const effort = capability.efforts[0] as string;
+      const dir = artifactDir("entitlement", `${provider}-${model}-${Date.now()}`);
+      const evidencePath = join(dir, "probe.log");
+      const launch = provider === "claude" ? launchClaude : launchCodex;
+      const result = await launch({ cwd: dir, prompt: "Reply with exactly: ok", model, effort, timeoutMs: 180_000, evidencePath });
+      const answered = result.exitCode === 0 && !result.timedOut && result.finalMessage.trim().length > 0;
+      const wrongModel = result.reportedModel !== null && !sameModel(result.reportedModel, model);
+      if (!answered || wrongModel) {
+        throw new Error(`Entitlement not verified for ${provider}:${model} (exit=${result.exitCode}, reported=${result.reportedModel ?? "unreported"}); evidence: ${evidencePath}`);
+      }
+      recordEntitlementVerification({ provider, model, effort, verifiedAt: new Date().toISOString(), evidencePath });
+      console.log(`${provider}:${model} entitlement verified; evidence: ${evidencePath}`);
       return;
     }
     if (area === "routing" && action === "explain") {
@@ -1303,7 +1348,8 @@ async function main(): Promise<void> {
         reason: provider.reason,
       }));
       // Pure selection: no claim, reservation, provider row, or process.
-      const dryRun = selectRoute({ task, adapters: defaultAdapters(), providers, capabilityRegistry: DEFAULT_CAPABILITY_REGISTRY });
+      const capabilityRegistry = loadCapabilityRegistry();
+      const dryRun = selectRoute({ task, adapters: defaultAdapters(capabilityRegistry), providers, capabilityRegistry });
       console.log(JSON.stringify({ task: task.id, recorded: records.routingForTask(task.id), dryRun }, null, 2));
       return;
     }
@@ -1340,10 +1386,6 @@ async function main(): Promise<void> {
     }
     if (area === "maintenance" && action === "policy") {
       console.log(JSON.stringify(RETENTION_POLICY, null, 2));
-      return;
-    }
-    if (area === "maintenance" && action === "backup") {
-      console.log(await createBackup(records));
       return;
     }
     if (area === "maintenance" && action === "prune") {
@@ -1449,6 +1491,22 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(authorizeRun(records, id, { fingerprint, authorizedBy: by }), null, 2));
       return;
     }
+    if (area === "optimization" && action === "start-trial") {
+      const args = parseArgs(rest);
+      const [id, variant, caseKey] = args.positionals;
+      if (!id || !caseKey || (variant !== "baseline" && variant !== "candidate")) {
+        throw new Error("Usage: mabs optimization start-trial <experiment> <baseline|candidate> <case> [--repeat=0]");
+      }
+      const started = startTrial(records, { experimentId: id, variant, caseKey, repeatIndex: numberOption(args, "repeat", 0) });
+      console.log(JSON.stringify(started, null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "budget") {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: mabs optimization budget <experiment>");
+      console.log(JSON.stringify(experimentBudgetState(records, id), null, 2));
+      return;
+    }
     if (area === "optimization" && action === "record-trial") {
       const args = parseArgs(rest);
       const [id, variant, caseKey, taskId] = args.positionals;
@@ -1499,6 +1557,7 @@ async function main(): Promise<void> {
       if (existing.state === "wedged" || existing.state === "crashed") console.warn(existing.reason);
 
       const controller = new Controller(records, {
+        capabilityRegistry: loadCapabilityRegistry(),
         defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
         defaultEffort: textOption(args, "effort") ?? null,
@@ -1564,7 +1623,7 @@ async function main(): Promise<void> {
       if (!id || !Number.isSafeInteger(version) || version < 1) {
         throw new Error("Usage: mabs task cancel <id> --version=<recordVersion from task show>");
       }
-      const controller = new Controller(records);
+      const controller = new Controller(records, { capabilityRegistry: loadCapabilityRegistry() });
       await controller.cancelTask(id, version);
       console.log(`${id}: cancelled`);
       return;

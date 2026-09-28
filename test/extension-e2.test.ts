@@ -25,6 +25,7 @@ import {
 } from "../src/review/policy.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -316,7 +317,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
     mkdirSync(join(cwd, "src", "auth"), { recursive: true });
     writeFileSync(join(cwd, "src", "auth", "session.ts"), "export const sessionToken = read();\n");
   });
-  const riskyController = new Controller(records, {
+  const riskyController = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", riskyAdapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   for (let i = 0; i < 3; i += 1) await riskyController.tick();
@@ -337,7 +338,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
     mkdirSync(join(cwd, "docs"), { recursive: true });
     writeFileSync(join(cwd, "docs", "usage.md"), "# Usage\n\nCall invoiceTotal with the item list.\n");
   });
-  const calmController = new Controller(records, {
+  const calmController = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", calmAdapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   for (let i = 0; i < 3; i += 1) await calmController.tick();
@@ -363,7 +364,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
     mkdirSync(join(cwd, "docs"), { recursive: true });
     writeFileSync(join(cwd, "docs", "usage.md"), "# Usage\n\nCall invoiceTotal with the item list.\n");
   });
-  const legacyController = new Controller(records, {
+  const legacyController = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", legacyAdapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   for (let i = 0; i < 3; i += 1) await legacyController.tick();
@@ -387,7 +388,7 @@ test("required review that cannot be routed is recorded as pending and resumed, 
     writeFileSync(join(cwd, "src", "billing", "invoice.ts"), "export function invoiceTotal(items){ return items.length; }\n");
   });
 
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await controller.tick();
@@ -409,7 +410,7 @@ test("required review that cannot be routed is recorded as pending and resumed, 
 
   // Capacity returns; the controller resumes the outstanding review only.
   records.resetProvider("codex", "test: session limit cleared");
-  const resumed = new Controller(records, {
+  const resumed = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   await resumed.tick();
@@ -482,7 +483,7 @@ test("a re-review after a repair receives the prior findings and the repair delt
   records.addRequirement(project.id, "REQ-1", "invoice totals exclude refunded items");
   const task = records.createTask({ projectId: project.id, title: "t", objective: "Fix invoice totals." });
   const adapter = new RepairThenPassAdapter();
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1,
   });
   for (let i = 0; i < 6; i += 1) await controller.tick();

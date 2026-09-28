@@ -13,6 +13,7 @@ import { Controller } from "../src/controller/controller.ts";
 import { validateWorkerOutput } from "../src/domain/contract.ts";
 import { Store } from "../src/store/db.ts";
 import { Records, type Project, type Task } from "../src/store/records.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@l", ...args], { cwd, encoding: "utf8" }).trim();
@@ -91,7 +92,7 @@ test("CTX-01: each open obligation appears once and a large omission inventory m
 test("CTX-02: recorded prompt bytes and fingerprint match the exact string sent, including Unicode", async (t) => {
   const { records, task } = setup(t);
   const adapter = new CapturingAdapter("codex");
-  const controller = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick();
   await controller.stop();
   const sent = adapter.starts[0]?.prompt;
@@ -114,7 +115,7 @@ test("CTX-03: under the complete-prompt policy, mandatory overflow blocks prepar
   assert.ok(records.listEvents(task.id).some((event) => event.kind === "context.mandatory_overflow"));
 
   const adapter = new CapturingAdapter("codex");
-  const controller = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick();
   await controller.stop();
   assert.equal(adapter.starts.length, 0, "no worker receives a truncated task");
@@ -257,7 +258,7 @@ class EditingAdapter extends CapturingAdapter {
 test("CTX-04: a repair launched by a failing gate receives the current change as a delta artifact", async (t) => {
   const { records, task } = setup(t, undefined, [{ name: "unit", command: [process.execPath, "-e", "console.error(\"AssertionError [ERR_ASSERTION]: expected 2 to equal 3\"); process.exit(1)"], required: true }]);
   const adapter = new EditingAdapter("codex");
-  const controller = new Controller(records, { adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map<string, WorkerAdapter>([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   const deadline = Date.now() + 15_000;
   while (adapter.starts.length < 2 && Date.now() < deadline) {
     await controller.tick();

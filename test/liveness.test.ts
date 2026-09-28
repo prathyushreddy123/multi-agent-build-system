@@ -11,6 +11,7 @@ import { launchGateJob } from "../src/gates/runner.ts";
 import { controllerLiveness, processAlive } from "../src/operator/liveness.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function records(): Records {
   return new Records(new Store(":memory:"));
@@ -82,7 +83,7 @@ test("a fresh lease held by a live peer blocks a second controller's tick", asyn
   t.after(() => db.store.close());
 
   db.acquireControllerLease("peer", process.pid, 15_000);
-  const controller = new Controller(db, { controllerId: "second" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "second" });
 
   await assert.rejects(() => controller.tick(), ControllerLeaseHeldError);
   assert.equal(controller.stepDownReason instanceof ControllerLeaseHeldError, true);
@@ -94,7 +95,7 @@ test("standing down never overwrites the live holder's lease or health row", asy
   t.after(() => db.store.close());
 
   db.acquireControllerLease("peer", process.pid, 15_000);
-  const controller = new Controller(db, { controllerId: "second" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "second" });
   await assert.rejects(() => controller.tick(), ControllerLeaseHeldError);
 
   // Before: the loser must not have reported "degraded" on the holder's behalf.
@@ -112,7 +113,7 @@ test("the loop stops itself and reports once when the lease belongs to a peer", 
   t.after(() => db.store.close());
 
   db.acquireControllerLease("peer", process.pid, 15_000);
-  const controller = new Controller(db, { controllerId: "second", pollIntervalMs: 5 });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "second", pollIntervalMs: 5 });
 
   const reasons: ControllerLeaseHeldError[] = [];
   controller.start({ onStepDown: (error) => reasons.push(error) });
@@ -129,7 +130,7 @@ test("a controller that owns its lease still records health and releases cleanly
   const db = records();
   t.after(() => db.store.close());
 
-  const controller = new Controller(db, { controllerId: "only" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "only" });
   await controller.tick();
   assert.equal(db.latestHealth()?.state, "running");
   assert.equal(controller.stepDownReason, null);
@@ -180,7 +181,7 @@ test("a long detached check leaves controller liveness responsive and its comple
   await launchGateJob({ taskId: task.id, stageRunId: stage.id, worktreePath: process.cwd(), spec });
   db.recordLaunchStarted(stage.id, stage.fencingToken);
 
-  const controller = new Controller(db, { controllerId: "long-check-controller", workerLimit: 1 });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "long-check-controller", workerLimit: 1 });
   const started = Date.now();
   await controller.tick();
   const elapsed = Date.now() - started;
@@ -232,7 +233,7 @@ test("an operational gate error preserves obligations and both retry budgets", a
   db.recordLaunchStarted(stage.id, stage.fencingToken);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
 
-  const controller = new Controller(db, { controllerId: "operational-controller", workerLimit: 1 });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "operational-controller", workerLimit: 1 });
   await controller.tick();
   const after = db.getTask(task.id)!;
   const continuation = db.getContinuation(task.id);
@@ -262,7 +263,7 @@ test("dependency recovery clears only its typed obligation", async (t) => {
     taskId: dependent.id, kind: "decision_needed", severity: "blocking", blocking: true,
     sourceKey: "decision:fixture", summary: "An operator decision is still required.",
   });
-  const controller = new Controller(db, {
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY,
     controllerId: "dependency-controller",
     workerLimit: 1,
     minFreeMemoryMb: Number.MAX_SAFE_INTEGER,
@@ -336,7 +337,7 @@ test("an unexplained required-check verdict fails without consuming repair budge
     inputFingerprint: gateFingerprint("opaque-revision", 0, spec), rawExitStatus: 7,
     failureDiagnosis: diagnoseFailure({ stage: "check", source: "gate", exitCode: 7, toolResolved: true, text: "" }),
   });
-  const controller = new Controller(db, { controllerId: "opaque-gate-controller" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "opaque-gate-controller" });
   await (controller as unknown as {
     completeChecks(task: NonNullable<ReturnType<Records["getTask"]>>, project: NonNullable<ReturnType<Records["getProject"]>>): Promise<void>;
   }).completeChecks(db.getTask(task.id)!, db.getProject(project.id)!);
@@ -374,7 +375,7 @@ test("passing one check clears only obligations validated by that same check", a
     taskId: task.id, kind: "code_defect", severity: "blocking", blocking: true,
     sourceKey: "attempt:fixture:code-failure", summary: "worker reported a defect",
   });
-  const controller = new Controller(db, { controllerId: "typed-gate-controller" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, controllerId: "typed-gate-controller" });
   const resolve = (controller as unknown as {
     resolveValidatedGateObligations(taskId: string, revision: string, gates: ReturnType<Records["gatesForRevision"]>): void;
   }).resolveValidatedGateObligations.bind(controller);

@@ -1,24 +1,29 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { HarnessAdapter } from "../src/adapters/harness.ts";
+import { HarnessAdapter, START_MARKER_FILE } from "../src/adapters/harness.ts";
 import type { AdapterHandle, AdapterLaunch, CollectedResult, WorkerAdapter } from "../src/adapters/types.ts";
 import { Controller } from "../src/controller/controller.ts";
 import { validateProjectConfig, projectConfigSnapshot } from "../src/domain/config.ts";
 import {
+  CODEX_MODEL,
   DEFAULT_CAPABILITY_REGISTRY,
   evaluateCapability,
+  loadCapabilityRegistry,
+  recordEntitlementVerification,
   type CapabilityRegistry,
 } from "../src/routing/capabilities.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute, type ProviderAvailability } from "../src/routing/router.ts";
 import { Store } from "../src/store/db.ts";
 import { Records, type Task } from "../src/store/records.ts";
-import { claudeArgs, codexArgs, launchClaude, launchCodex } from "../src/verify/launch.ts";
+import { claudeArgs, codexArgs, launchClaude, launchCodex, type LaunchResult } from "../src/verify/launch.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function tempRoot(t: TestContext, prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -32,7 +37,7 @@ function tempRoot(t: TestContext, prefix: string): string {
  * exact argv and prints a minimal valid provider envelope; no real harness is
  * reachable from inside the test.
  */
-function fakeHarnesses(t: TestContext) {
+function fakeHarnesses(t: TestContext, options: { delayMs?: number } = {}) {
   const root = tempRoot(t, "mabs-fake-harness-");
   const bin = join(root, "bin");
   const home = join(root, "home");
@@ -47,7 +52,7 @@ function fakeHarnesses(t: TestContext) {
   const script = (envelope: string) => `#!${process.execPath}
 const { appendFileSync } = require("node:fs");
 appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ bin: require("node:path").basename(process.argv[1]), argv: process.argv.slice(2) }) + "\\n");
-process.stdout.write(${JSON.stringify(envelope)});
+setTimeout(() => process.stdout.write(${JSON.stringify(envelope)}), ${options.delayMs ?? 0});
 `;
   writeFileSync(join(bin, "claude"), script(JSON.stringify({
     result: "done",
@@ -86,7 +91,7 @@ test("RTE-01: an explicit per-attempt effort reaches the exact provider argv wit
   const before = fake.globalHashes();
   const cwd = tempRoot(t, "mabs-launch-cwd-");
 
-  const codex = await launchCodex({ cwd, prompt: "task", effort: "medium", timeoutMs: 10_000, evidencePath: join(cwd, "codex.log") });
+  const codex = await launchCodex({ cwd, prompt: "task", model: CODEX_MODEL, effort: "medium", timeoutMs: 10_000, evidencePath: join(cwd, "codex.log") });
   const claude = await launchClaude({
     cwd, prompt: "task", model: "claude-sonnet-5", effort: "low", timeoutMs: 10_000, evidencePath: join(cwd, "claude.log"),
   });
@@ -95,26 +100,81 @@ test("RTE-01: an explicit per-attempt effort reaches the exact provider argv wit
   assert.equal(codexCall?.bin, "codex");
   assert.ok(flagValue(codexCall.argv, "-c").includes('model_reasoning_effort="medium"'));
   assert.ok(flagValue(codexCall.argv, "-c").includes("features.multi_agent=false"));
+  assert.deepEqual(flagValue(codexCall.argv, "-m"), [CODEX_MODEL], "the local config default model is never inherited");
   assert.equal(claudeCall?.bin, "claude");
   assert.deepEqual(flagValue(claudeCall.argv, "--effort"), ["low"]);
   assert.deepEqual(flagValue(claudeCall.argv, "--model"), ["claude-sonnet-5"]);
   const disallowed = claudeCall.argv.slice(claudeCall.argv.indexOf("--disallowedTools") + 1);
   assert.ok(disallowed.includes("Agent"), "Claude's native child-agent tool is disallowed");
 
-  assert.deepEqual(codex.applied, { model: null, effort: "medium", effortSource: "explicit", delegation: "disabled" });
+  assert.deepEqual(codex.applied, { model: CODEX_MODEL, effort: "medium", effortSource: "explicit", delegation: "disabled" });
   assert.deepEqual(claude.applied, { model: "claude-sonnet-5", effort: "low", effortSource: "explicit", delegation: "disabled" });
   assert.deepEqual(fake.globalHashes(), before, "global provider configuration is never edited");
   // Evidence records the command shape but not a second copy of the prompt.
   assert.match(readFileSync(join(cwd, "codex.log"), "utf8"), /<prompt 4 bytes>/);
 });
 
-test("RTE-01: an absent effort leaves the provider default in force and labels it unknown", () => {
-  const args = codexArgs({ cwd: "/w", prompt: "p" }, "/w/last.txt");
-  assert.equal(args.some((arg) => arg.startsWith("model_reasoning_effort")), false);
-  assert.equal(claudeArgs({ prompt: "p" }).includes("--effort"), false);
-  const evidence = evaluateCapability(DEFAULT_CAPABILITY_REGISTRY, { provider: "codex", model: null, effort: null }).evidence;
-  assert.equal(evidence.eligible, true);
-  assert.equal(evidence.effortSource, "provider_default_unknown");
+test("RTE-01: an absent model or effort is ineligible and never reaches a provider argv", () => {
+  assert.throws(() => codexArgs({ cwd: "/w", prompt: "p", effort: "high" }, "/w/last.txt"), /exact model/);
+  assert.throws(() => codexArgs({ cwd: "/w", prompt: "p", model: CODEX_MODEL }, "/w/last.txt"), /explicit effort/);
+  assert.throws(() => claudeArgs({ prompt: "p", model: "claude-sonnet-5" }), /explicit effort/);
+  assert.throws(() => claudeArgs({ prompt: "p", effort: "low" }), /exact model/);
+  const evidence = evaluateCapability(VERIFIED_REGISTRY, { provider: "codex", model: null, effort: null }).evidence;
+  assert.equal(evidence.eligible, false);
+  assert.equal(evidence.effortSource, "missing");
+  assert.match(evidence.reasons.join(), /names no model/);
+  assert.match(evidence.reasons.join(), /names no effort/);
+  const claudeDefault = evaluateCapability(VERIFIED_REGISTRY, { provider: "claude", model: "claude-sonnet-5", effort: null }).evidence;
+  assert.equal(claudeDefault.eligible, false, "an inherited global or managed effort is never accepted");
+});
+
+test("RTE-01: every default policy route names an exact model and bounded effort", () => {
+  for (const [taskClass, candidates] of Object.entries(DEFAULT_ROUTING_POLICY.routes)) {
+    for (const candidate of candidates) {
+      assert.ok(candidate.model, `${taskClass}/${candidate.adapter} names a model`);
+      assert.ok(candidate.effort, `${taskClass}/${candidate.adapter} names an effort`);
+      const evidence = evaluateCapability(VERIFIED_REGISTRY, { provider: candidate.adapter, model: candidate.model, effort: candidate.effort }).evidence;
+      assert.equal(evidence.eligible, true, `${taskClass}/${candidate.adapter}: ${evidence.reasons.join("; ")}`);
+      const argv = candidate.adapter === "claude"
+        ? claudeArgs({ prompt: "p", model: candidate.model ?? undefined, effort: candidate.effort ?? undefined })
+        : codexArgs({ cwd: "/w", prompt: "p", model: candidate.model ?? undefined, effort: candidate.effort ?? undefined }, "/w/last.txt");
+      assert.ok(argv.includes(candidate.model as string));
+    }
+  }
+});
+
+test("RTE-02: the pinned Codex model is ineligible until an entitlement probe is recorded", (t) => {
+  const evidence = evaluateCapability(DEFAULT_CAPABILITY_REGISTRY, { provider: "codex", model: CODEX_MODEL, effort: "high" }).evidence;
+  assert.equal(evidence.eligible, false);
+  assert.match(evidence.reasons.join(), /entitlement is unknown/);
+  const overlay = join(tempRoot(t, "mabs-entitlement-"), "capability-entitlements.json");
+  assert.throws(() => recordEntitlementVerification({
+    provider: "codex", model: "unregistered-model", effort: "low", verifiedAt: "2026-01-01T00:00:00Z", evidencePath: "/e",
+  }, overlay), /not a registered route/);
+  recordEntitlementVerification({ provider: "codex", model: CODEX_MODEL, effort: "low", verifiedAt: "2026-01-01T00:00:00Z", evidencePath: "/e" }, overlay);
+  const loaded = loadCapabilityRegistry(overlay);
+  assert.equal(evaluateCapability(loaded, { provider: "codex", model: CODEX_MODEL, effort: "high" }).evidence.eligible, true);
+  assert.equal(loaded.entries.length, DEFAULT_CAPABILITY_REGISTRY.entries.length, "the overlay never adds a model");
+});
+
+test("RTE-02: a fallback model answering in place of the requested one fails the attempt as CONFIG", async (t) => {
+  const cwd = tempRoot(t, "mabs-fallback-");
+  const completionPath = join(cwd, "completion.json");
+  const launch: Partial<LaunchResult> = {
+    exitCode: 0, timedOut: false, durationMs: 1, finalMessage: "", usage: null, apiEquivalentEstimateUsd: null,
+    sessionId: null, raw: "", stderr: "", reportedModel: "claude-haiku-4-5",
+    applied: { model: "claude-opus-5", effort: "high", effortSource: "explicit", delegation: "disabled" },
+    answeringModels: [{ model: "claude-haiku-4-5", outputTokens: 900 }, { model: "claude-opus-5", outputTokens: 3 }],
+  };
+  writeFileSync(completionPath, JSON.stringify({ result: launch, error: null }));
+  const collected = await new HarnessAdapter("claude").collectResult({ attemptId: "a", pid: null, sessionId: null, completionPath }, cwd);
+  assert.equal(collected.failureClass, "CONFIG");
+  assert.match(collected.error ?? "", /answered with claude-haiku-4-5, not the requested claude-opus-5/);
+
+  const dated: Partial<LaunchResult> = { ...launch, answeringModels: [{ model: "claude-opus-5-20260101", outputTokens: 900 }, { model: "claude-haiku-4-5", outputTokens: 2 }] };
+  writeFileSync(completionPath, JSON.stringify({ result: dated, error: null }));
+  const accepted = await new HarnessAdapter("claude").collectResult({ attemptId: "a", pid: null, sessionId: null, completionPath }, cwd);
+  assert.notEqual(accepted.failureClass, "CONFIG", "a helper model beside the requested one is not a fallback");
 });
 
 test("RTE-02: unsupported effort or unknown model entitlement launches no provider process", async (t) => {
@@ -125,7 +185,10 @@ test("RTE-02: unsupported effort or unknown model entitlement launches no provid
     attemptId: "att", cwd, prompt: "p", model, effort, timeoutMs: 1_000,
     evidencePath: join(cwd, "a", "worker.log"), completionPath: join(cwd, "a", "completion.json"),
   });
-  await assert.rejects(adapter.start(launch(null, "max")), /effort max is unsupported/);
+  await assert.rejects(adapter.start(launch(null, "medium")), /names no model/);
+  await assert.rejects(adapter.start(launch(CODEX_MODEL, "max")), /effort max is unsupported/);
+  await assert.rejects(adapter.start(launch(CODEX_MODEL, "medium")), /entitlement is unknown/);
+  await assert.rejects(new HarnessAdapter("claude").start({ ...launch("claude-sonnet-5", null) }), /names no effort/);
   await assert.rejects(adapter.start(launch("gpt-from-a-catalog", "medium")), /entitlement is unknown/);
   await assert.rejects(new HarnessAdapter("claude").start({ ...launch("claude-opus-5", "xhigh") }), /unsupported/);
   assert.equal(existsSync(join(cwd, "a", "launch.json")), false, "no launch specification was written");
@@ -137,7 +200,7 @@ test("a registry entry with unverified entitlement is ineligible even when the p
     version: "test",
     entries: [{ ...DEFAULT_CAPABILITY_REGISTRY.entries[0]!, entitlement: "unknown" }],
   };
-  const evidence = evaluateCapability(registry, { provider: "codex", model: null, effort: "high" }).evidence;
+  const evidence = evaluateCapability(registry, { provider: "codex", model: CODEX_MODEL, effort: "high" }).evidence;
   assert.equal(evidence.eligible, false);
   assert.match(evidence.reasons.join(), /entitlement is unknown/);
 });
@@ -171,38 +234,47 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 const adapters = new Map<string, WorkerAdapter>([["codex", new StubAdapter("codex")], ["claude", new StubAdapter("claude")]]);
+const routes = { adapters, capabilityRegistry: VERIFIED_REGISTRY };
 const available = (overrides: Partial<Record<string, Partial<ProviderAvailability>>> = {}): ProviderAvailability[] =>
   ["codex", "claude"].map((provider) => ({ provider, available: true, active: 0, limit: 1, reason: null, ...overrides[provider] }));
 
 test("fallback and escalation carry distinct, recorded reasons", () => {
-  const primary = selectRoute({ task: task(), adapters, providers: available() });
+  const primary = selectRoute({ task: task(), ...routes, providers: available() });
   assert.equal(primary.decision, "primary");
   assert.equal(primary.fallbackReason, null);
   assert.equal(primary.escalationReason, null);
   assert.equal(primary.quotaDomain, "openai:chatgpt-subscription");
 
   const fallback = selectRoute({
-    task: task(), adapters, providers: available({ codex: { available: false, reason: "cooldown after quota" } }),
+    task: task(), ...routes, providers: available({ codex: { available: false, reason: "cooldown after quota" } }),
   });
   assert.equal(fallback.decision, "provider_fallback");
   assert.equal(fallback.chosen?.adapter, "claude");
   assert.match(fallback.fallbackReason ?? "", /codex \(cooldown after quota\)/);
   assert.equal(fallback.escalationReason, null);
 
-  const escalated = selectRoute({ task: task({ changeRisk: "high" }), adapters, providers: available() });
+  const escalated = selectRoute({ task: task({ changeRisk: "high" }), ...routes, providers: available() });
   assert.equal(escalated.decision, "capability_escalation");
   assert.equal(escalated.fallbackReason, null);
   assert.match(escalated.escalationReason ?? "", /small_implementation escalated to complex_coding/);
   assert.equal(escalated.chosen?.effort, "high");
 });
 
+test("with the shipped registry an unprobed Codex route is skipped and Claude carries the work", () => {
+  const selection = selectRoute({ task: task(), adapters, providers: available() });
+  assert.equal(selection.chosen?.adapter, "claude");
+  assert.equal(selection.chosen?.effort, "medium");
+  assert.equal(selection.decision, "provider_fallback");
+  assert.match(selection.fallbackReason ?? "", /entitlement is unknown/);
+});
+
 test("RTE-03: a busy preferred route waits unless capacity fallback is explicitly allowed", () => {
   const busy = available({ codex: { active: 1, limit: 1 } });
-  const waiting = selectRoute({ task: task(), adapters, providers: busy, capacityFallback: "wait" });
+  const waiting = selectRoute({ task: task(), ...routes, providers: busy, capacityFallback: "wait" });
   assert.equal(waiting.chosen, null);
   assert.equal(waiting.decision, "capacity_wait");
 
-  const allowed = selectRoute({ task: task(), adapters, providers: busy, capacityFallback: "allow" });
+  const allowed = selectRoute({ task: task(), ...routes, providers: busy, capacityFallback: "allow" });
   assert.equal(allowed.chosen?.adapter, "claude");
   assert.equal(allowed.decision, "capacity_fallback");
   assert.match(allowed.fallbackReason ?? "", /Capacity fallback: codex at configured concurrency/);
@@ -211,7 +283,7 @@ test("RTE-03: a busy preferred route waits unless capacity fallback is explicitl
 test("RTE-04: an exhausted quota domain excludes every route inside it", () => {
   const shared: CapabilityRegistry = {
     version: "shared-account",
-    entries: DEFAULT_CAPABILITY_REGISTRY.entries.map((entry) => ({ ...entry, quotaDomain: "one-account" })),
+    entries: VERIFIED_REGISTRY.entries.map((entry) => ({ ...entry, quotaDomain: "one-account" })),
   };
   const selection = selectRoute({
     task: task(), adapters, providers: available(), capabilityRegistry: shared, excludedQuotaDomains: new Set(["one-account"]),
@@ -223,8 +295,8 @@ test("RTE-04: an exhausted quota domain excludes every route inside it", () => {
 
 test("a policy route with an unsupported effort is rejected as ineligible, not launched", () => {
   const policy = structuredClone(DEFAULT_ROUTING_POLICY);
-  policy.routes.small_implementation = [{ adapter: "codex", model: null, effort: "max", reason: "bad route" }];
-  const selection = selectRoute({ task: task(), adapters, providers: available(), policy });
+  policy.routes.small_implementation = [{ adapter: "codex", model: CODEX_MODEL, effort: "max", reason: "bad route" }];
+  const selection = selectRoute({ task: task(), ...routes, providers: available(), policy });
   assert.equal(selection.chosen, null);
   assert.equal(selection.decision, "no_route");
   assert.match(selection.reason, /effort max is unsupported/);
@@ -234,8 +306,10 @@ test("curated routing overrides must be eligible in the capability registry", ()
   const records = new Records(new Store(":memory:"));
   const project = records.createProject({ name: "cfg", repoPath: "/tmp/cfg", projectType: "personal", reviewChoice: "off" });
   const config = projectConfigSnapshot(project);
-  config.routingOverrides = { small_implementation: { adapter: "codex", model: null, effort: "max" } };
-  assert.ok(validateProjectConfig(config).some((error) => /ineligible in mabs\.capabilities\.v2/.test(error)));
+  config.routingOverrides = { small_implementation: { adapter: "codex", model: CODEX_MODEL, effort: "max" } };
+  assert.ok(validateProjectConfig(config).some((error) => /ineligible in mabs\.capabilities\.v3/.test(error)));
+  config.routingOverrides = { small_implementation: { adapter: "claude", model: "claude-sonnet-5", effort: null } };
+  assert.ok(validateProjectConfig(config).some((error) => /names no effort/.test(error)), "an override cannot inherit a default effort");
   records.store.close();
 });
 
@@ -273,7 +347,7 @@ function controllerSetup(t: TestContext) {
 test("controller passes the exact route effort to the adapter and records requested/effective provenance", async (t) => {
   const { records, task: created } = controllerSetup(t);
   const codex = new StubAdapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", defaultEffort: "low", workerLimit: 1,
   });
   await controller.tick();
@@ -286,16 +360,16 @@ test("controller passes the exact route effort to the adapter and records reques
   assert.equal(attempt?.configuredEffort, "low");
   assert.equal(attempt?.reportedEffort, null, "neither harness reports effort; it stays unknown");
   const [route] = records.routingForTask(created.id);
-  assert.equal(route?.capability_registry_version, "mabs.capabilities.v2");
+  assert.equal(route?.capability_registry_version, "mabs.capabilities.v3");
   assert.equal(route?.quota_domain_id, "openai:chatgpt-subscription");
-  assert.deepEqual(route?.effective_selection, { adapter: "codex", model: null, effort: "low", delegation: "disabled" });
+  assert.deepEqual(route?.effective_selection, { adapter: "codex", model: CODEX_MODEL, effort: "low", delegation: "disabled" });
   assert.ok(Array.isArray(route?.eligibility_evidence));
 });
 
 test("an ineligible operator override blocks as CONFIG with zero worker launches", async (t) => {
   const { records, task: created } = controllerSetup(t);
   const codex = new StubAdapter("codex");
-  const controller = new Controller(records, {
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", defaultEffort: "max", workerLimit: 1,
   });
   await controller.tick();
@@ -311,11 +385,98 @@ test("an ineligible operator override blocks as CONFIG with zero worker launches
 test("RTE-05/RTE-06: reported settings and child-agent evidence stay distinct from requests", async (t) => {
   const fake = fakeHarnesses(t);
   const cwd = tempRoot(t, "mabs-observed-");
-  const claude = await launchClaude({ cwd, prompt: "p", model: "claude-opus-5", timeoutMs: 10_000, evidencePath: join(cwd, "c.log") });
+  const claude = await launchClaude({ cwd, prompt: "p", model: "claude-opus-5", effort: "high", timeoutMs: 10_000, evidencePath: join(cwd, "c.log") });
   assert.equal(claude.reportedModel, "claude-sonnet-5", "the provider's report is kept even when it differs from the request");
   assert.deepEqual(claude.delegation, { spawned: 0, source: "claude.subagent_stats" });
-  const codex = await launchCodex({ cwd, prompt: "p", timeoutMs: 10_000, evidencePath: join(cwd, "x.log") });
+  const codex = await launchCodex({ cwd, prompt: "p", model: CODEX_MODEL, effort: "high", timeoutMs: 10_000, evidencePath: join(cwd, "x.log") });
   assert.equal(codex.reportedModel, null);
   assert.deepEqual(codex.delegation, { spawned: null, source: "unobservable" }, "no zero is claimed without evidence");
   assert.equal(fake.invocations().length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// REC-06: the crash window between OS launch and the durable PID write
+
+test("REC-06: a launch with no durable PID is identified by marker or process table, never presumed lost", async (t) => {
+  const dir = tempRoot(t, "mabs-launch-marker-");
+  const completionPath = join(dir, "completion.json");
+  const spec = join(dir, "launch.json");
+  const handle = { attemptId: "att_1", pid: null, sessionId: null, completionPath };
+  const adapter = new HarnessAdapter("codex", VERIFIED_REGISTRY);
+  assert.equal(await adapter.status(handle), "lost", "nothing was ever launched");
+
+  writeFileSync(spec, "{}");
+  assert.equal(await adapter.status(handle), "launching", "inside the grace window the wrapper may not have marked itself yet");
+
+  const wrapper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)", spec], { stdio: "ignore" });
+  t.after(() => wrapper.kill("SIGKILL"));
+  await new Promise((resolvePromise) => wrapper.once("spawn", resolvePromise));
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(spec, old, old);
+  assert.equal(await adapter.status(handle), "running", "a live process naming the specification is found without a PID");
+  assert.equal(adapter.recoverHandle(handle).pid, wrapper.pid);
+
+  wrapper.kill("SIGKILL");
+  await new Promise((resolvePromise) => wrapper.once("exit", resolvePromise));
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_other", pid: process.pid }));
+  assert.equal(await adapter.status(handle), "lost", "a marker for another attempt is ignored; past grace with no process nothing ran");
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid: process.pid }));
+  assert.equal(await adapter.status(handle), "running", "the wrapper's own marker names the live process");
+});
+
+test("REC-06: a worker launched just before a controller crash is adopted on restart and never relaunched", async (t) => {
+  const fake = fakeHarnesses(t, { delayMs: 2_500 });
+  const { records, task: created } = controllerSetup(t);
+  const options = () => ({
+    capabilityRegistry: VERIFIED_REGISTRY, defaultAdapter: "codex" as const, workerLimit: 1,
+    adapters: new Map<string, WorkerAdapter>([["codex", new HarnessAdapter("codex", VERIFIED_REGISTRY)]]),
+  });
+  // The crash: the OS launch succeeded but neither the PID nor the stage's
+  // launch start reached the database before the controller died.
+  const setAttemptProcess = records.setAttemptProcess.bind(records);
+  const recordLaunchStarted = records.recordLaunchStarted.bind(records);
+  records.setAttemptProcess = () => {};
+  records.recordLaunchStarted = ((stageId, token, handle) =>
+    handle?.attemptId ? records.getStageRun(stageId) : recordLaunchStarted(stageId, token, handle)) as Records["recordLaunchStarted"];
+  const first = new Controller(records, options());
+  await first.tick();
+  await first.stop();
+  records.setAttemptProcess = setAttemptProcess;
+  records.recordLaunchStarted = recordLaunchStarted;
+
+  const [launched] = records.listAttempts(created.id);
+  assert.equal(launched?.state, "running");
+  assert.equal(launched?.pid, null, "the crash kept the PID out of the database");
+  const activeLeases = () => records.store.all("SELECT * FROM admission_leases WHERE status = 'active'").length;
+  assert.equal(activeLeases(), 1);
+
+  const restarted = new Controller(records, options());
+  const deadline = Date.now() + 5_000;
+  while (records.getAttempt(launched.id)?.pid === null && Date.now() < deadline) {
+    await restarted.tick();
+    assert.equal(records.getAttempt(launched.id)?.state, "running", "the live worker is never declared lost");
+    assert.equal(activeLeases(), 1, "its admission lease is never released while it runs");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  const adopted = records.getAttempt(launched.id);
+  assert.ok(adopted?.pid, "the restarted controller adopted the running wrapper");
+  assert.equal(records.getStageRun(adopted.stageRunId as string)?.attemptId, adopted.id, "its stage is bound to the adopted attempt");
+  assert.equal(records.listEventsOfKind(created.id, "attempt.process_adopted").length, 1);
+
+  const finished = Date.now() + 10_000;
+  while (records.getAttempt(launched.id)?.state === "running" && Date.now() < finished) {
+    await restarted.tick();
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  await restarted.stop();
+  assert.notEqual(records.getAttempt(launched.id)?.state, "running", "the adopted worker was collected");
+  assert.equal(fake.invocations().length, 1, "exactly one provider process ever ran");
+  assert.equal(records.listAttempts(created.id).filter((attempt) => attempt.kind === "initial").length, 1);
+});
+
+test("REC-06: a retry is refused while an attempt is unresolved", (t) => {
+  const { records, task: created } = controllerSetup(t);
+  records.startAttempt({ taskId: created.id, launchId: "lnc_x", kind: "initial", adapter: "codex", worktreePath: "/w" } as Parameters<Records["startAttempt"]>[0]);
+  records.transition(created.id, "BLOCKED", { blocked_reason: "ambiguous launch", failure_class: "INFRA" });
+  assert.throws(() => records.retryTask(created.id, records.getTask(created.id)?.recordVersion as number), /unresolved attempt/);
 });

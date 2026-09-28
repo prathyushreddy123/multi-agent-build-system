@@ -23,6 +23,7 @@ import { classifyFindings, normalizeReviewPolicy, reviewRequiredFor } from "../s
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
 import { prepareWorkspace } from "../src/workspace/git.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -312,7 +313,7 @@ test("a review that finds only minor issues approves the revision without anothe
     allowedScope: ["src/billing"],
   });
   const adapter = new AdvisoryReviewAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick();
   await controller.tick();
   await controller.tick();

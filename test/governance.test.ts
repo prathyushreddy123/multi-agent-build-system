@@ -9,6 +9,7 @@ import { createBrief, listClarifications, syncGovernanceClarifications } from ".
 import { reviewPreset } from "../src/review/policy.ts";
 import { Store } from "../src/store/db.ts";
 import { Records } from "../src/store/records.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function records(): Records {
   return new Records(new Store(":memory:"));
@@ -172,7 +173,7 @@ test("controller backstop deduplicates needs-input and launches nothing", async 
     project.id,
   );
 
-  const controller = new Controller(db, { adapters: new Map(), workerLimit: 1 });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map(), workerLimit: 1 });
   await controller.tick();
   await controller.tick();
   await controller.stop();

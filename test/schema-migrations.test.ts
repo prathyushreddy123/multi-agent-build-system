@@ -210,6 +210,39 @@ test("a fresh database and a migrated schema-14 database converge on one schema"
   assert.throws(() => createLegacyBaselineDatabase(upgraded), /Refusing to overwrite/);
 });
 
+test("replaying schema 17 over an already-rebuilt measurements table keeps every trial value", (t) => {
+  const root = rootFor(t, "mabs-migration-replay-17-");
+  const path = join(root, "trials.sqlite");
+  const at = "2026-09-25T00:00:00.000Z";
+  const first = new Store(path);
+  const records = new Records(first);
+  const project = records.createProject({ name: "trials", repoPath: "/sanitized/trials", projectType: "personal", reviewChoice: "off" });
+  const task = records.createTask({ projectId: project.id, title: "trial", objective: "trial", taskClass: "small_implementation" });
+  first.run(
+    `INSERT INTO optimization_experiments(id, project_id, name, hypothesis, dimension, suite_version, baseline_config, candidate_config, created_at)
+     VALUES('opt_t', ?, 'e', 'h', 'd', 's', '{}', '{}', ?)`, project.id, at,
+  );
+  first.run(
+    `INSERT INTO optimization_measurements(id, experiment_id, variant, case_key, accepted, repairs, duration_ms, created_at,
+       repeat_index, seed, usage_coverage, trial_state, source, task_id)
+     VALUES('msr_t', 'opt_t', 'candidate', 'case-a', 0, 3, 1234, ?, 2, 'seed-1', 'partial', 'failed', 'live_trial', ?)`, at, task.id,
+  );
+  const before = first.get("SELECT * FROM optimization_measurements WHERE id = 'msr_t'");
+  first.close();
+
+  const restamp = new DatabaseSync(path);
+  restamp.prepare("UPDATE schema_meta SET value = '16' WHERE key = 'schema_version'").run();
+  restamp.close();
+
+  const replayed = new Store(path);
+  const after = replayed.get("SELECT * FROM optimization_measurements WHERE id = 'msr_t'");
+  replayed.close();
+  assert.deepEqual(after, before, "a replayed rebuild never resets a failed live trial to a completed manual one");
+  assert.equal(after?.trial_state, "failed");
+  assert.equal(after?.source, "live_trial");
+  assert.equal(after?.task_id, task.id);
+});
+
 test("replaying a migration over objects it already created converges instead of failing", (t) => {
   const root = rootFor(t, "mabs-migration-replay-");
   const path = join(root, "restamped.sqlite");

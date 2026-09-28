@@ -2,8 +2,10 @@
 -- The original table's UNIQUE(experiment_id, variant, case_key) forbids repeat
 -- measurements, and SQLite cannot alter a table constraint in place, so the
 -- table is rebuilt with the repeat index in its key. Every existing row is
--- copied unchanged (repeat 0, source "manual", trial state "completed").
--- Re-applying converges: the copy reads whichever table currently holds the data.
+-- copied unchanged, including its trial state, source, and task link: the
+-- runner adds those columns (with the defaults "completed", "manual", NULL)
+-- before this file runs, so a first upgrade gets the defaults and a replay
+-- over an already-rebuilt table keeps the recorded values.
 CREATE TABLE IF NOT EXISTS optimization_measurements_v17 (
   id                     TEXT PRIMARY KEY,
   experiment_id          TEXT NOT NULL REFERENCES optimization_experiments(id) ON DELETE CASCADE,
@@ -31,11 +33,11 @@ CREATE TABLE IF NOT EXISTS optimization_measurements_v17 (
 INSERT OR IGNORE INTO optimization_measurements_v17(
   id, experiment_id, variant, case_key, accepted, requirement_violations, repairs, interventions, duration_ms,
   reported_input_tokens, reported_output_tokens, relevant_files, warnings, evidence_path, created_at,
-  repeat_index, seed, usage_coverage
+  repeat_index, seed, usage_coverage, trial_state, source, task_id
 )
 SELECT id, experiment_id, variant, case_key, accepted, requirement_violations, repairs, interventions, duration_ms,
   reported_input_tokens, reported_output_tokens, relevant_files, warnings, evidence_path, created_at,
-  repeat_index, seed, usage_coverage
+  repeat_index, seed, usage_coverage, trial_state, source, task_id
 FROM optimization_measurements;
 DROP TABLE optimization_measurements;
 ALTER TABLE optimization_measurements_v17 RENAME TO optimization_measurements;

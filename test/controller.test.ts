@@ -10,6 +10,7 @@ import { Controller } from "../src/controller/controller.ts";
 import { validateWorkerOutput } from "../src/domain/contract.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 class FakeAdapter implements WorkerAdapter {
   readonly name = "codex";
@@ -99,7 +100,7 @@ test("controller restart collects one isolated launch without duplication and ch
     acceptanceCriteria: ["the registered value check passes"],
   });
   const fake = new FakeAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", fake]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", fake]]), defaultAdapter: "codex", workerLimit: 1 });
 
   await controller.tick();
   assert.equal(records.getTask(task.id)?.state, "RUNNING");
@@ -111,7 +112,7 @@ test("controller restart collects one isolated launch without duplication and ch
   records.store.close();
   records = new Records(new Store(dbPath));
   records.store.run("UPDATE controller_lease SET heartbeat_at = ? WHERE singleton = 1", new Date(Date.now() - 60_000).toISOString());
-  const restarted = new Controller(records, {
+  const restarted = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
     adapters: new Map([["codex", fake]]),
     defaultAdapter: "codex",
     workerLimit: 1,

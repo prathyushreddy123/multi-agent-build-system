@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "17";
+export const SCHEMA_VERSION = "18";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -20,6 +20,12 @@ interface Migration {
    * a replay of the migration convergent rather than fatal.
    */
   columns: Record<string, Record<string, string>>;
+  /**
+   * Columns applied, by the same presence check, before `file` runs. A table
+   * rebuild copies them, so a replay over an already-rebuilt table carries
+   * its values forward instead of resetting them to defaults.
+   */
+  columnsBefore?: Record<string, Record<string, string>>;
   /** Indexes over the columns above; they must follow the columns. */
   indexes: string[];
 }
@@ -123,6 +129,19 @@ const MIGRATIONS: Migration[] = [
     version: 17,
     // Rebuilds optimization_measurements with the repeat index in its key.
     file: "migrations/017_experiment_trials.sql",
+    columnsBefore: {
+      optimization_measurements: {
+        trial_state: "TEXT NOT NULL DEFAULT 'completed' CHECK(trial_state IN ('completed', 'failed', 'interrupted'))",
+        source: "TEXT NOT NULL DEFAULT 'manual' CHECK(source IN ('manual', 'live_trial', 'policy_replay'))",
+        task_id: "TEXT REFERENCES tasks(id) ON DELETE SET NULL",
+      },
+    },
+    columns: {},
+    indexes: [],
+  },
+  {
+    version: 18,
+    file: "migrations/018_trial_bindings.sql",
     columns: {},
     indexes: [],
   },
@@ -144,6 +163,37 @@ export interface StoreOptions {
    * migrations, or changing persistent pragmas. A path is mandatory.
    */
   readOnly?: boolean;
+  /**
+   * `auto` (the library default) upgrades an existing database on open.
+   * `refuse` initializes a new database but will not migrate an existing
+   * one: operator entry points use it so a live upgrade only ever happens
+   * through `maintenance migrate`, after a verified backup.
+   */
+  migrations?: "auto" | "refuse";
+}
+
+export class SchemaMigrationRequiredError extends Error {
+  readonly found: number | null;
+  readonly target: string;
+
+  constructor(path: string, found: number | null) {
+    super(
+      `Database ${path} is at schema ${found ?? "pre-baseline"}; this MABS build needs schema ${SCHEMA_VERSION}. ` +
+      "Nothing was changed. Stop the controller, then run `mabs maintenance migrate`, which takes and verifies a backup first.",
+    );
+    this.name = "SchemaMigrationRequiredError";
+    this.found = found;
+    this.target = SCHEMA_VERSION;
+  }
+}
+
+/** True when opening this database with automatic migration would change its schema. */
+function migrationPending(db: DatabaseSync, version: number | null): boolean {
+  if (version !== null) return version < Number(SCHEMA_VERSION);
+  // No stamp: a brand-new file is initialized, but existing tables are a
+  // legacy database whose upgrade must be explicit.
+  const tables = db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").get() as { n: number };
+  return tables.n > 0;
 }
 
 export class UnsupportedSchemaVersionError extends Error {
@@ -293,7 +343,11 @@ export class Store {
     try {
       // Refuse a future database before WAL or DDL can touch it. This protects
       // against an older binary stamping a newer schema down.
-      schemaVersion(this.db, this.path);
+      const version = schemaVersion(this.db, this.path);
+      // Likewise refuse an older one when the caller forbids implicit upgrades.
+      if (options.migrations === "refuse" && this.path !== ":memory:" && migrationPending(this.db, version)) {
+        throw new SchemaMigrationRequiredError(this.path, version);
+      }
       // WAL keeps the workbench's reads from blocking the controller's writes.
       if (this.path !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL");
       this.db.exec("PRAGMA foreign_keys = ON");
@@ -320,6 +374,9 @@ export class Store {
       if (migration.version <= (version ?? 0)) continue;
       const sql = readFileSync(join(HERE, migration.file), "utf8");
       this.tx(() => {
+        for (const [table, columns] of Object.entries(migration.columnsBefore ?? {})) {
+          for (const [name, definition] of Object.entries(columns)) addColumn(this.db, table, name, definition);
+        }
         this.db.exec(sql);
         for (const [table, columns] of Object.entries(migration.columns)) {
           for (const [name, definition] of Object.entries(columns)) addColumn(this.db, table, name, definition);

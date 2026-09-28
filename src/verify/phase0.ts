@@ -15,7 +15,7 @@ import { classifyFailure, classifyFromEnvelope } from "../core/failure.ts";
 import { stateDir } from "../core/paths.ts";
 import { validateWorkerOutput, WORKER_OUTPUT_SCHEMA, CONTRACT_VERSION } from "../domain/contract.ts";
 import { assertNoPaidFallback, buildWorkerEnv, FORBIDDEN_ENV_KEYS } from "./env.ts";
-import { launchClaude, launchCodex } from "./launch.ts";
+import { launchClaude, launchCodex, PROBE_ROUTES } from "./launch.ts";
 import { createFixture, fixtureTestsPass, gitStatus, FIXTURE_TASK } from "./fixture.ts";
 
 export type ProbeStatus = "PASS" | "FAIL" | "UNKNOWN" | "SKIPPED";
@@ -164,6 +164,7 @@ async function probeRoundTrip(
   const result = await launch({
     cwd: fixture.path,
     prompt: contractPrompt(FIXTURE_TASK),
+    ...PROBE_ROUTES[harness],
     timeoutMs: 15 * 60_000,
     evidencePath: evidence,
   });
@@ -220,7 +221,7 @@ async function probeCancellation(harness: "claude" | "codex", dir: string, fixtu
   const prompt =
     "Run `python3 -c \"import time; time.sleep(240)\"` in the shell and wait for it to finish before replying.";
   const launch = harness === "claude" ? launchClaude : launchCodex;
-  const result = await launch({ cwd: fixture.path, prompt, timeoutMs: 20_000, evidencePath: evidence });
+  const result = await launch({ cwd: fixture.path, prompt, ...PROBE_ROUTES[harness], timeoutMs: 20_000, evidencePath: evidence });
 
   // A cancelled worker must leave nothing behind - not the harness, and not the
   // grandchild shell command it launched. The worktree path does not appear in
@@ -254,6 +255,7 @@ async function probeClaudeModels(dir: string, aliases: string[]): Promise<Probe>
       cwd: dir,
       prompt: "Reply with exactly: ok",
       model: alias,
+      effort: PROBE_ROUTES.claude.effort,
       timeoutMs: 180_000,
       evidencePath: evidence,
     });

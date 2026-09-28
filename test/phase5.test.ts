@@ -15,6 +15,7 @@ import { compareExperiment, completeExperiment, createExperiment, recordMeasurem
 import { routingOutcomes } from "../src/optimization/routing.ts";
 import { Records } from "../src/store/records.ts";
 import { Store } from "../src/store/db.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -136,7 +137,7 @@ test("a real task run produces a non-empty relevant-file manifest, checkpoints, 
     allowedScope: ["src/billing"],
   });
   const adapter = new SingleShotAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick();
   await controller.tick();
   const final = records.getTask(task.id);
@@ -231,7 +232,7 @@ test("routing outcomes aggregate observed accepted work, repairs, and reported u
     acceptanceCriteria: ["invoiceTotal sums item prices"], allowedScope: ["src/billing"],
   });
   const adapter = new SingleShotAdapter();
-  const controller = new Controller(records, { adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, adapters: new Map([["codex", adapter]]), defaultAdapter: "codex", workerLimit: 1 });
   await controller.tick();
   await controller.tick();
   assert.equal(records.getTask(task.id)?.state, "DONE");

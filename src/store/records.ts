@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { Store, nowIso, toJson, fromJson } from "./db.ts";
 import type { ConfigActivation, CuratorEvaluation, CuratorProposal, EvaluationCase, EvaluationMetrics, ProposalStatus } from "../curator/types.ts";
-import type { Row } from "./db.ts";
+import type { Row, StoreOptions } from "./db.ts";
 import { ids } from "../core/ids.ts";
 import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, projectConfigSnapshot, validateProjectConfig } from "../domain/config.ts";
 import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
@@ -1550,6 +1550,12 @@ export class Records {
       }
       if (current.state !== "BLOCKED" && current.state !== "FAILED") {
         throw new Error(`Task ${taskId} is ${current.state}; only BLOCKED or FAILED tasks can be retried`);
+      }
+      // A worker whose process was never ruled out may still be editing the
+      // worktree; a retry would run a second provider beside it.
+      const unresolved = this.listAttempts(taskId).find((attempt) => attempt.state === "running");
+      if (unresolved) {
+        throw new Error(`Task ${taskId} still has unresolved attempt ${unresolved.id}; cancel the task to stop it before retrying`);
       }
       assertTransition(current.state, "READY");
       const at = nowIso();
@@ -4069,6 +4075,10 @@ export class Records {
   }
 }
 
-export function openRecords(path?: string): Records {
-  return new Records(new Store(path));
+/**
+ * Operator entry point. An existing database behind this build's schema is
+ * refused rather than upgraded in place; see `maintenance migrate`.
+ */
+export function openRecords(path?: string, options: StoreOptions = { migrations: "refuse" }): Records {
+  return new Records(new Store(path, options));
 }

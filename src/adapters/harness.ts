@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,7 +7,7 @@ import { classifyFailure, classifyFromEnvelope } from "../core/failure.ts";
 import { validateWorkerOutput } from "../domain/contract.ts";
 import { DEFAULT_CAPABILITY_REGISTRY, DISABLED_DELEGATION, evaluateCapability, type CapabilityRegistry } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "../verify/env.ts";
-import type { LaunchResult } from "../verify/launch.ts";
+import { primaryAnsweringModel, sameModel, type LaunchResult } from "../verify/launch.ts";
 import type { AdapterHandle, AdapterLaunch, AdapterStatus, CollectedResult, WorkerAdapter } from "./types.ts";
 
 const PROCESS_ENTRY = fileURLToPath(new URL("./worker-process.ts", import.meta.url));
@@ -33,6 +33,52 @@ function processAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** Written atomically by the worker wrapper before it starts any provider. */
+export const START_MARKER_FILE = "start-marker.json";
+const LAUNCH_SPEC_FILE = "launch.json";
+const DEFAULT_LAUNCH_GRACE_MS = 30_000;
+
+function launchFiles(handle: Pick<AdapterHandle, "completionPath">): { spec: string; marker: string } {
+  const dir = dirname(handle.completionPath);
+  return { spec: join(dir, LAUNCH_SPEC_FILE), marker: join(dir, START_MARKER_FILE) };
+}
+
+function readStartMarker(path: string, attemptId: string): number | null {
+  try {
+    const marker = JSON.parse(readFileSync(path, "utf8")) as { attemptId?: unknown; pid?: unknown };
+    return marker.attemptId === attemptId && typeof marker.pid === "number" ? marker.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+const PROC_AVAILABLE = existsSync("/proc/self/cmdline");
+
+/**
+ * Find a live process whose argv names this exact launch specification. The
+ * wrapper is started as `node worker-process.ts <spec>`, so this identifies it
+ * even when a crash kept its PID out of the database and out of the marker.
+ */
+function findProcessByArgument(argument: string): number | null {
+  if (!PROC_AVAILABLE) return null;
+  let entries: string[];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const argv = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
+      if (argv.includes(argument)) return Number(entry);
+    } catch {
+      // The process exited while scanning.
+    }
+  }
+  return null;
 }
 
 export class HarnessAdapter implements WorkerAdapter {
@@ -62,9 +108,10 @@ export class HarnessAdapter implements WorkerAdapter {
     mkdirSync(dirname(input.completionPath), { recursive: true, mode: 0o700 });
     mkdirSync(join(input.cwd, ".mabs"), { recursive: true, mode: 0o700 });
     rmSync(input.completionPath, { force: true });
+    rmSync(launchFiles(input).marker, { force: true });
     rmSync(join(input.cwd, RESULT_FILE), { force: true });
 
-    const specPath = join(dirname(input.completionPath), "launch.json");
+    const specPath = launchFiles(input).spec;
     writeFileSync(specPath, JSON.stringify({
       harness: this.name,
       ...input,
@@ -90,13 +137,36 @@ export class HarnessAdapter implements WorkerAdapter {
     return { attemptId: input.attemptId, pid: child.pid ?? null, sessionId: null, completionPath: input.completionPath };
   }
 
-  async status(handle: AdapterHandle): Promise<AdapterStatus> {
+  /** The durable PID, else the wrapper's own marker, else a live process naming this launch. */
+  private resolvePid(handle: AdapterHandle): number | null {
+    if (handle.pid !== null) return handle.pid;
+    const files = launchFiles(handle);
+    return readStartMarker(files.marker, handle.attemptId) ?? (existsSync(files.spec) ? findProcessByArgument(files.spec) : null);
+  }
+
+  recoverHandle(handle: AdapterHandle): AdapterHandle {
+    return { ...handle, pid: this.resolvePid(handle) };
+  }
+
+  async status(handle: AdapterHandle, options: { launchGraceMs?: number } = {}): Promise<AdapterStatus> {
     if (existsSync(handle.completionPath)) return "completed";
-    if (handle.pid !== null && processAlive(handle.pid)) return "running";
+    const pid = this.resolvePid(handle);
+    if (pid !== null && processAlive(pid)) return "running";
+    const files = launchFiles(handle);
+    // A crash between spawn and the PID write leaves only the specification.
+    // The wrapper marks itself before starting any provider, so a missing
+    // marker with no matching process after the grace window proves nothing
+    // ran; without a process table that proof is unavailable.
+    if (pid === null && existsSync(files.spec)) {
+      const ageMs = Date.now() - statSync(files.spec).mtimeMs;
+      if (ageMs <= (options.launchGraceMs ?? DEFAULT_LAUNCH_GRACE_MS)) return "launching";
+      if (!PROC_AVAILABLE) return "ambiguous";
+    }
     return "lost";
   }
 
-  async cancel(handle: AdapterHandle): Promise<void> {
+  async cancel(recorded: AdapterHandle): Promise<void> {
+    const handle = this.recoverHandle(recorded);
     if (handle.pid === null || !processAlive(handle.pid)) return;
     try {
       process.kill(-handle.pid, "SIGTERM");
@@ -166,10 +236,20 @@ export class HarnessAdapter implements WorkerAdapter {
       failureClass = classifyFailure(`${validation.output.reason}\n${validation.output.summary}`, launch.exitCode);
     }
 
+    // A fallback model answering in place of the requested one is a route the
+    // registry never approved; the attempt fails instead of being accepted.
+    let routeError: string | null = null;
+    const requested = launch.applied?.model;
+    const answering = launch.answeringModels ? primaryAnsweringModel(launch.answeringModels) : null;
+    if (!launch.timedOut && requested && answering && !sameModel(answering, requested)) {
+      failureClass = "CONFIG" as const;
+      routeError = `Provider answered with ${answering}, not the requested ${requested}; a fallback or default model is never accepted.`;
+    }
+
     const observedError = failureClass
       ? (launch.finalMessage || launch.stderr || launch.raw).trim().slice(-8_000) || `Worker exited with ${launch.exitCode}`
       : null;
-    return { launch, validation, failureClass, error: envelope.error ?? observedError };
+    return { launch, validation, failureClass, error: envelope.error ?? routeError ?? observedError };
   }
 }
 

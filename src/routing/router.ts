@@ -1,6 +1,7 @@
 import type { WorkerAdapter } from "../adapters/types.ts";
 import type { Task } from "../store/records.ts";
 import {
+  CODEX_MODEL,
   DEFAULT_CAPABILITY_REGISTRY,
   DISABLED_DELEGATION,
   evaluateCapability,
@@ -39,8 +40,10 @@ export interface RoutingPolicy {
 }
 
 /**
- * Provisional map from Phase 0 evidence. Codex did not report its actual model,
- * so its model remains null. Claude IDs are exact IDs resolved by the probe.
+ * Provisional map from Phase 0 evidence. Every candidate names an exact model
+ * and effort, so no launch inherits a provider's local default. Claude IDs are
+ * exact IDs resolved by the probe; the Codex ID is pinned and stays ineligible
+ * until `routing verify-entitlement` proves it.
  */
 export const DEFAULT_ROUTING_POLICY: RoutingPolicy = {
   version: "phase2-routing-v1",
@@ -48,36 +51,36 @@ export const DEFAULT_ROUTING_POLICY: RoutingPolicy = {
   routes: {
     mechanical: [],
     small_implementation: [
-      { adapter: "codex", model: null, effort: "medium", reason: "Accepted Phase 0 bug-fix and feature tasks." },
-      { adapter: "claude", model: "claude-sonnet-5", effort: null, reason: "Subscription fallback with verified model ID." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "medium", reason: "Accepted Phase 0 bug-fix and feature tasks." },
+      { adapter: "claude", model: "claude-sonnet-5", effort: "medium", reason: "Subscription fallback with verified model ID." },
     ],
     complex_coding: [
-      { adapter: "codex", model: null, effort: "high", reason: "Accepted the resumed Phase 0 complex task." },
-      { adapter: "claude", model: "claude-opus-5", effort: null, reason: "Capable fallback; Phase 0 complex run was quota-limited." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Accepted the resumed Phase 0 complex task." },
+      { adapter: "claude", model: "claude-opus-5", effort: "high", reason: "Capable fallback; Phase 0 complex run was quota-limited." },
     ],
     diagnosis: [
-      { adapter: "codex", model: null, effort: "high", reason: "Accepted the Phase 0 diagnosis task." },
-      { adapter: "claude", model: "claude-sonnet-5", effort: null, reason: "Verified subscription fallback." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Accepted the Phase 0 diagnosis task." },
+      { adapter: "claude", model: "claude-sonnet-5", effort: "high", reason: "Verified subscription fallback." },
     ],
     planning: [
-      { adapter: "claude", model: "claude-opus-5", effort: null, reason: "Provisional reasoning route pending representative evaluation." },
-      { adapter: "codex", model: null, effort: "high", reason: "Subscription fallback for planning." },
+      { adapter: "claude", model: "claude-opus-5", effort: "high", reason: "Provisional reasoning route pending representative evaluation." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Subscription fallback for planning." },
     ],
     research: [
-      { adapter: "codex", model: null, effort: "medium", reason: "Provisional research route." },
-      { adapter: "claude", model: "claude-sonnet-5", effort: null, reason: "Subscription fallback for research." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "medium", reason: "Provisional research route." },
+      { adapter: "claude", model: "claude-sonnet-5", effort: "medium", reason: "Subscription fallback for research." },
     ],
     review: [
-      { adapter: "claude", model: "claude-sonnet-5", effort: null, reason: "Separate-context review route; provisional until Phase 3 evaluation." },
-      { adapter: "codex", model: null, effort: "high", reason: "Subscription fallback for review." },
+      { adapter: "claude", model: "claude-sonnet-5", effort: "medium", reason: "Separate-context review route; provisional until Phase 3 evaluation." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Subscription fallback for review." },
     ],
     troubleshooting: [
-      { adapter: "codex", model: null, effort: "high", reason: "Diagnosis-capable default." },
-      { adapter: "claude", model: "claude-opus-5", effort: null, reason: "Capable troubleshooting fallback." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Diagnosis-capable default." },
+      { adapter: "claude", model: "claude-opus-5", effort: "high", reason: "Capable troubleshooting fallback." },
     ],
     curation: [
-      { adapter: "claude", model: "claude-opus-5", effort: null, reason: "Provisional curator route; activation remains approval-gated." },
-      { adapter: "codex", model: null, effort: "high", reason: "Subscription fallback for curation." },
+      { adapter: "claude", model: "claude-opus-5", effort: "high", reason: "Provisional curator route; activation remains approval-gated." },
+      { adapter: "codex", model: CODEX_MODEL, effort: "high", reason: "Subscription fallback for curation." },
     ],
   },
 };

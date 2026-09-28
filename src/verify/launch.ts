@@ -9,7 +9,7 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 
 import { exec, type ExecResult } from "../core/exec.ts";
 import { LiveLog, ProgressWriter, ProviderStreamParser, type StreamProgress } from "../telemetry/stream.ts";
-import { DISABLED_DELEGATION, type DelegationPolicy } from "../routing/capabilities.ts";
+import { CODEX_MODEL, DISABLED_DELEGATION, type DelegationPolicy } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "./env.ts";
 
 // --------------------------------------------------------------------------
@@ -19,8 +19,9 @@ import { buildWorkerEnv, assertNoPaidFallback } from "./env.ts";
 export interface LaunchOptions {
   cwd: string;
   prompt: string;
+  /** Exact model; required; the provider default is never inherited. */
   model?: string;
-  /** Explicit per-attempt effort. Absent means the provider's own default, which MABS cannot observe. */
+  /** Explicit per-attempt effort; required, for the same reason. */
   effort?: string;
   delegation?: DelegationPolicy;
   timeoutMs: number;
@@ -39,7 +40,7 @@ export interface LaunchOptions {
 export interface AppliedLaunchSettings {
   model: string | null;
   effort: string | null;
-  effortSource: "explicit" | "provider_default_unknown";
+  effortSource: "explicit";
   delegation: "disabled";
 }
 
@@ -55,6 +56,8 @@ export interface LaunchResult {
   durationMs: number;
   finalMessage: string;
   reportedModel: string | null;
+  /** Every model the provider reported using, with its output; null when unreported. */
+  answeringModels?: { model: string; outputTokens: number | null }[] | null;
   usage: Record<string, unknown> | null;
   apiEquivalentEstimateUsd: number | null;
   sessionId: string | null;
@@ -76,14 +79,44 @@ function requireDisabledDelegation(policy: DelegationPolicy | undefined): void {
   }
 }
 
-function applied(options: Pick<LaunchOptions, "model" | "effort">): AppliedLaunchSettings {
-  return {
-    model: options.model ?? null,
-    effort: options.effort ?? null,
-    effortSource: options.effort ? "explicit" : "provider_default_unknown",
-    delegation: "disabled",
-  };
+/**
+ * A launch always names its model and effort. Omitting either would inherit a
+ * global, managed, or future provider default that no registry entry checked.
+ */
+function requireExplicitRoute(options: Pick<LaunchOptions, "model" | "effort">): { model: string; effort: string } {
+  if (!options.model) throw new Error("Launch requires an exact model; the provider default is never inherited.");
+  if (!options.effort) throw new Error("Launch requires an explicit effort; the provider default is never inherited.");
+  return { model: options.model, effort: options.effort };
 }
+
+function applied(options: Pick<LaunchOptions, "model" | "effort">): AppliedLaunchSettings {
+  const route = requireExplicitRoute(options);
+  return { model: route.model, effort: route.effort, effortSource: "explicit", delegation: "disabled" };
+}
+
+/**
+ * The model that carried the answer: the reported model with the most output.
+ * Background helper models may appear with small output alongside it.
+ */
+export function primaryAnsweringModel(models: { model: string; outputTokens: number | null }[]): string | null {
+  const ranked = [...models].sort((a, b) => (b.outputTokens ?? -1) - (a.outputTokens ?? -1));
+  return ranked[0]?.model ?? null;
+}
+
+/** True when a reported model ID is the requested one, allowing dated or context suffixes. */
+export function sameModel(reported: string, requested: string): boolean {
+  const base = reported.replace(/\[[^\]]*\]$/, "");
+  return base === requested || base.startsWith(`${requested}-`);
+}
+
+/**
+ * The fixed route verification probes launch with. Probes name their model and
+ * effort like any attempt; they exist to produce evidence about these routes.
+ */
+export const PROBE_ROUTES = {
+  claude: { model: "claude-sonnet-5", effort: "low" },
+  codex: { model: CODEX_MODEL, effort: "low" },
+} as const;
 
 /** Exact Claude argv for one attempt; pure so tests can assert it without a process. */
 export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "effort" | "delegation">): string[] {
@@ -103,8 +136,8 @@ export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "ef
     "--disallowedTools",
     ...CLAUDE_DELEGATION_TOOLS,
   ];
-  if (options.model) args.push("--model", options.model);
-  if (options.effort) args.push("--effort", options.effort);
+  const route = requireExplicitRoute(options);
+  args.push("--model", route.model, "--effort", route.effort);
   return args;
 }
 
@@ -126,8 +159,8 @@ export function codexArgs(options: Pick<LaunchOptions, "cwd" | "prompt" | "model
     "-c",
     "features.multi_agent_v2=false",
   ];
-  if (options.model) args.push("-m", options.model);
-  if (options.effort) args.push("-c", `model_reasoning_effort="${options.effort}"`);
+  const route = requireExplicitRoute(options);
+  args.push("-m", route.model, "-c", `model_reasoning_effort="${route.effort}"`);
   args.push(options.prompt);
   return args;
 }
@@ -182,6 +215,7 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
 
   let finalMessage = "";
   let reportedModel: string | null = null;
+  let answeringModels: { model: string; outputTokens: number | null }[] | null = null;
   let usage: Record<string, unknown> | null = null;
   let estimate: number | null = null;
   let sessionId: string | null = parser.sessionId;
@@ -197,10 +231,13 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
     usage = (envelope.usage as Record<string, unknown>) ?? null;
     sessionId = (envelope.session_id as string) ?? sessionId;
     estimate = typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : null;
-    const modelUsage = envelope.modelUsage as Record<string, { canonicalModel?: string }> | undefined;
+    const modelUsage = envelope.modelUsage as Record<string, { canonicalModel?: string; outputTokens?: unknown }> | undefined;
     if (modelUsage) {
-      const first = Object.values(modelUsage)[0];
-      reportedModel = first?.canonicalModel ?? Object.keys(modelUsage)[0] ?? null;
+      answeringModels = Object.entries(modelUsage).map(([key, entry]) => ({
+        model: entry?.canonicalModel ?? key,
+        outputTokens: typeof entry?.outputTokens === "number" ? entry.outputTokens : null,
+      }));
+      reportedModel = primaryAnsweringModel(answeringModels);
     }
   } catch {
     finalMessage = result.stdout;
@@ -212,6 +249,7 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
     durationMs: result.durationMs,
     finalMessage,
     reportedModel,
+    answeringModels,
     usage,
     apiEquivalentEstimateUsd: estimate,
     sessionId,
