@@ -7,7 +7,7 @@ import type { FailureClass } from "../core/failure.ts";
  * silently become success: it is a CONTRACT failure with the raw transcript
  * preserved as evidence.
  */
-export const CONTRACT_VERSION = "1.1.0";
+export const CONTRACT_VERSION = "1.2.0";
 
 export type WorkerRole = "implementer" | "reviewer" | "researcher" | "troubleshooter" | "curator";
 
@@ -66,7 +66,17 @@ export interface WorkerInput {
       excerpt_truncated: boolean;
       estimated_tokens: number;
     }[];
+    /** Every open durable obligation exactly once; findings elsewhere refer to these by ID. */
+    obligations?: {
+      id: string;
+      kind: string;
+      severity: string;
+      blocking: boolean;
+      summary: string;
+    }[];
     previous_findings: string[];
+    /** The most recent operational failure (quota, auth, environment). It is not a code finding. */
+    last_operational_failure?: string | null;
     artifacts: string[];
     checkpoint: {
       id: string;
@@ -86,6 +96,8 @@ export interface WorkerInput {
     derived_token_estimate: number;
     context_budget_tokens: number;
     omissions: { path: string; reason: string }[];
+    /** Full omitted-file inventory on disk when `omissions` shows only a prefix of it. */
+    omission_inventory?: { path: string; total: number } | null;
   };
 }
 

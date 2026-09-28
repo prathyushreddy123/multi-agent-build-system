@@ -5,7 +5,7 @@ import { delimiter, join } from "node:path";
 
 import { defaultAdapters } from "../adapters/harness.ts";
 import type { AdapterHandle, CollectedResult, WorkerAdapter } from "../adapters/types.ts";
-import { buildContextPacket, type ExecutionSelection } from "../context/packet.ts";
+import { ContextBudgetExceededError, buildContextPacket, type ContextPacket, type ExecutionSelection } from "../context/packet.ts";
 import {
   consumesRepairBudget,
   diagnoseFailure,
@@ -2062,24 +2062,50 @@ export class Controller {
           .filter((path): path is string => path !== null),
       );
     }
-    const obligationFindings = this.records.getContinuation(task.id).openObligations.map((obligation) =>
-      `[${obligation.severity}] Obligation ${obligation.id}: ${obligation.summary}`,
-    );
-    const packet = buildContextPacket({
-      records: this.records,
-      project,
-      task,
-      attemptId,
-      workspace: {
-        path: task.worktreePath,
-        branch: task.branch,
-        baseRevision: kind === "review" ? (task.resultRevision as string) : task.baseRevision,
-      },
-      execution,
-      previousFindings: [...new Set([...previousFindings, ...obligationFindings])],
-      purpose: kind === "review" ? "review" : "implementation",
-      additionalArtifacts: reviewArtifacts,
-    });
+    if (executionStage === "repair" && task.resultRevision && task.resultRevision !== task.baseRevision) {
+      // A repair works from the change it is repairing, not from the task text alone.
+      const deltaPath = join(dir, "repair-delta.patch");
+      writeFileSync(deltaPath, await workspaceDiff(task.worktreePath, task.baseRevision, task.resultRevision), { mode: 0o600 });
+      reviewArtifacts.push(deltaPath);
+    }
+    // A reroute is caused by the provider, not the code: its reason is carried
+    // as the operational failure and never becomes a code finding.
+    const operational = kind === "reroute";
+    let packet: ContextPacket;
+    try {
+      packet = buildContextPacket({
+        records: this.records,
+        project,
+        task,
+        attemptId,
+        workspace: {
+          path: task.worktreePath,
+          branch: task.branch,
+          baseRevision: kind === "review" ? (task.resultRevision as string) : task.baseRevision,
+        },
+        execution,
+        previousFindings: operational ? [] : previousFindings,
+        operationalFailure: operational ? previousFindings.join("\n") || null : null,
+        obligations: this.records.getContinuation(task.id).openObligations,
+        purpose: executionStage === "review" ? "review" : executionStage === "repair" ? "repair" : "implementation",
+        additionalArtifacts: reviewArtifacts,
+      });
+    } catch (error) {
+      if (!(error instanceof ContextBudgetExceededError)) throw error;
+      this.recordObligationOnce({
+        taskId: task.id,
+        kind: "decision_needed",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `context-budget:${project.configVersion}:${executionStage}`,
+        summary: error.message,
+        introducedRevision: task.resultRevision ?? task.baseRevision,
+        evidenceRefs: [],
+      });
+      this.finishStage(stage, { state: "waiting", failureClass: "CONFIG", failureDetail: error.message, taskState: "BLOCKED" });
+      this.blockTask(this.records.getTask(task.id) ?? task, "CONFIG", error.message);
+      return;
+    }
     const attempt = this.records.startAttempt({
       id: attemptId,
       taskId: task.id,
@@ -2094,7 +2120,7 @@ export class Controller {
       packetId: packet.id,
       outputPath: completionPath,
       promptVersion: WORKER_PROMPT_VERSION,
-      skillVersions: guidanceForAttempt(task, kind),
+      skillVersions: packet.guidance,
       stageRunId: stage.id,
       requestedModel: execution.model,
       configuredModel: execution.model,

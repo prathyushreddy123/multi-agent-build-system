@@ -3565,6 +3565,16 @@ export class Records {
     budgetTokens?: number | null;
     manifestPath: string | null;
     warnings: string[];
+    purpose?: string | null;
+    accounting?: {
+      promptBytes: number;
+      promptTokenEstimate: number;
+      estimatorVersion: string;
+      sectionBytes: Record<string, number>;
+      mandatoryCount: number;
+      optionalCount: number;
+      contentFingerprint: string;
+    } | null;
     fileDetails?: {
       path: string;
       reason: string;
@@ -3579,8 +3589,9 @@ export class Records {
       this.store.run(
       `INSERT INTO context_packets(id, task_id, attempt_id, requirement_ids, omitted, files, artifacts,
          base_revision, source_workspace, inspected_revision, config_version, provider, checkpoint_id,
-         token_estimate, budget_tokens, manifest_path, warnings, created_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         token_estimate, budget_tokens, manifest_path, warnings, created_at, purpose, prompt_bytes,
+         prompt_token_estimate, estimator_version, section_sizes, mandatory_count, optional_count, content_fingerprint)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       input.id,
       input.taskId,
       input.attemptId ?? null,
@@ -3599,6 +3610,14 @@ export class Records {
       input.manifestPath,
       toJson(input.warnings),
       nowIso(),
+      input.purpose ?? null,
+      input.accounting?.promptBytes ?? null,
+      input.accounting?.promptTokenEstimate ?? null,
+      input.accounting?.estimatorVersion ?? null,
+      input.accounting ? toJson(input.accounting.sectionBytes) : null,
+      input.accounting?.mandatoryCount ?? null,
+      input.accounting?.optionalCount ?? null,
+      input.accounting?.contentFingerprint ?? null,
       );
       for (const file of input.fileDetails ?? []) {
         this.store.run(

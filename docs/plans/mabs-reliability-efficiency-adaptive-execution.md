@@ -1114,6 +1114,43 @@ per attempt.
 
 **Acceptance:** exact sent bytes match recorded bytes; estimates carry provenance; quota reroute retains findings even if its latest checkpoint is operational; review revision drift fails closed; Unicode and oversized mandatory records are tested; existing budget semantics change only through versioned activation.
 
+#### T08 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation.
+
+- Every packet records the exact rendered prompt: `context_packets.prompt_bytes` is the UTF-8 byte
+  length of the string handed to the adapter, with `prompt_token_estimate`, `estimator_version`
+  (`utf8-bytes-div4.v1`), per-section byte sizes (`instructions` + `worker_input` = total), mandatory
+  and optional counts, `purpose`, and a SHA-256 `content_fingerprint` of the prompt.
+- Budget semantics are versioned through the optional `controllerSettings.contextBudgetPolicy`.
+  Absent (`mabs.budget.v1`) keeps the historical behavior: the budget covers context records only
+  and an oversized mandatory set is preserved with a warning; `token_estimate` keeps its old meaning.
+  `mabs.budget.v2` budgets the complete rendered prompt. If mandatory content alone exceeds it,
+  preparation stops with `ContextBudgetExceededError`: zero launches, a blocking `decision_needed`
+  obligation, `context.mandatory_overflow`, task BLOCKED/CONFIG. Otherwise optional files are shed,
+  lowest relevance first, until the exact rendered string fits. The setting has no default, so
+  existing configuration fingerprints are unchanged; v2 is adopted by configuration activation.
+- Packets are purpose-specific (`implementation`, `repair`, `review`), following the actual execution
+  stage, so a reroute of a repair is still a repair. Repairs get `targeted-repair-v1` guidance,
+  repair role instructions, and a `repair-delta.patch` artifact of the change being repaired.
+  `attempts.skill_versions` now records the guidance actually rendered.
+- Open obligations appear once, in `context.obligations`. Matching failure reasons are dropped from
+  `previous_findings`, and matching checkpoint findings become `See obligation <id>.`.
+- The handoff uses the latest progress checkpoint, not the latest checkpoint: a quota/auth failure no
+  longer displaces earlier review findings. A reroute's provider error goes to
+  `last_operational_failure`, never into the findings (REC-01).
+- File excerpts keep the file head plus windows around task-keyword matches, with explicit elision
+  markers, instead of a blind prefix. More than 20 omissions are written to `omitted-files.json`;
+  the prompt carries the first 20 and `omission_inventory {path,total}`.
+- A review packet with source revision drift still fails closed and now records
+  `context.revision_drift` with `failedClosed: true`.
+- Worker contract `1.2.0`, prompt `worker-packet-v3+worker-roles-v2`.
+- Evidence: `test/context-budget.test.ts` (CTX-01..05, REC-01, span excerpts, and a controller
+  repair driven by a genuinely failing gate).
+
+Known limits: the estimator is byte-derived, not a provider tokenizer; provider-side
+system prompts and tool schemas are outside MABS's control and are not counted.
+
 ### T09 — Review obligations and quality evidence
 
 **Milestone:** M3. **Depends on:** T08. **Risk:** high. **Mode:** sequential.

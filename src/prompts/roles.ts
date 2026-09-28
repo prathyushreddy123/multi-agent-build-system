@@ -1,14 +1,19 @@
 import { WORKER_OUTPUT_SCHEMA } from "../domain/contract.ts";
 import type { WorkerInput } from "../domain/contract.ts";
 
-export type WorkerPurpose = "implementation" | "review";
+export type WorkerPurpose = "implementation" | "repair" | "review";
 
-export const ROLE_PROMPT_VERSION = "worker-roles-v1";
+export const ROLE_PROMPT_VERSION = "worker-roles-v2";
 
 export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {
   implementation: [
     "Do not run git commit. Linked-worktree Git metadata may be outside your sandbox; after you report completed, the controller creates the required local commit and binds checks to it.",
     "A task acceptance criterion requiring a local commit is therefore a controller postcondition, not a reason to report blocked.",
+  ],
+  repair: [
+    "This is a targeted repair of an existing revision. context.obligations lists every open obligation exactly once, by ID; address each blocking one and do not repeat an approach the findings rejected.",
+    "Keep the change minimal and inside scope. Name the obligation IDs you addressed in your summary; the controller, not you, decides whether they are resolved.",
+    "Do not run git commit. The controller creates the local commit after you report completed.",
   ],
   review: [
     "This is an independent, read-only review. Do not edit tracked files. Inspect evidence directly instead of relying on the implementer's summary.",

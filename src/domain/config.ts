@@ -15,9 +15,20 @@ export interface PromptProfile {
   researchAddendum: string | null;
 }
 
+export const CONTEXT_BUDGET_POLICIES = ["mabs.budget.v1", "mabs.budget.v2"] as const;
+export type ContextBudgetPolicy = (typeof CONTEXT_BUDGET_POLICIES)[number];
+
 export interface ProjectControllerSettings {
   defaultRepairLimit: number;
   contextBudgetTokens: number;
+  /**
+   * Absent means `mabs.budget.v1`: the budget covers retrieved context only and
+   * oversized mandatory records are preserved with a warning. `mabs.budget.v2`
+   * budgets the complete rendered prompt and blocks on mandatory overflow. It
+   * has no default so that existing configuration fingerprints are unchanged;
+   * v2 is adopted only through a versioned configuration activation.
+   */
+  contextBudgetPolicy?: ContextBudgetPolicy;
 }
 
 export interface RoutingOverride {
@@ -207,7 +218,11 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
   }
 
   if (config.controllerSettings && typeof config.controllerSettings === "object") {
-    errors.push(...unknownKeys(config.controllerSettings, ["defaultRepairLimit", "contextBudgetTokens"], "controllerSettings"));
+    errors.push(...unknownKeys(config.controllerSettings, ["defaultRepairLimit", "contextBudgetTokens", "contextBudgetPolicy"], "controllerSettings"));
+    const budgetPolicy = config.controllerSettings.contextBudgetPolicy;
+    if (budgetPolicy !== undefined && !CONTEXT_BUDGET_POLICIES.includes(budgetPolicy)) {
+      errors.push(`controllerSettings.contextBudgetPolicy must be one of ${CONTEXT_BUDGET_POLICIES.join(", ")}.`);
+    }
   }
   const repairLimit = config.controllerSettings?.defaultRepairLimit;
   if (!Number.isSafeInteger(repairLimit) || repairLimit < 0 || repairLimit > 2) {

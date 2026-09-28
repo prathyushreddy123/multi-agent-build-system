@@ -69,6 +69,53 @@ function mentionedPaths(text: string): Set<string> {
   return new Set(found.map((value) => normalize(value.trim().replace(/^[`'"(]|[`'"),:;]$/g, ""))));
 }
 
+const HEAD_LINES = 30;
+const SPAN_RADIUS = 12;
+
+/**
+ * Excerpt a file by relevance rather than position. Files that fit are kept
+ * whole. Longer files keep their head (imports, declarations) plus windows
+ * around lines mentioning task keywords, joined by explicit elision markers so
+ * a reader never mistakes a span for the complete file.
+ */
+export function relevantExcerpt(content: string, keywords: string[], maxChars: number): { excerpt: string; spans: number } {
+  if (content.length <= maxChars) return { excerpt: content, spans: 1 };
+  const lines = content.split("\n");
+  const wanted = new Set<number>();
+  for (let index = 0; index < Math.min(HEAD_LINES, lines.length); index += 1) wanted.add(index);
+  const lowered = keywords.map((keyword) => keyword.toLowerCase());
+  const hits = lines
+    .map((line, index) => ({ index, score: lowered.filter((keyword) => line.toLowerCase().includes(keyword)).length }))
+    .filter((line) => line.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  if (hits.length === 0) return { excerpt: content.slice(0, maxChars), spans: 1 };
+  const render = (indexes: Set<number>) => {
+    const ordered = [...indexes].sort((left, right) => left - right);
+    const parts: string[] = [];
+    let spans = 0;
+    ordered.forEach((index, position) => {
+      if (position === 0 || index !== (ordered[position - 1] as number) + 1) {
+        spans += 1;
+        if (position > 0 || index > 0) parts.push(`… [lines omitted; excerpt resumes at line ${index + 1}]`);
+      }
+      parts.push(lines[index] as string);
+    });
+    return { excerpt: parts.join("\n"), spans };
+  };
+  let best = render(wanted);
+  for (const hit of hits) {
+    const candidate = new Set(wanted);
+    for (let index = Math.max(0, hit.index - SPAN_RADIUS); index <= Math.min(lines.length - 1, hit.index + SPAN_RADIUS); index += 1) {
+      candidate.add(index);
+    }
+    const rendered = render(candidate);
+    if (rendered.excerpt.length > maxChars) break;
+    for (const index of candidate) wanted.add(index);
+    best = rendered;
+  }
+  return best.excerpt.length <= maxChars ? best : { excerpt: best.excerpt.slice(0, maxChars), spans: best.spans };
+}
+
 function trackedFiles(repoPath: string): string[] {
   const output = execFileSync("git", ["ls-files", "-z"], {
     cwd: repoPath,
@@ -170,7 +217,7 @@ export function retrieveContext(input: {
     }
     if (score === 0) continue;
     const maxExcerpt = score >= 90 ? 6_000 : 3_000;
-    const excerpt = content.slice(0, maxExcerpt);
+    const { excerpt } = relevantExcerpt(content, keywords, maxExcerpt);
     const estimatedTokens = estimateTokens(`${path}\n${reasons.join("; ")}\n${excerpt}`);
     candidates.push({
       path,
