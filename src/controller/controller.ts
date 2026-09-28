@@ -4,7 +4,7 @@ import { cpus, freemem, loadavg } from "node:os";
 import { delimiter, join } from "node:path";
 
 import { defaultAdapters } from "../adapters/harness.ts";
-import type { AdapterHandle, WorkerAdapter } from "../adapters/types.ts";
+import type { AdapterHandle, CollectedResult, WorkerAdapter } from "../adapters/types.ts";
 import { buildContextPacket, type ExecutionSelection } from "../context/packet.ts";
 import {
   consumesRepairBudget,
@@ -31,6 +31,13 @@ import { classifyFindings, describeReviewPolicy, evaluateReviewPolicy } from "..
 import type { ReviewDecision } from "../review/policy.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
+import {
+  DEFAULT_CAPABILITY_REGISTRY,
+  DISABLED_DELEGATION,
+  evaluateCapability,
+  quotaDomainsFor,
+  type CapabilityRegistry,
+} from "../routing/capabilities.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
 import type { Attempt, GateResult, GateSpec, Project, Records, Task } from "../store/records.ts";
 import type { ExecutionEpisode, ExecutionStage, StageRun, TaskObligation } from "../domain/execution.ts";
@@ -85,6 +92,9 @@ export interface ControllerOptions {
   minFreeMemoryMb?: number;
   maxLoadPerCpu?: number;
   routingPolicy?: RoutingPolicy;
+  capabilityRegistry?: CapabilityRegistry;
+  /** `wait` keeps a busy preferred route rather than moving to a free fallback provider. */
+  capacityFallback?: "allow" | "wait";
   controllerId?: string;
   adapters?: Map<string, WorkerAdapter>;
 }
@@ -107,9 +117,11 @@ export class Controller {
     minFreeMemoryMb: number;
     maxLoadPerCpu: number;
     controllerId: string;
+    capacityFallback: "allow" | "wait";
   };
   readonly adapters: Map<string, WorkerAdapter>;
   readonly routingPolicy: RoutingPolicy;
+  readonly capabilityRegistry: CapabilityRegistry;
   private readonly preferredAdapter: "claude" | "codex" | null;
   readonly startedAt = new Date().toISOString();
   private stopped = false;
@@ -148,8 +160,10 @@ export class Controller {
       minFreeMemoryMb: options.minFreeMemoryMb ?? 0,
       maxLoadPerCpu: options.maxLoadPerCpu ?? Number.POSITIVE_INFINITY,
       controllerId: options.controllerId ?? ids.launch(),
+      capacityFallback: options.capacityFallback ?? "allow",
     };
-    this.adapters = options.adapters ?? defaultAdapters();
+    this.capabilityRegistry = options.capabilityRegistry ?? DEFAULT_CAPABILITY_REGISTRY;
+    this.adapters = options.adapters ?? defaultAdapters(this.capabilityRegistry);
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
     this.preferredAdapter = options.defaultAdapter ?? null;
     if (!Number.isSafeInteger(this.options.workerLimit) || this.options.workerLimit < 1) throw new Error("Worker limit must be a positive integer");
@@ -270,11 +284,20 @@ export class Controller {
 
   private selectTaskRoute(task: Task, excludedAdapters = new Set<string>()): RouteSelection {
     const exclusions = new Set(excludedAdapters);
+    const excludedQuotaDomains = new Set<string>();
     if (task.failureClass !== null && isProviderUnavailable(task.failureClass)) {
       const failedAttempt = this.records.listAttempts(task.id).findLast((attempt) =>
         attempt.state === "failed" && attempt.failureClass !== null && isProviderUnavailable(attempt.failureClass),
       );
-      if (failedAttempt) exclusions.add(failedAttempt.adapter);
+      if (failedAttempt) {
+        exclusions.add(failedAttempt.adapter);
+        // Exhausted quota belongs to the account, not the model: every route
+        // in that domain is excluded, so a model switch cannot pretend to
+        // restore capacity.
+        if (failedAttempt.failureClass === "QUOTA") {
+          for (const domain of quotaDomainsFor(this.capabilityRegistry, failedAttempt.adapter)) excludedQuotaDomains.add(domain);
+        }
+      }
     }
     const active = new Map<string, number>();
     for (const attempt of this.records.listRunningAttempts()) {
@@ -311,7 +334,11 @@ export class Controller {
       providers,
       preferredAdapter: this.preferredAdapter,
       excludedAdapters: exclusions,
+      excludedQuotaDomains,
       availableTools,
+      capabilityRegistry: this.capabilityRegistry,
+      delegation: DISABLED_DELEGATION,
+      capacityFallback: this.options.capacityFallback,
     });
     const projectOverride = this.records.getProject(task.projectId)?.routingOverrides[task.taskClass];
     if (projectOverride) {
@@ -322,17 +349,36 @@ export class Controller {
       );
       if (eligibleOverride) {
         selection.chosen = eligibleOverride;
+        selection.quotaDomain = evaluateCapability(this.capabilityRegistry, {
+          provider: eligibleOverride.adapter, model: eligibleOverride.model, effort: eligibleOverride.effort,
+        }).evidence.quotaDomain;
         selection.reason += ` Project configuration selected verified ${task.taskClass} route ${eligibleOverride.adapter}:${eligibleOverride.model ?? "default"}.`;
       } else {
         selection.reason += ` Configured ${task.taskClass} route was not currently eligible; retained the eligible policy fallback.`;
       }
     }
-    if (selection.chosen?.adapter === this.options.defaultAdapter) {
-      selection.chosen = {
+    if (selection.chosen?.adapter === this.options.defaultAdapter && (this.options.defaultModel || this.options.defaultEffort)) {
+      const overridden: RouteCandidate = {
         ...selection.chosen,
         model: this.options.defaultModel ?? selection.chosen.model,
         effort: this.options.defaultEffort ?? selection.chosen.effort,
       };
+      // An operator override is still a request, not an entitlement: an
+      // unsupported effort or unknown model launches nothing.
+      const evaluation = evaluateCapability(this.capabilityRegistry, {
+        provider: overridden.adapter, model: overridden.model, effort: overridden.effort, delegation: DISABLED_DELEGATION,
+      });
+      selection.eligibility.push(evaluation.evidence);
+      if (!evaluation.evidence.eligible) {
+        selection.rejected.push({ candidate: overridden, reason: `capability ineligible: ${evaluation.evidence.reasons.join("; ")}` });
+        selection.chosen = null;
+        selection.quotaDomain = null;
+        selection.decision = "no_route";
+        selection.reason = `Operator route override rejected before launch: ${evaluation.evidence.reasons.join("; ")}.`;
+        return selection;
+      }
+      selection.chosen = overridden;
+      selection.quotaDomain = evaluation.evidence.quotaDomain;
     }
     if (selection.chosen && (this.preferredAdapter || this.options.defaultModel || this.options.defaultEffort)) {
       selection.reason += ` Operator override: adapter=${this.preferredAdapter ?? "policy"}, model=${this.options.defaultModel ?? "policy"}, effort=${this.options.defaultEffort ?? "policy"}.`;
@@ -1109,6 +1155,7 @@ export class Controller {
     const usage = collected.launch?.usage
       ? { ...collected.launch.usage, reported_model: collected.launch.reportedModel }
       : null;
+    this.recordLaunchObservations(task, attempt, collected.launch);
 
     if ((collected.failureClass && output?.outcome !== "failed") || !collected.validation.ok || !output) {
       const reason = collected.error ?? collected.validation.violations.map((item) => `${item.path}: ${item.message}`).join("; ");
@@ -1274,6 +1321,30 @@ export class Controller {
     const project = this.records.getProject(task.projectId);
     if (!project) throw new Error(`Unknown project ${task.projectId}`);
     await this.scheduleNextCheck(this.records.getTask(task.id) as Task, project);
+  }
+
+  /**
+   * Provider-reported settings and child-agent activity. Effort is never
+   * reported by either harness, so it remains unknown rather than inferred.
+   */
+  private recordLaunchObservations(task: Task, attempt: Attempt, launch: CollectedResult["launch"]): void {
+    if (!launch) return;
+    this.records.recordReportedSettings(attempt.id, { reportedModel: launch.reportedModel, reportedEffort: null });
+    const spawned = launch.delegation?.spawned ?? null;
+    if (spawned !== null && spawned > 0) {
+      this.records.recordEvent({
+        kind: "delegation.policy_violation",
+        projectId: task.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        data: {
+          spawned,
+          source: launch.delegation?.source ?? null,
+          policy: "disabled",
+          note: "Provider reported native child agents despite the disabled launch policy; their usage is not separately admitted.",
+        },
+      });
+    }
   }
 
   private async beginReview(task: Task, project: Project, implementationAttempt: Attempt, decision: ReviewDecision): Promise<void> {
@@ -1519,7 +1590,7 @@ export class Controller {
       evidence: latestAttempt?.outputPath ? [latestAttempt.outputPath] : [],
     });
     if (isProviderUnavailable(failure)) {
-      this.records.noteProviderFailure(failedAdapter, failure, reason, this.options.quotaCooldownMs);
+      this.noteProviderFailure(failedAdapter, failure, reason);
       const project = this.records.getProject(current.projectId);
       if (!project) throw new Error(`Unknown project ${current.projectId}`);
       const selection = this.selectReviewRoute(current, failedAdapter);
@@ -1570,7 +1641,7 @@ export class Controller {
       evidence: latestAttempt?.outputPath ? [latestAttempt.outputPath] : [],
     });
     if (isProviderUnavailable(failure)) {
-      this.records.noteProviderFailure(failedAdapter, failure, reason, this.options.quotaCooldownMs);
+      this.noteProviderFailure(failedAdapter, failure, reason);
       const project = this.records.getProject(current.projectId);
       if (!project) throw new Error(`Unknown project ${current.projectId}`);
       const selection = this.selectTaskRoute(current, new Set([failedAdapter]));
@@ -1611,6 +1682,29 @@ export class Controller {
         claimed_by: null,
         claimed_at: null,
       });
+    }
+  }
+
+  /**
+   * Cool down the failed provider and, for quota, every provider sharing its
+   * subscription quota domain: one exhausted account is exhausted for all of
+   * its models.
+   */
+  private noteProviderFailure(failedAdapter: string, failure: FailureClass, reason: string): void {
+    const affected = new Set([failedAdapter]);
+    if (failure === "QUOTA") {
+      const domains = new Set(quotaDomainsFor(this.capabilityRegistry, failedAdapter));
+      for (const provider of this.adapters.keys()) {
+        if (quotaDomainsFor(this.capabilityRegistry, provider).some((domain) => domains.has(domain))) affected.add(provider);
+      }
+    }
+    for (const provider of affected) {
+      this.records.noteProviderFailure(
+        provider,
+        failure,
+        provider === failedAdapter ? reason : `Shared quota domain exhausted by ${failedAdapter}: ${reason}`,
+        this.options.quotaCooldownMs,
+      );
     }
   }
 
@@ -1770,7 +1864,10 @@ export class Controller {
   }
 
   private providerBlockClass(selection: RouteSelection): FailureClass {
-    if (selection.rejected.some((item) => item.reason === "adapter is not installed" || item.reason.startsWith("required tools are unavailable"))) return "CONFIG";
+    if (selection.rejected.some((item) =>
+      item.reason === "adapter is not installed" ||
+      item.reason.startsWith("required tools are unavailable") ||
+      item.reason.startsWith("capability ineligible"))) return "CONFIG";
     const statuses = this.records.listProviderCapacity();
     return statuses.some((provider) => provider.state === "cooldown") ? "QUOTA" : "AUTH";
   }
@@ -1922,8 +2019,8 @@ export class Controller {
       stageRunId: stage.id,
       controllerId: this.options.controllerId,
       provider: adapter.name,
-      quotaDomain: adapter.authMode,
-      resources: ["model-worker", `provider:${adapter.name}`, `worktree:${task.id}`],
+      quotaDomain: selection.quotaDomain ?? adapter.authMode,
+      resources: ["model-worker", `provider:${adapter.name}`, `quota:${selection.quotaDomain ?? adapter.authMode}`, `worktree:${task.id}`],
     });
     this.records.activateAdmission(admission.id, admission.fencingToken);
     const attemptId = ids.attempt();
@@ -2015,6 +2112,15 @@ export class Controller {
       chosen: adapter.name,
       model: execution.model,
       effort: execution.effort,
+      capabilityRegistryVersion: selection.capabilityRegistryVersion,
+      configVersion: project.configVersion,
+      requestedSelection: selection.requested,
+      effectiveSelection: { adapter: adapter.name, model: execution.model, effort: execution.effort, delegation: DISABLED_DELEGATION.mode },
+      eligibilityEvidence: selection.eligibility,
+      fallbackReason: selection.fallbackReason,
+      escalationReason: selection.escalationReason,
+      quotaDomain: selection.quotaDomain,
+      decision: selection.decision,
     });
     if (this.preferredAdapter || this.options.defaultModel || this.options.defaultEffort) {
       this.records.recordEvent({
@@ -2035,6 +2141,8 @@ export class Controller {
         cwd: task.worktreePath,
         prompt: packet.prompt,
         model: execution.model,
+        effort: execution.effort,
+        delegation: DISABLED_DELEGATION,
         timeoutMs: this.options.workerTimeoutMs,
         evidencePath,
         completionPath,

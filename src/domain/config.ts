@@ -5,6 +5,7 @@ import { DEFAULT_REVIEW_POLICY, normalizeReviewPolicy, validateReviewPolicy } fr
 import type { ReviewPolicy } from "../review/policy.ts";
 import type { GateSpec, Project } from "../store/records.ts";
 import { DEFAULT_ROUTING_POLICY, TASK_CLASSES, type TaskClass } from "../routing/router.ts";
+import { DEFAULT_CAPABILITY_REGISTRY, evaluateCapability } from "../routing/capabilities.ts";
 import { evaluateProjectReadiness, PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES, unresolvedGovernance } from "./project-policy.ts";
 import type { ProjectGovernance } from "./project-policy.ts";
 
@@ -136,6 +137,10 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
         candidate.adapter === typed.adapter && candidate.model === typed.model && candidate.effort === typed.effort,
       );
       if (!verified) errors.push(`${taskClass}: route must exactly match a verified candidate in ${DEFAULT_ROUTING_POLICY.version}.`);
+      const eligibility = evaluateCapability(DEFAULT_CAPABILITY_REGISTRY, {
+        provider: typed.adapter, model: typed.model ?? null, effort: typed.effort ?? null,
+      }).evidence;
+      if (!eligibility.eligible) errors.push(`${taskClass}: route is ineligible in ${eligibility.registryVersion}: ${eligibility.reasons.join("; ")}.`);
     }
   }
 

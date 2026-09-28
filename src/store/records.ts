@@ -2077,6 +2077,19 @@ export class Records {
     this.store.run("UPDATE attempts SET pid = ?, session_id = ? WHERE id = ?", pid, sessionId, id);
   }
 
+  /**
+   * Record what the provider itself reported about the run. Absent values stay
+   * NULL: a requested setting is never copied in as if it had been observed.
+   */
+  recordReportedSettings(attemptId: string, reported: { reportedModel: string | null; reportedEffort: string | null }): void {
+    this.store.run(
+      "UPDATE attempts SET reported_model = COALESCE(?, reported_model), reported_effort = COALESCE(?, reported_effort) WHERE id = ?",
+      reported.reportedModel,
+      reported.reportedEffort,
+      attemptId,
+    );
+  }
+
   heartbeat(id: string): void {
     this.store.run("UPDATE attempts SET heartbeat_at = ? WHERE id = ?", nowIso(), id);
   }
@@ -2101,7 +2114,8 @@ export class Records {
       this.store.run(
         `UPDATE attempts SET state = ?, outcome = ?, failure_class = ?, reason = ?, exit_status = ?,
            result_revision = ?, usage_json = ?, output_path = COALESCE(?, output_path),
-           reported_model = ?, reported_effort = ?, usage_status = ?, last_progress_at = ?, ended_at = ?
+           reported_model = COALESCE(?, reported_model), reported_effort = COALESCE(?, reported_effort),
+           usage_status = ?, last_progress_at = ?, ended_at = ?
          WHERE id = ?`,
         input.state,
         input.outcome ?? null,
@@ -3414,26 +3428,65 @@ export class Records {
     chosen: string;
     model?: string | null;
     effort?: string | null;
+    capabilityRegistryVersion?: string | null;
+    configVersion?: string | null;
+    requestedSelection?: unknown;
+    effectiveSelection?: unknown;
+    eligibilityEvidence?: unknown;
+    fallbackReason?: string | null;
+    escalationReason?: string | null;
+    quotaDomain?: string | null;
+    decision?: string | null;
   }): void {
-    this.store.run(
-      "INSERT INTO routing_decisions(id, task_id, attempt_id, rule, reason, eligible, chosen, model, effort, at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-      ids.event(),
-      input.taskId,
-      input.attemptId ?? null,
-      input.rule,
-      input.reason,
-      toJson(input.eligible),
-      input.chosen,
-      input.model ?? null,
-      input.effort ?? null,
-      nowIso(),
-    );
+    const id = ids.event();
+    this.store.tx(() => {
+      this.store.run(
+        `INSERT INTO routing_decisions(id, task_id, attempt_id, rule, reason, eligible, chosen, model, effort, at,
+           capability_registry_version, config_version, requested_selection, effective_selection, eligibility_evidence,
+           fallback_reason, escalation_reason, quota_domain_id)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        id,
+        input.taskId,
+        input.attemptId ?? null,
+        input.rule,
+        input.reason,
+        toJson(input.eligible),
+        input.chosen,
+        input.model ?? null,
+        input.effort ?? null,
+        nowIso(),
+        input.capabilityRegistryVersion ?? null,
+        input.configVersion ?? null,
+        input.requestedSelection === undefined ? null : toJson(input.requestedSelection),
+        input.effectiveSelection === undefined ? null : toJson(input.effectiveSelection),
+        input.eligibilityEvidence === undefined ? null : toJson(input.eligibilityEvidence),
+        input.fallbackReason ?? null,
+        input.escalationReason ?? null,
+        input.quotaDomain ?? null,
+      );
+      if (input.decision && input.decision !== "primary" && input.decision !== "deterministic") {
+        this.recordEvent({
+          kind: "routing.decision",
+          taskId: input.taskId,
+          attemptId: input.attemptId ?? null,
+          data: {
+            decision: input.decision,
+            fallbackReason: input.fallbackReason ?? null,
+            escalationReason: input.escalationReason ?? null,
+            quotaDomain: input.quotaDomain ?? null,
+          },
+        });
+      }
+    });
   }
 
   routingForTask(taskId: string): Row[] {
     return this.store.all("SELECT * FROM routing_decisions WHERE task_id = ? ORDER BY at ASC", taskId).map((row) => ({
       ...row,
       eligible: fromJson<string[]>(row.eligible, []),
+      requested_selection: fromJson<unknown>(row.requested_selection, null),
+      effective_selection: fromJson<unknown>(row.effective_selection, null),
+      eligibility_evidence: fromJson<unknown>(row.eligibility_evidence, null),
     }));
   }
 

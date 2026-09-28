@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
 import { Controller, ControllerLeaseHeldError } from "./controller/controller.ts";
+import { defaultAdapters } from "./adapters/harness.ts";
+import { DEFAULT_CAPABILITY_REGISTRY } from "./routing/capabilities.ts";
+import { selectRoute } from "./routing/router.ts";
 import {
   analyzeProject,
   createProposal,
@@ -103,6 +106,12 @@ function textOption(args: ParsedArgs, name: string, fallback?: string): string |
   return typeof value === "string" ? value : fallback;
 }
 
+function capacityFallbackOption(value: string | undefined): "allow" | "wait" | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "allow" && value !== "wait") throw new Error("--capacity-fallback must be allow or wait");
+  return value;
+}
+
 function numberOption(args: ParsedArgs, name: string, fallback: number): number {
   const raw = textOption(args, name);
   const value = raw === undefined ? fallback : Number(raw);
@@ -125,6 +134,7 @@ function printHelp(): void {
 EVERYDAY
   status                                    Queue, controller liveness, and health
   controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
+      [--model=...] [--effort=low|medium|high] [--capacity-fallback=allow|wait]
   controller once [--adapter=codex]         Reconcile and dispatch one cycle
   task list [--project=id] [--state=READY]  What is queued, running, or blocked
   task show <id>                            One task with its evidence
@@ -192,6 +202,8 @@ MAINTENANCE
   maintenance prune [--only=artifacts|worktrees] [--apply]
                                                Preview or apply retention. Branches are never removed.
   provider list | provider reset <name>
+  routing capabilities                         Versioned model/effort/quota-domain registry (local only)
+  routing explain <task>                       Recorded route decisions plus a dry, launch-free selection
 
 OCCASIONAL — tuning and measurement
   curator analyze|snapshot|suggest <project>
@@ -1110,6 +1122,27 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(records.listProviderCapacity(), null, 2));
       return;
     }
+    if (area === "routing" && action === "capabilities") {
+      console.log(JSON.stringify(DEFAULT_CAPABILITY_REGISTRY, null, 2));
+      return;
+    }
+    if (area === "routing" && action === "explain") {
+      const task = rest[0] ? records.getTask(rest[0]) : null;
+      if (!task) throw new Error("Usage: mabs routing explain <task>");
+      const running = new Map<string, number>();
+      for (const attempt of records.listRunningAttempts()) running.set(attempt.adapter, (running.get(attempt.adapter) ?? 0) + 1);
+      const providers = records.listProviderCapacity().map((provider) => ({
+        provider: provider.provider,
+        available: provider.state === "available",
+        active: running.get(provider.provider) ?? 0,
+        limit: provider.maxConcurrency,
+        reason: provider.reason,
+      }));
+      // Pure selection: no claim, reservation, provider row, or process.
+      const dryRun = selectRoute({ task, adapters: defaultAdapters(), providers, capabilityRegistry: DEFAULT_CAPABILITY_REGISTRY });
+      console.log(JSON.stringify({ task: task.id, recorded: records.routingForTask(task.id), dryRun }, null, 2));
+      return;
+    }
     if (area === "provider" && action === "reset") {
       const provider = rest[0];
       if (!provider) throw new Error("Usage: mabs provider reset <name>");
@@ -1270,6 +1303,7 @@ async function main(): Promise<void> {
         defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
         defaultEffort: textOption(args, "effort") ?? null,
+        capacityFallback: capacityFallbackOption(textOption(args, "capacity-fallback")),
         workerLimit: numberOption(args, "workers", 2),
         activeProjectLimit: numberOption(args, "active-projects", 2),
         perProjectWorkerLimit: numberOption(args, "per-project-workers", numberOption(args, "workers", 2)),

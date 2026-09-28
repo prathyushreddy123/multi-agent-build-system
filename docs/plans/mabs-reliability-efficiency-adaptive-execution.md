@@ -1061,6 +1061,49 @@ by the fixture checks.
 
 **Acceptance:** fake executables capture exact argv/config; global settings remain untouched; unsupported effort and unknown new-model entitlement launch no inference; shared account quota is respected; baseline high settings can be deliberately overridden per attempt. No new model is activated merely by a catalog update.
 
+#### T07 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3`, not through a MABS worker. The MABS
+task `tsk_01M3FMXTWZ75QMD21XPY1CRFKN` was interrupted (controller and its Codex worker stopped) and its
+partial worktree edits were left unused. No live database migration or activation occurred.
+
+- Before T07, a route's `effort` was recorded on the attempt but never passed to either harness, so every
+  launch silently used the user's global provider setting. Launches now carry it per invocation only:
+  Codex `-c model_reasoning_effort="<effort>"`, Claude `--effort <effort>`. `~/.codex` and `~/.claude`
+  are never edited. `claudeArgs`/`codexArgs` in `src/verify/launch.ts` are pure argv builders.
+- `src/routing/capabilities.ts` (`mabs.capabilities.v2`) is a versioned registry of exact
+  provider/model entries with supported efforts (`low|medium|high`; `xhigh`/`max` deliberately absent),
+  auth modes, quota domain, entitlement, and delegation control. `evaluateCapability` fails closed: an
+  absent entry means entitlement is unknown and nothing launches. It runs in route selection, in operator
+  and project overrides, in `validateProjectConfig`, and again in `HarnessAdapter.start` before any spawn.
+- Native delegation is disabled on every launch: Codex `-c features.multi_agent=false` and
+  `features.multi_agent_v2=false`; Claude `--disallowedTools Agent Task`. Claude's `subagent_stats` is
+  recorded as observed child count; Codex reports none, so its count stays `null` ("unobservable"), never
+  zero. A reported child count above zero records `delegation.policy_violation`.
+- `RouteSelection.decision` distinguishes `primary`, `provider_fallback` (earlier route unavailable),
+  `capacity_fallback` (earlier route only busy), `capability_escalation` (class or deadline effort
+  escalation), `capacity_wait`, `no_route`, and `deterministic`. `fallbackReason` and `escalationReason`
+  are separate fields. `controller run --capacity-fallback=wait` keeps a busy preferred route instead of
+  moving to a free provider; the default `allow` preserves previous behavior but records the fallback.
+- Quota exhaustion excludes and cools down every route in the failed provider's quota domain.
+  Admission leases use the capability quota domain.
+- `routing_decisions` now stores registry version, config version, requested and effective selection,
+  eligibility evidence, fallback/escalation reason, and quota domain; non-primary decisions also emit
+  `routing.decision`. Attempts keep requested/configured/reported model and effort distinct; reported
+  effort stays `NULL` because neither harness reports it.
+- New read-only commands: `mabs routing capabilities` and `mabs routing explain <task>` (recorded
+  decisions plus a dry selection that claims, reserves, and launches nothing).
+- Evidence: `test/model-routing.test.ts` (RTE-01..06 with fake `claude`/`codex` executables on a
+  temporary PATH/HOME, controller integration). `test/phase2.test.ts` "mechanical tasks run registered
+  gates" now ticks until the asynchronous T06 check job settles; it previously relied on a 100 ms grace
+  window and failed under full-suite load.
+
+Known limits: `policyVersions.routing` stays `mabs.routing.v1` so existing project config fingerprints
+and approvals are not invalidated; the routing change is identified by the capability registry version
+instead. Claude routes keep `effort: null` (provider default, recorded as unknown) because changing
+their effort is a routing-policy change needing measured evidence. CLI versions are not yet captured
+per attempt.
+
 ### T08 — Complete-budget continuation context
 
 **Milestone:** M3. **Depends on:** T07. **Risk:** medium. **Mode:** sequential.

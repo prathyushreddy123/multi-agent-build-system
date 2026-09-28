@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { classifyFailure, classifyFromEnvelope } from "../core/failure.ts";
 import { validateWorkerOutput } from "../domain/contract.ts";
+import { DEFAULT_CAPABILITY_REGISTRY, DISABLED_DELEGATION, evaluateCapability, type CapabilityRegistry } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "../verify/env.ts";
 import type { LaunchResult } from "../verify/launch.ts";
 import type { AdapterHandle, AdapterLaunch, AdapterStatus, CollectedResult, WorkerAdapter } from "./types.ts";
@@ -37,20 +38,39 @@ function processAlive(pid: number): boolean {
 export class HarnessAdapter implements WorkerAdapter {
   readonly name: "claude" | "codex";
   readonly authMode: string;
+  readonly capabilityRegistry: CapabilityRegistry;
 
-  constructor(name: "claude" | "codex") {
+  constructor(name: "claude" | "codex", capabilityRegistry: CapabilityRegistry = DEFAULT_CAPABILITY_REGISTRY) {
     this.name = name;
     this.authMode = name === "claude" ? "claude.ai-subscription" : "chatgpt-subscription";
+    this.capabilityRegistry = capabilityRegistry;
   }
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
+    // Last line of defence: whatever path reached this adapter, an ineligible
+    // model, effort, or delegation setting never becomes a provider process.
+    const eligibility = evaluateCapability(this.capabilityRegistry, {
+      provider: this.name,
+      model: input.model,
+      effort: input.effort,
+      authMode: this.authMode,
+      delegation: input.delegation ?? DISABLED_DELEGATION,
+    });
+    if (!eligibility.evidence.eligible) {
+      throw new Error(`Launch rejected before provider start: ${eligibility.evidence.reasons.join("; ")}`);
+    }
     mkdirSync(dirname(input.completionPath), { recursive: true, mode: 0o700 });
     mkdirSync(join(input.cwd, ".mabs"), { recursive: true, mode: 0o700 });
     rmSync(input.completionPath, { force: true });
     rmSync(join(input.cwd, RESULT_FILE), { force: true });
 
     const specPath = join(dirname(input.completionPath), "launch.json");
-    writeFileSync(specPath, JSON.stringify({ harness: this.name, ...input }, null, 2), { mode: 0o600 });
+    writeFileSync(specPath, JSON.stringify({
+      harness: this.name,
+      ...input,
+      delegation: input.delegation ?? DISABLED_DELEGATION,
+      eligibility: eligibility.evidence,
+    }, null, 2), { mode: 0o600 });
     const { env } = buildWorkerEnv();
     assertNoPaidFallback(env);
     const child = spawn(process.execPath, [PROCESS_ENTRY, specPath], {
@@ -153,9 +173,9 @@ export class HarnessAdapter implements WorkerAdapter {
   }
 }
 
-export function defaultAdapters(): Map<string, WorkerAdapter> {
+export function defaultAdapters(capabilityRegistry: CapabilityRegistry = DEFAULT_CAPABILITY_REGISTRY): Map<string, WorkerAdapter> {
   return new Map<string, WorkerAdapter>([
-    ["claude", new HarnessAdapter("claude")],
-    ["codex", new HarnessAdapter("codex")],
+    ["claude", new HarnessAdapter("claude", capabilityRegistry)],
+    ["codex", new HarnessAdapter("codex", capabilityRegistry)],
   ]);
 }

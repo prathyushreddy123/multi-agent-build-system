@@ -87,6 +87,16 @@ function repoAt(path: string): void {
   git(path, "-c", "user.name=Test", "-c", "user.email=test@local", "commit", "-q", "-m", "initial");
 }
 
+/** Checks run as detached jobs, so a task may stay CHECKING across several ticks. */
+async function tickWhileChecking(controller: Controller, records: Records, taskId: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  await controller.tick();
+  while (records.getTask(taskId)?.state === "CHECKING" && Date.now() < deadline) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    await controller.tick();
+  }
+}
+
 function setup(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "mabs-phase2-"));
   const previousState = process.env.MABS_STATE_DIR;
@@ -269,7 +279,7 @@ test("mechanical tasks run registered gates without a model worker", async (t) =
   const controller = new Controller(records, {
     adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
   });
-  await controller.tick();
+  await tickWhileChecking(controller, records, task.id);
   assert.equal(records.getTask(task.id)?.state, "DONE");
   assert.equal(records.listAttempts(task.id).length, 0);
   assert.equal(codex.starts.length, 0);

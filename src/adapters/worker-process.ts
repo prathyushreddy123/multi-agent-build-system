@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
+import type { DelegationPolicy } from "../routing/capabilities.ts";
 import { launchClaude, launchCodex } from "../verify/launch.ts";
 
 interface ProcessSpec {
@@ -8,6 +9,8 @@ interface ProcessSpec {
   cwd: string;
   prompt: string;
   model: string | null;
+  effort?: string | null;
+  delegation?: DelegationPolicy;
   timeoutMs: number;
   evidencePath: string;
   completionPath: string;
@@ -24,6 +27,8 @@ async function main(): Promise<void> {
       cwd: spec.cwd,
       prompt: spec.prompt,
       model: spec.model ?? undefined,
+      effort: spec.effort ?? undefined,
+      delegation: spec.delegation,
       timeoutMs: spec.timeoutMs,
       evidencePath: spec.evidencePath,
     });

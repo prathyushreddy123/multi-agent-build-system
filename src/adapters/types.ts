@@ -1,5 +1,6 @@
 import type { FailureClass } from "../core/failure.ts";
 import type { ValidationResult } from "../domain/contract.ts";
+import type { DelegationPolicy } from "../routing/capabilities.ts";
 import type { LaunchResult } from "../verify/launch.ts";
 
 export type AdapterStatus = "running" | "completed" | "lost";
@@ -9,6 +10,9 @@ export interface AdapterLaunch {
   cwd: string;
   prompt: string;
   model: string | null;
+  /** Null leaves the provider's default in force; it is recorded as unknown, never as a value. */
+  effort: string | null;
+  delegation?: DelegationPolicy;
   timeoutMs: number;
   evidencePath: string;
   completionPath: string;
