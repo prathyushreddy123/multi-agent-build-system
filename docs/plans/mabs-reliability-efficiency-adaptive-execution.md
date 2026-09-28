@@ -1369,6 +1369,43 @@ yet to repository components.
 
 **Acceptance:** incomplete pairs cannot prove improvement; aggregate quality cannot hide a regressed case; lower latency cannot mask disallowed token regression; policy replay is not live evaluation; live runs require authorization and count failed trials; comparison cannot self-activate configuration.
 
+#### T13 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No experiment has
+been run live and no provider was called.
+
+- Protocol (`mabs.experiment-protocol.v1`): an experiment may declare a primary metric, per-metric
+  trade-off tolerances, fixed cases, repeats, a missing-data policy (`strict` | `known_subtotal`), and a
+  budget (`maxTrials`, `maxElapsedMs`, usage warning). Validation requires exactly one changed top-level
+  configuration dimension and a trial count within budget. Stored in the T02 columns (`primary_metric`,
+  `tolerances`, and `safeguards` holding cases/repeats/missing-data/budget).
+- Schema 17 rebuilds `optimization_measurements` so its unique key includes `repeat_index` (SQLite
+  cannot alter the old constraint), adding `trial_state` (`completed` | `failed` | `interrupted`),
+  `source` (`manual` | `live_trial` | `policy_replay`), and `task_id`. Existing rows are copied
+  unchanged.
+- `compareExperiment` pairs by case and repeat. Missing pairs make the result `incomplete`, which never
+  supports a proposal. Quality is judged per case, so one regressed case fails the safeguards even when
+  the aggregate is equal. Only the primary metric can make a result `improved`, and every other metric
+  must stay within its tolerance. A primary usage metric with missing usage cannot show savings, and
+  unverifiable trade-offs block `improved` under `strict`. Failed and interrupted trials are retained
+  and count as unaccepted. Replay-only evidence cannot show improvement. Experiments without a protocol
+  keep their previous rules but now also have default trade-off tolerances.
+- `mabs optimization prepare-run <experiment> --dry-run` writes a deterministic, counterbalanced trial
+  manifest with its budget and per-variant model eligibility (T07 registry), with zero provider calls,
+  and returns a fingerprint. `optimization authorize --fingerprint --by` binds live execution to that
+  exact manifest and refuses ineligible variants. `optimization record-trial` records a trial from a
+  task that ran through normal governance and admission; it requires authorization and records every
+  outcome (a FAILED task becomes a failed, unaccepted trial).
+- Results expose `supportsProposal`; completing an experiment never creates, approves, or activates a
+  proposal.
+- Evidence: `test/optimizer-experiments.test.ts` (EVAL-01..05 plus protocol, authorization,
+  eligibility, and replay cases) using `fixtures/optimization/`.
+
+Known limits: the controller cannot yet apply a variant's configuration to an individual trial task
+automatically; an operator runs each variant's tasks under the matching project configuration and
+records them with `record-trial`. No significance statistics are computed; repeats and per-case
+results are reported instead, as the plan requires.
+
 ### T14 — Native operator views and optional export
 
 **Milestone:** M5. **Depends on:** T13. **Risk:** medium. **Mode:** sequential.

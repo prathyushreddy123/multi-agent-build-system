@@ -1,0 +1,19 @@
+{
+  "description": "Primary metric is input tokens but one candidate trial has no reported usage; savings cannot be shown.",
+  "protocol": {
+    "primaryMetric": "reportedInputTokens",
+    "tolerances": {},
+    "cases": ["case-a"],
+    "repeats": 2,
+    "missingData": "strict",
+    "budget": { "maxTrials": 4, "maxElapsedMs": 3600000, "usageWarningInputTokens": null }
+  },
+  "baselineConfig": { "model": "claude-opus-5" },
+  "candidateConfig": { "model": "claude-sonnet-5" },
+  "measurements": [
+    { "variant": "baseline", "caseKey": "case-a", "repeatIndex": 0, "accepted": true, "reportedInputTokens": 5000 },
+    { "variant": "candidate", "caseKey": "case-a", "repeatIndex": 0, "accepted": true, "reportedInputTokens": 3000 },
+    { "variant": "baseline", "caseKey": "case-a", "repeatIndex": 1, "accepted": true, "reportedInputTokens": 5000 },
+    { "variant": "candidate", "caseKey": "case-a", "repeatIndex": 1, "accepted": true, "reportedInputTokens": null }
+  ]
+}

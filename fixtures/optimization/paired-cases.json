@@ -1,0 +1,23 @@
+{
+  "description": "Two fixed cases, two repeats, complete pairs; candidate lowers repairs with tokens inside tolerance.",
+  "protocol": {
+    "primaryMetric": "repairs",
+    "tolerances": { "reportedInputTokens": 0.1, "durationMs": 0.25 },
+    "cases": ["case-a", "case-b"],
+    "repeats": 2,
+    "missingData": "strict",
+    "budget": { "maxTrials": 8, "maxElapsedMs": 7200000, "usageWarningInputTokens": null }
+  },
+  "baselineConfig": { "effort": "high" },
+  "candidateConfig": { "effort": "medium" },
+  "measurements": [
+    { "variant": "baseline", "caseKey": "case-a", "repeatIndex": 0, "accepted": true, "repairs": 1, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "candidate", "caseKey": "case-a", "repeatIndex": 0, "accepted": true, "repairs": 0, "durationMs": 1100, "reportedInputTokens": 1050, "reportedOutputTokens": 100 },
+    { "variant": "baseline", "caseKey": "case-a", "repeatIndex": 1, "accepted": true, "repairs": 1, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "candidate", "caseKey": "case-a", "repeatIndex": 1, "accepted": true, "repairs": 0, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "baseline", "caseKey": "case-b", "repeatIndex": 0, "accepted": true, "repairs": 0, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "candidate", "caseKey": "case-b", "repeatIndex": 0, "accepted": true, "repairs": 0, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "baseline", "caseKey": "case-b", "repeatIndex": 1, "accepted": true, "repairs": 0, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 },
+    { "variant": "candidate", "caseKey": "case-b", "repeatIndex": 1, "accepted": true, "repairs": 0, "durationMs": 1000, "reportedInputTokens": 1000, "reportedOutputTokens": 100 }
+  ]
+}

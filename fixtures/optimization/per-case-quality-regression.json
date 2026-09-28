@@ -1,0 +1,19 @@
+{
+  "description": "Equal aggregate acceptance: case-a regresses while case-b improves. Per-case safeguards must fail.",
+  "protocol": {
+    "primaryMetric": "repairs",
+    "tolerances": {},
+    "cases": ["case-a", "case-b"],
+    "repeats": 1,
+    "missingData": "strict",
+    "budget": { "maxTrials": 4, "maxElapsedMs": 3600000, "usageWarningInputTokens": null }
+  },
+  "baselineConfig": { "packetStrategy": "v1" },
+  "candidateConfig": { "packetStrategy": "v2" },
+  "measurements": [
+    { "variant": "baseline", "caseKey": "case-a", "repeatIndex": 0, "accepted": true, "repairs": 2 },
+    { "variant": "candidate", "caseKey": "case-a", "repeatIndex": 0, "accepted": false, "repairs": 0 },
+    { "variant": "baseline", "caseKey": "case-b", "repeatIndex": 0, "accepted": false, "repairs": 2 },
+    { "variant": "candidate", "caseKey": "case-b", "repeatIndex": 0, "accepted": true, "repairs": 0 }
+  ]
+}

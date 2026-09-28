@@ -63,11 +63,15 @@ import { getOperationsConfig, operationsStatus, prepareOperation, prepareOperati
 import type { Capability, OperationsConfig } from "./operations/types.ts";
 import { resolveApplicationProfiles } from "./profiles/index.ts";
 import {
+  authorizeRun,
   completeExperiment,
   createExperiment,
   experimentDetail,
   listExperiments,
+  prepareRun,
   recordMeasurement,
+  recordTrialFromTask,
+  type ExperimentProtocol,
   type ExperimentVariant,
 } from "./optimization/experiments.ts";
 import { routingOutcomes } from "./optimization/routing.ts";
@@ -234,6 +238,9 @@ OCCASIONAL — tuning and measurement
   optimization create <project|global> <definition.json>
   optimization list [project] | optimization show|complete <experiment>
   optimization record <experiment> <baseline|candidate> <case> <measurement.json>
+  optimization prepare-run <experiment> --dry-run   Trial manifest and budget; zero provider calls
+  optimization authorize <experiment> --fingerprint=... --by=<person>
+  optimization record-trial <experiment> <variant> <case> <task> [--repeat=N]
   optimization routing [project]
   ops status <project>                          Effective disabled/manual operational capabilities
   ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval]
@@ -1346,12 +1353,14 @@ async function main(): Promise<void> {
       const definition = JSON.parse(readFileSync(resolve(definitionPath), "utf8")) as {
         name: string; hypothesis: string; dimension: string; suiteVersion: string;
         baselineConfig?: Record<string, unknown>; candidateConfig?: Record<string, unknown>;
+        protocol?: ExperimentProtocol;
       };
       console.log(JSON.stringify(createExperiment(records, {
         projectId: project?.id ?? null,
         name: definition.name, hypothesis: definition.hypothesis, dimension: definition.dimension,
         suiteVersion: definition.suiteVersion, baselineConfig: definition.baselineConfig ?? {},
         candidateConfig: definition.candidateConfig ?? {},
+        protocol: definition.protocol,
       }), null, 2));
       return;
     }
@@ -1370,6 +1379,33 @@ async function main(): Promise<void> {
         reportedOutputTokens: data.reportedOutputTokens === null || data.reportedOutputTokens === undefined ? null : Number(data.reportedOutputTokens),
         relevantFiles: Number(data.relevantFiles ?? 0), warnings: Number(data.warnings ?? 0),
         evidencePath: typeof data.evidencePath === "string" ? data.evidencePath : null,
+      }), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "prepare-run") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      if (!id || !args.options.has("dry-run")) throw new Error("Usage: mabs optimization prepare-run <experiment> --dry-run");
+      console.log(JSON.stringify(prepareRun(records, id), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "authorize") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const fingerprint = textOption(args, "fingerprint");
+      const by = textOption(args, "by");
+      if (!id || !fingerprint || !by) throw new Error("Usage: mabs optimization authorize <experiment> --fingerprint=<from prepare-run> --by=<person>");
+      console.log(JSON.stringify(authorizeRun(records, id, { fingerprint, authorizedBy: by }), null, 2));
+      return;
+    }
+    if (area === "optimization" && action === "record-trial") {
+      const args = parseArgs(rest);
+      const [id, variant, caseKey, taskId] = args.positionals;
+      if (!id || !variant || !caseKey || !taskId || !["baseline", "candidate"].includes(variant)) {
+        throw new Error("Usage: mabs optimization record-trial <experiment> <baseline|candidate> <case> <task> [--repeat=0]");
+      }
+      console.log(JSON.stringify(recordTrialFromTask(records, {
+        experimentId: id, variant: variant as ExperimentVariant, caseKey, repeatIndex: numberOption(args, "repeat", 0), taskId,
       }), null, 2));
       return;
     }

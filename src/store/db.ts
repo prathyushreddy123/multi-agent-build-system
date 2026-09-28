@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "16";
+export const SCHEMA_VERSION = "17";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -117,6 +117,13 @@ const MIGRATIONS: Migration[] = [
         resources: "TEXT NOT NULL DEFAULT '[]'",
       },
     },
+    indexes: [],
+  },
+  {
+    version: 17,
+    // Rebuilds optimization_measurements with the repeat index in its key.
+    file: "migrations/017_experiment_trials.sql",
+    columns: {},
     indexes: [],
   },
 ];
