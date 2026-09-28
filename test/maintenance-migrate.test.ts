@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,7 +8,10 @@ import test, { type TestContext } from "node:test";
 
 import { migrateDatabase } from "../src/maintenance/migrate.ts";
 import { SCHEMA_VERSION, SchemaMigrationRequiredError, Store, createLegacyBaselineDatabase } from "../src/store/db.ts";
-import { openRecords } from "../src/store/records.ts";
+import { openRecords, Records } from "../src/store/records.ts";
+import { Controller } from "../src/controller/controller.ts";
+import { acquireMaintenanceLock, MaintenanceInProgressError } from "../src/maintenance/lock.ts";
+import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 const CLI = join(import.meta.dirname, "..", "src", "cli.ts");
 
@@ -87,4 +90,78 @@ test("the library Store still upgrades by default, for tests and rehearsals", (t
   const { path } = legacy(t);
   new Store(path).close();
   assert.equal(schemaOf(path), SCHEMA_VERSION);
+});
+
+function seedTask(path: string, state: string): void {
+  const db = new DatabaseSync(path);
+  const now = new Date().toISOString();
+  db.prepare("INSERT INTO projects(id, name, repo_path, config_version, created_at, updated_at) VALUES('prj_1', 'p', '/r', 'cfg_1', ?, ?)").run(now, now);
+  db.prepare("INSERT INTO tasks(id, project_id, title, objective, state, created_at, updated_at) VALUES('tsk_1', 'prj_1', 't', 'o', ?, ?, ?)").run(state, now, now);
+  db.close();
+}
+
+test("maintenance migrate refuses while durable work is not drained, even with no controller alive", async (t) => {
+  const { root, path } = legacy(t);
+  seedTask(path, "RUNNING");
+  await assert.rejects(migrateDatabase({ path, backupDirectory: join(root, "backups") }), /not drained.*task tsk_1 is RUNNING/);
+  assert.equal(schemaOf(path), "14", "the undrained source is unchanged");
+  assert.equal(existsSync(`${path}.maintenance.lock`), false, "the lock is released on refusal");
+});
+
+test("maintenance migrate rehearses restoring and upgrading its backup before touching the source", async (t) => {
+  const { root, path } = legacy(t);
+  seedTask(path, "DONE");
+  const report = await migrateDatabase({ path, backupDirectory: join(root, "backups") });
+  assert.equal(report.migrated, true);
+  assert.equal(report.layout, "stamped");
+  assert.equal(report.restoreRehearsal?.upgradedSchema, SCHEMA_VERSION);
+  assert.equal(report.restoreRehearsal?.integrity, "ok");
+  assert.equal(report.restoreRehearsal?.rowsPreserved, true);
+  assert.match(report.restoreRehearsal?.auditDigest ?? "", /^[0-9a-f]{64}$|^sha256:/);
+  assert.equal(existsSync(report.restoreRehearsal?.restoredPath as string), false, "the disposable restore is removed");
+  assert.equal(schemaOf(report.backupPath as string), "14", "the rehearsal never touched the backup itself");
+});
+
+test("an unstamped pre-baseline MABS database migrates; an unknown layout is backed up and refused with a specific error", async (t) => {
+  const { root, path } = legacy(t);
+  const stripped = new DatabaseSync(path);
+  stripped.exec("DROP TABLE schema_meta; DROP TABLE controller_lease;");
+  stripped.close();
+  const report = await migrateDatabase({ path, backupDirectory: join(root, "backups") });
+  assert.equal(report.layout, "legacy-mabs");
+  assert.equal(report.fromSchema, null);
+  assert.equal(schemaOf(path), SCHEMA_VERSION);
+
+  const foreign = join(root, "foreign.sqlite");
+  const db = new DatabaseSync(foreign);
+  db.exec("CREATE TABLE legacy_data(id INTEGER PRIMARY KEY, value TEXT); INSERT INTO legacy_data(value) VALUES('x');");
+  db.close();
+  await assert.rejects(migrateDatabase({ path: foreign, backupDirectory: join(root, "backups") }),
+    /no schema stamp and none of the MABS tables.*legacy_data.*backed up to .*left unchanged/s);
+  const after = new DatabaseSync(foreign, { readOnly: true });
+  const tables = (after.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name);
+  after.close();
+  assert.deepEqual(tables, ["legacy_data"], "no MABS schema was written into a foreign database");
+});
+
+test("the maintenance lock excludes a second migration and a starting controller", async (t) => {
+  const { root, path } = legacy(t);
+  const release = acquireMaintenanceLock(path, "test");
+  t.after(release);
+  await assert.rejects(migrateDatabase({ path, backupDirectory: join(root, "backups") }), MaintenanceInProgressError);
+  const records = new Records(new Store(join(root, "current.sqlite")));
+  t.after(() => records.store.close());
+  const currentRelease = acquireMaintenanceLock(records.store.path, "test");
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY, workerLimit: 1, adapters: new Map() });
+  await assert.rejects(controller.tick(), MaintenanceInProgressError);
+  assert.ok(!records.currentControllerLease(), "the controller took no lease while maintenance held the database");
+  currentRelease();
+  await controller.tick();
+  assert.ok(records.currentControllerLease(), "after release the controller runs normally");
+  await controller.stop();
+
+  // A lock left by a process that no longer exists is reclaimed, not obeyed.
+  const stalePath = join(root, "stale.sqlite");
+  writeFileSync(`${stalePath}.maintenance.lock`, JSON.stringify({ pid: 2 ** 22, startTicks: "1", bootId: null, operation: "crashed", startedAt: "then" }));
+  acquireMaintenanceLock(stalePath, "reclaim")();
 });

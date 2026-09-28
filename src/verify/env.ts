@@ -4,7 +4,8 @@
  * The plan forbids paid API, extra-credit, and automatic upgrade fallback. A
  * subscription-authenticated harness silently switches to billed API access
  * when a key is present in its environment, so the controller removes those
- * variables instead of trusting that they are unset.
+ * variables instead of trusting that they are unset. Variables that override
+ * the requested model are stripped for the same reason.
  */
 export const FORBIDDEN_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
@@ -19,6 +20,14 @@ export const FORBIDDEN_ENV_KEYS = [
   "OPENAI_BASE_URL",
   "OPENAI_ORGANIZATION",
   "AZURE_OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  // Model overrides: an attempt runs only the model its argv names.
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
 ] as const;
 
 export interface WorkerEnvResult {

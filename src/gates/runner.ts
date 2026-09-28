@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "../core/exec.ts";
 import { diagnoseFailure, type FailureDiagnosis } from "../core/failure.ts";
 import { artifactDir } from "../core/paths.ts";
+import { verifyProcess } from "../core/process-identity.ts";
 import type { GateResult, GateSpec, Records, Task } from "../store/records.ts";
 import type { GateJobSpec } from "./job-process.ts";
 
@@ -49,15 +50,6 @@ export interface GateJobCompletion {
     durationMs: number;
   };
   toolVersion: string | null;
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 export function gateJobHandle(taskId: string, stageRunId: string): GateJobHandle {
@@ -116,9 +108,15 @@ export function gateJobStatus(handle: GateJobHandle): "running" | "completed" | 
   if (existsSync(handle.completionPath)) return "completed";
   if (!existsSync(handle.markerPath)) return existsSync(handle.specPath) ? "unknown" : "lost";
   try {
-    const marker = JSON.parse(readFileSync(handle.markerPath, "utf8")) as { jobId?: unknown; pid?: unknown };
+    const marker = JSON.parse(readFileSync(handle.markerPath, "utf8")) as { jobId?: unknown; pid?: unknown; startTicks?: unknown; bootId?: unknown };
     if (marker.jobId !== handle.jobId || !Number.isSafeInteger(marker.pid)) return "unknown";
-    return processAlive(Number(marker.pid)) ? "running" : "lost";
+    // A reused PID is a different process: the job is lost, not still running.
+    const verdict = verifyProcess(Number(marker.pid), {
+      argument: handle.specPath,
+      startTicks: typeof marker.startTicks === "string" ? marker.startTicks : null,
+      bootId: typeof marker.bootId === "string" ? marker.bootId : null,
+    });
+    return verdict === "alive" ? "running" : verdict === "gone" ? "lost" : "unknown";
   } catch {
     return "unknown";
   }

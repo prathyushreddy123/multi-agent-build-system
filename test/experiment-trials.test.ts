@@ -11,6 +11,7 @@ import { validateWorkerOutput } from "../src/domain/contract.ts";
 import {
   authorizeRun,
   compareExperiment,
+  completeExperiment,
   createExperiment,
   experimentBudgetState,
   prepareRun,
@@ -195,4 +196,65 @@ test("changing a fingerprinted input after authorization stops further trials", 
   records.store.run("UPDATE projects SET check_commands = ? WHERE id = ?", JSON.stringify([{ name: "new", required: true, command: ["true"] }]), project.id);
   assert.throws(() => startTrial(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0 }),
     /manifest changed after authorization/);
+});
+
+test("a trial task created before its elapsed deadline launches nothing once the deadline passes", async (t) => {
+  const { records, experiment, adapter, controller } = setup(t, { budget: { maxElapsedMs: 60_000 } });
+  const { task } = startTrial(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0 });
+  // Authorized two minutes ago: the task exists, but the run is past its budget before any launch.
+  const earlier = new Date(Date.now() - 120_000).toISOString();
+  records.store.run("UPDATE optimization_experiments SET run_authorization = json_set(run_authorization, '$.at', ?) WHERE id = ?", earlier, experiment.id);
+  await runToRest(controller, records, task.id);
+  assert.equal(adapter.starts.length, 0, "no provider attempt launched after the deadline");
+  const current = records.getTask(task.id);
+  assert.equal(current?.state, "BLOCKED");
+  assert.match(current?.blockedReason ?? "", /elapsed budget is spent/);
+});
+
+test("a manifest change after a trial task was created stops its next launch", async (t) => {
+  const { records, project, experiment, adapter, controller } = setup(t);
+  const { task } = startTrial(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0 });
+  records.store.run("UPDATE projects SET check_commands = ? WHERE id = ?", JSON.stringify([{ name: "new", required: true, command: ["true"] }]), project.id);
+  await runToRest(controller, records, task.id);
+  assert.equal(adapter.starts.length, 0);
+  assert.match(records.getTask(task.id)?.blockedReason ?? "", /manifest changed after authorization/);
+});
+
+test("EVAL-05: controller-run live trials that improve the primary metric support a proposal, and completion activates nothing", async (t) => {
+  // The first attempt ever made fails the check, so the baseline (which runs
+  // first) needs one repair and the candidate none.
+  const firstFails: GateSpec = { name: "unit", required: true, command: [process.execPath, "-e",
+    "if(require('fs').readFileSync('value.txt','utf8')==='changed 1\\n'){console.error('AssertionError [ERR_ASSERTION]: first attempt');process.exit(1)}"] };
+  const { records, project, experiment, controller } = setup(t, { checks: [firstFails] });
+  const before = records.getProject(project.id)?.configVersion;
+  for (const variant of ["baseline", "candidate"] as const) {
+    const { task } = startTrial(records, { experimentId: experiment.id, variant, caseKey: "case-a", repeatIndex: 0 });
+    await runToRest(controller, records, task.id);
+    assert.equal(records.getTask(task.id)?.state, "DONE", records.getTask(task.id)?.blockedReason ?? "");
+    recordTrialFromTask(records, { experimentId: experiment.id, variant, caseKey: "case-a", repeatIndex: 0, taskId: task.id });
+  }
+  const { comparison } = completeExperiment(records, experiment.id);
+  assert.deepEqual(comparison.sources, ["live_trial"]);
+  assert.equal(comparison.result, "improved", comparison.reasons.join(" "));
+  assert.equal(comparison.supportsProposal, true);
+  assert.equal(records.getProject(project.id)?.configVersion, before, "configuration is unchanged");
+  assert.equal(records.listCuratorProposals(project.id).length, 0, "no proposal was created or activated");
+});
+
+test("a provider CLI upgrade between trials stops the run instead of confounding the comparison", async (t) => {
+  const bin = mkdtempSync(join(tmpdir(), "mabs-cli-drift-"));
+  const fake = join(bin, "codex");
+  const previousPath = process.env.PATH;
+  // Installed before setup, so the authorized manifest records this version.
+  writeFileSync(fake, "#!/bin/sh\necho codex-cli 1.0.0\n", { mode: 0o755 });
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(bin, { recursive: true, force: true }); });
+  const { records, experiment, controller } = setup(t);
+  const baseline = startTrial(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0 });
+  await runToRest(controller, records, baseline.task.id);
+  assert.equal(prepareRun(records, experiment.id).manifest.runtime.cli.codex, "codex-cli 1.0.0");
+
+  writeFileSync(fake, "#!/bin/sh\necho codex-cli 2.0.0 upgraded\n", { mode: 0o755 });
+  assert.throws(() => startTrial(records, { experimentId: experiment.id, variant: "candidate", caseKey: "case-a", repeatIndex: 0 }),
+    /manifest changed after authorization.*CLI/);
 });

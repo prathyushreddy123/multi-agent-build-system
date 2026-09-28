@@ -11,6 +11,7 @@ import { exec, type ExecResult } from "../core/exec.ts";
 import { LiveLog, ProgressWriter, ProviderStreamParser, type StreamProgress } from "../telemetry/stream.ts";
 import { CODEX_MODEL, DISABLED_DELEGATION, type DelegationPolicy } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "./env.ts";
+import { requireSubscriptionProvenance, type ProviderProvenance } from "./provenance.ts";
 
 // --------------------------------------------------------------------------
 // harness launchers (Phase 0 only; Phase 1 extracts these into adapters)
@@ -65,6 +66,8 @@ export interface LaunchResult {
   stderr: string;
   applied?: AppliedLaunchSettings;
   delegation?: ObservedDelegation;
+  /** The subscription login the launch was verified against before it started. */
+  provenance?: ProviderProvenance;
   /** Live-stream accounting, including any output that was not retained. */
   telemetry?: StreamProgress & { stdoutTruncated: boolean; stderrTruncated: boolean };
 }
@@ -72,6 +75,7 @@ export interface LaunchResult {
 const CLAUDE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 *)", "Bash(git *)", "Bash(mkdir *)"];
 /** Claude's native child-agent tool, under its current and legacy names. */
 const CLAUDE_DELEGATION_TOOLS = ["Agent", "Task"];
+const CLAUDE_EMPTY_MCP = JSON.stringify({ mcpServers: {} });
 
 function requireDisabledDelegation(policy: DelegationPolicy | undefined): void {
   if ((policy ?? DISABLED_DELEGATION).mode !== "disabled") {
@@ -135,6 +139,15 @@ export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "ef
     ...CLAUDE_TOOLS,
     "--disallowedTools",
     ...CLAUDE_DELEGATION_TOOLS,
+    // Ignore user, project, and local settings files: their hooks, plugins,
+    // apiKeyHelper, env, and model defaults never shape an attempt. Only
+    // admin-managed settings still apply, and provenance refuses those that
+    // could change the credential or model.
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    CLAUDE_EMPTY_MCP,
   ];
   const route = requireExplicitRoute(options);
   args.push("--model", route.model, "--effort", route.effort);
@@ -158,11 +171,42 @@ export function codexArgs(options: Pick<LaunchOptions, "cwd" | "prompt" | "model
     "features.multi_agent=false",
     "-c",
     "features.multi_agent_v2=false",
+    // $CODEX_HOME/config.toml (providers, profiles, MCP servers, defaults) is
+    // never loaded; auth still comes from CODEX_HOME. The built-in provider
+    // and ChatGPT login are then pinned explicitly.
+    "--ignore-user-config",
+    "-c",
+    'model_provider="openai"',
+    "-c",
+    'forced_login_method="chatgpt"',
+    "-c",
+    "mcp_servers={}",
   ];
   const route = requireExplicitRoute(options);
   args.push("-m", route.model, "-c", `model_reasoning_effort="${route.effort}"`);
   args.push(options.prompt);
   return args;
+}
+
+/**
+ * Every flag and feature the launch argv depends on. `mabs verify` checks the
+ * installed CLIs expose them, so a CLI upgrade that drops one fails loudly
+ * instead of silently loading configuration again.
+ */
+export const REQUIRED_CLI_SURFACE = {
+  claude: ["--setting-sources", "--strict-mcp-config", "--mcp-config", "--disallowedTools", "--allowedTools", "--effort", "--model", "--permission-mode"],
+  codexExec: ["--ignore-user-config", "--json", "--sandbox", "--config", "--model"],
+  codexFeatures: ["multi_agent", "multi_agent_v2"],
+} as const;
+
+/** Required flags or features absent from the installed CLIs' own help and feature list. */
+export function missingCliSurface(help: { claude: string; codexExec: string; codexFeatures: string }): string[] {
+  const has = (text: string, flag: string) => new RegExp(`(^|[\\s,])${flag.replace(/[-]/g, "\\-")}(?=[\\s,=<]|$)`, "m").test(text);
+  return [
+    ...REQUIRED_CLI_SURFACE.claude.filter((flag) => !has(help.claude, flag)).map((flag) => `claude ${flag}`),
+    ...REQUIRED_CLI_SURFACE.codexExec.filter((flag) => !has(help.codexExec, flag)).map((flag) => `codex exec ${flag}`),
+    ...REQUIRED_CLI_SURFACE.codexFeatures.filter((name) => !new RegExp(`^${name}\\s`, "m").test(help.codexFeatures)).map((name) => `codex feature ${name}`),
+  ];
 }
 
 /** Redact the prompt so evidence records the command shape without duplicating the packet. */
@@ -210,6 +254,7 @@ async function runStreaming(
 export async function launchClaude(options: LaunchOptions): Promise<LaunchResult> {
   const { env, removed } = buildWorkerEnv();
   assertNoPaidFallback(env);
+  const provenance = await requireSubscriptionProvenance("claude", env);
   const args = claudeArgs(options);
   const { result, parser, telemetry } = await runStreaming("claude", args, options, env, removed);
 
@@ -256,6 +301,7 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
     raw: envelopeText,
     stderr: result.stderr,
     applied: applied(options),
+    provenance,
     delegation: { spawned, source: spawned === null ? "unobservable" : "claude.subagent_stats" },
     telemetry,
   };
@@ -264,6 +310,7 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
 export async function launchCodex(options: LaunchOptions): Promise<LaunchResult> {
   const { env, removed } = buildWorkerEnv();
   assertNoPaidFallback(env);
+  const provenance = await requireSubscriptionProvenance("codex", env);
   const lastMessagePath = `${options.evidencePath}.last.txt`;
   const args = codexArgs(options, lastMessagePath);
   const { result, parser, telemetry } = await runStreaming("codex", args, options, env, removed);
@@ -284,6 +331,7 @@ export async function launchCodex(options: LaunchOptions): Promise<LaunchResult>
     raw: result.stdout,
     stderr: result.stderr,
     applied: applied(options),
+    provenance,
     // Multi-agent is switched off on the command line, but exec reports no
     // child count, so zero is enforced rather than observed.
     delegation: { spawned: null, source: "unobservable" },

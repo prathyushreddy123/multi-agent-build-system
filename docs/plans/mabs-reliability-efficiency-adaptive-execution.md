@@ -1124,6 +1124,11 @@ setting named. Now:
   configured fallback) fails as `CONFIG`. A small helper model beside the requested one does not.
 - Verification probes (`verify`, baseline) launch fixed explicit routes too.
 
+*Corrected after the second review (finding 1):* explicit `--model`/`--effort` did not stop the CLIs
+from loading `~/.claude` settings or `~/.codex/config.toml`, so a configured provider, key helper,
+fallback, hook, or MCP server still applied, and a fallback was caught only after inference. See
+"Second review remediation" under T15.
+
 ### T08 — Complete-budget continuation context
 
 **Milestone:** M3. **Depends on:** T07. **Risk:** medium. **Mode:** sequential.
@@ -1349,6 +1354,8 @@ level.
   follows the attempt's `stage_run_id` as well as the stage's `attempt_id`. `task retry` is refused
   while any attempt is unresolved. Tests: the three `REC-06` cases in `test/model-routing.test.ts`,
   including a real wrapper process adopted after a simulated crash.
+  *Corrected after the second review (finding 2):* recovery trusted any live process under the
+  recorded PID; a reused PID could be adopted or signalled. Identity is now verified (T15 section).
 
 ### T12 — Incidents and curator learning
 
@@ -1473,6 +1480,9 @@ reported instead, as the plan requires.
   usage warning or the attempt cap, carries a warning and an `optimization.budget_warning` event.
   `compareExperiment` reports `budgetBreaches` and withholds `supportsProposal` whenever there is
   any. `mabs optimization budget <experiment>` shows consumption.
+  *Corrected after the second review (findings 3, 4, 7):* `maxElapsedMs` was enforced only when a
+  trial task was created, manual measurements could support a proposal, and the manifest omitted the
+  runtime. See the T15 section.
 - Tests: `test/experiment-trials.test.ts` (controller-driven trials, slot/project/bypass refusals,
   attempt cap, elapsed budget, fingerprint drift) and the schema-17 replay test in
   `test/schema-migrations.test.ts`.
@@ -1545,10 +1555,10 @@ activated: no live migration, engine switch, exporter, or concurrency change.
 | --- | --- |
 | `npm run typecheck` | pass |
 | `npm run typecheck:extensions` (Pi linked with `npm run link-pi`) | pass |
-| `npm test` (fake adapters, disposable state) | pass |
+| `npm test` (fake adapters, disposable state) | claimed pass; the second review's clean run found 372/373 (soak seed 7 left one task QUEUED). After the second remediation: 387/387 |
 | Deterministic soak (`test/reliability-acceptance.test.ts`) | 16 tasks across 2 projects; 100+ stage transitions; injected quota faults, failing checks, review change requests, dependency integration; model/provider/gate caps and repository locks asserted every tick; no leaked leases, duplicate obligations, or unbounded retries; run under three fixed seeds on every `npm test` (replacing the earlier "3/3 repeated runs" session claim) |
-| Upgrade/restore rehearsal on a schema-14 fixture | pass (every pre-existing value preserved, schema 17, restore digest equal, source byte-identical) |
-| Upgrade/restore rehearsal on a read-only copy of the live database (2026-09-28) | pass: schema 14 → 17, 35 tables preserved, restore consistent; live `mabs.sqlite` and WAL hashes unchanged before/after. Both registered projects (`multi-agent-build-system`, `ai-engineering-study-assistant`) still need a project-type decision, so v3 would block their new implementation until classified, by design. |
+| Upgrade/restore rehearsal on a schema-14 fixture | pass (every pre-existing value preserved, schema 17 at the time; the branch now targets schema 18, so this must be rerun) |
+| Upgrade/restore rehearsal on a read-only copy of the live database (2026-09-28) | pass at the time, but stale: it upgraded to schema 17 and the branch now targets 18. Rerun before Gate E. Original result: schema 14 → 17, 35 tables preserved, restore consistent; live `mabs.sqlite` and WAL hashes unchanged before/after. Both registered projects (`multi-agent-build-system`, `ai-engineering-study-assistant`) still need a project-type decision, so v3 would block their new implementation until classified, by design. |
 | `npm run verify` (live providers) | **not run**: it calls paid-subscription models and needs separate authorization |
 
 **Deviations from the plan's process**
@@ -1571,7 +1581,10 @@ activated: no live migration, engine switch, exporter, or concurrency change.
   source); `scripts/validate-execution-upgrade.ts` on that backup; pin the engine revision; run
   `maintenance migrate`. It refuses while a controller process is alive, takes and verifies its own
   pre-migration backup (integrity, schema, and per-table row counts), then upgrades and prints the
-  restore command. Start one controller on the intended database, then confirm `project readiness`,
+  restore command. *Corrected after the second review (findings 5, 6):* it checked only one
+  controller PID and printed an untested restore command, and it crashed on an unstamped database.
+  It now holds a maintenance lock, refuses undrained work, rehearses the restore, and detects the
+  layout (T15 section). Start one controller on the intended database, then confirm `project readiness`,
   `queue explain`, and `telemetry status` (disabled). *Corrected after review:* before this, every
   command, including `maintenance backup` and `status`, migrated the database as it opened it, so
   the "pre-upgrade" backup was already upgraded. Operator commands and the controller now refuse an
@@ -1581,6 +1594,107 @@ activated: no live migration, engine switch, exporter, or concurrency change.
   --codex-limit=1 --capacity-fallback=wait`.
 
 Retrospective reviews of H7–H9 remain separate and were not performed.
+
+**Second review remediation (independent review of `a81d9a9..b9e0826`).**
+
+That review requested changes before any live canary or optimizer trial. It found one critical and
+eight major defects, and it showed that several claims above were stale. Each fix below has
+deterministic tests. None of them makes a live provider call.
+
+- *Finding 1 (critical): ambient provider configuration.*
+  - Codex launches with `--ignore-user-config`, `model_provider="openai"`,
+    `forced_login_method="chatgpt"`, and `mcp_servers={}`. Auth still comes from `CODEX_HOME`.
+  - Claude launches with `--setting-sources ""`, `--strict-mcp-config`, and an empty
+    `--mcp-config`. User, project, and local settings (hooks, plugins, `apiKeyHelper`, `env`, model
+    defaults) and outside MCP servers never apply. `--bare` is not used because it disables OAuth.
+    `--safe-mode` is not used because it would also drop the repository's `CLAUDE.md`, which
+    worker packets rely on.
+  - Before any provider starts, `src/verify/provenance.ts` checks subscription provenance, and a
+    failure collects as `CONFIG`:
+    - Claude: `claude auth status` must report `claude.ai` on the first-party API.
+    - Codex: `codex login status` must report ChatGPT, and `auth.json` must hold no API key.
+    - Admin-managed Claude settings that set `apiKeyHelper`, `model`, `fallbackModel`, cloud
+      credential refreshers, console login, or paid-access `env` refuse the launch.
+  - Model-override variables such as `ANTHROPIC_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`, and
+    `CODEX_API_KEY`, are stripped from the worker environment.
+  - The post-run answering-model check remains as a second layer of defense.
+  - Tests: RTE-01 now uses fakes that report whether the real CLI would have loaded the hostile
+    global configuration. RTE-02 covers provenance refusal with zero provider starts, plus
+    managed-settings rules. RTE-06 checks the flag and feature surface.
+  - `mabs verify --quick` includes P0-10, which reads the installed CLIs' `--help` and
+    `features list` with no inference.
+- *Finding 2: PID reuse in recovery.* Worker and gate-job markers now record the kernel start time
+  (`/proc/<pid>/stat` field 22) and the boot id.
+  - Recovery treats a process as the recorded one only when its start time, boot id, and argv
+    (which names the launch specification) all still match. Otherwise it is `lost`. Without a
+    process table it is `ambiguous` and the lease is held.
+  - `cancel` signals the process group only while the identity matches, and re-checks before
+    `SIGKILL`. `src/core/process-identity.ts` implements this.
+  - Tests: REC-06 no longer accepts a bare live PID. New cases cover a forged start time, a
+    previous boot, and a reused gate-job PID.
+- *Finding 3: elapsed budget.* `trialLaunchRefusal` runs inside `launchAttempt`, the single path
+  for initial, repair, reroute, review, and resumed-admission launches.
+  - Before each launch it re-derives the authorized manifest and checks the elapsed budget and the
+    attempt cap. A refused trial blocks as `CONFIG` and is recorded as `interrupted`.
+  - An attempt already running at the deadline may finish, and its result carries the existing
+    late-trial warning.
+  - Tests: a task created before the deadline and ticked after it launches nothing. A manifest
+    change after task creation stops the next launch.
+- *Finding 4: manual evidence.* `supportsProposal` now also requires every measurement to be a
+  `live_trial` bound to a trial task. Manual and replay numbers remain visible as descriptive
+  results.
+  - EVAL-05 is now a controller-run live experiment: the baseline needs one repair, the candidate
+    none, and the result supports a proposal without activating anything.
+  - The manual-fixture test asserts that forged numbers cannot support a proposal.
+- *Findings 5 and 6: migration.* `maintenance migrate`:
+  - takes an exclusive `<db>.maintenance.lock`, which the controller refuses to tick under and
+    which is reclaimed only when its holder is provably gone;
+  - probes controller liveness only when `controller_lease` exists;
+  - refuses undrained tasks, attempts, stages, and admission leases;
+  - backs up the database and verifies the backup;
+  - restores the backup to a disposable path, upgrades it, runs an integrity check, compares row
+    counts, and runs the history audit there, all before touching the source;
+  - migrates an unstamped database that has the MABS tables (`legacy-mabs`), and backs up then
+    refuses an unknown layout with a specific error.
+
+  Tests: `test/maintenance-migrate.test.ts`.
+- *Finding 7: runtime identity.* The manifest now fingerprints the MABS commit and dirty flag, the
+  capability registry with its entitlement overlay, the `claude` and `codex` versions (re-read when
+  the executable changes), Node, and `package-lock.json`.
+  - Drift stops the next launch through the finding-3 check.
+  - `record-trial` refuses a trial whose checks ran a different tool version than an
+    already-recorded trial.
+  - Test: a CLI upgrade between baseline and candidate stops the run.
+  - Known limit: drift that happens *during* one attempt is caught at the next launch, not
+    mid-attempt, and per-attempt runtime fingerprints are not stored (no schema change).
+- *Finding 8: blocked dependency.* A prerequisite that is `BLOCKED` for any reason other than
+  in-flight admission or review now blocks its dependent with the prerequisite's reason and a
+  `dependency:<id>` obligation. The block propagates down the chain. The dependent returns to
+  `QUEUED` when the prerequisite can run again. Soak seed 7 now completes in about 4 s instead of
+  reaching its 120 s deadline.
+- *Finding 9: configuration activation.* Activation and revert refuse while the project has:
+  - working tasks;
+  - in-flight `BLOCKED` work (`Admission pending:`, `Review pending:`, `Review recovery pending:`);
+  - running attempts;
+  - non-terminal stages;
+  - reserved or active admission leases.
+
+  This check exposed a leak: `task cancel` finished the attempt but left its stage `running` and
+  its admission lease `active`. Cancellation now closes every stage the task owns and releases its
+  leases.
+- Validation: `npm run typecheck`, `npm run typecheck:extensions`, and `npm test` with disposable
+  `MABS_*` state all pass (387 tests, about 16 s).
+- Live check (2026-09-28, one authorized minimal call): Claude 2.1.283 was run with the exact
+  isolation flags (`--setting-sources ""`, `--strict-mcp-config`, an empty `--mcp-config`,
+  `--disallowedTools Agent Task`, `--model claude-sonnet-5 --effort low`). It answered `OK`,
+  `modelUsage` named only `claude-sonnet-5`, and `apiKeySource` was null, so subscription OAuth
+  survives the flags. `requireSubscriptionProvenance` passed against the real CLIs: Claude
+  `claude.ai`/pro, Codex ChatGPT, no managed settings. Codex made no inference call.
+- Not done:
+  - no rehearsal of the live database at schema 18;
+  - the remaining test-coverage gaps from the review's section 3 (GOV-02/13/14 entry points,
+    REC-04 end to end, REC-09/12/15/16, PAR-05 per path, workbench activation and optimizer
+    endpoints) are still open.
 
 ## 15. Detailed validation matrix
 
@@ -1909,7 +2023,7 @@ Restore procedures must be tested on disposable paths first. A backup without re
 ### 19.1 Implementation definition of done
 
 Status on the integrated revision of `mabs/reliability-adaptive-execution-v3` (deterministic suite:
-350 tests passing). "Implemented" is not "activated": nothing below is live until Gate E.
+387 tests passing after the second review remediation; the earlier "350 passing" figure was stale). "Implemented" is not "activated": nothing below is live until Gate E.
 
 - [x] Missing type always asks; no default-personal implementation path remains (T03; T14 `project readiness`).
 - [x] Personal review choice is explicit and durable; client review cannot be disabled implicitly (T03, T09 GOV-08).

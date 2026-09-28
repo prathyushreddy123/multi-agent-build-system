@@ -15,7 +15,7 @@ import { classifyFailure, classifyFromEnvelope } from "../core/failure.ts";
 import { stateDir } from "../core/paths.ts";
 import { validateWorkerOutput, WORKER_OUTPUT_SCHEMA, CONTRACT_VERSION } from "../domain/contract.ts";
 import { assertNoPaidFallback, buildWorkerEnv, FORBIDDEN_ENV_KEYS } from "./env.ts";
-import { launchClaude, launchCodex, PROBE_ROUTES } from "./launch.ts";
+import { launchClaude, launchCodex, missingCliSurface, PROBE_ROUTES } from "./launch.ts";
 import { createFixture, fixtureTestsPass, gitStatus, FIXTURE_TASK } from "./fixture.ts";
 
 export type ProbeStatus = "PASS" | "FAIL" | "UNKNOWN" | "SKIPPED";
@@ -85,6 +85,32 @@ async function probeClaudeAuth(dir: string): Promise<Probe> {
     durationMs: Date.now() - started,
     evidence,
     data: { authMethod: data.authMethod, subscriptionType: data.subscriptionType, apiProvider: data.apiProvider },
+  };
+}
+
+/** The installed CLIs still expose every isolation flag and feature the launch argv uses. No inference. */
+async function probeCliSurface(dir: string): Promise<Probe> {
+  const started = Date.now();
+  const text = async (command: string, args: string[]) => {
+    const result = await exec(command, args, { timeoutMs: 60_000 });
+    return `${result.stdout}\n${result.stderr}`;
+  };
+  const help = {
+    claude: await text("claude", ["--help"]),
+    codexExec: await text("codex", ["exec", "--help"]),
+    codexFeatures: await text("codex", ["features", "list"]),
+  };
+  const evidence = join(dir, "cli-surface.txt");
+  writeFileSync(evidence, Object.entries(help).map(([name, body]) => `### ${name}\n${body}`).join("\n"));
+  const missing = missingCliSurface(help);
+  return {
+    id: "P0-10",
+    name: "CLI isolation flags",
+    status: missing.length === 0 ? "PASS" : "FAIL",
+    detail: missing.length === 0 ? "every launch isolation flag and feature is present" : `missing: ${missing.join(", ")}`,
+    durationMs: Date.now() - started,
+    evidence,
+    data: { missing },
   };
 }
 
@@ -406,6 +432,7 @@ export async function runPhase0(options: { quick?: boolean } = {}): Promise<Prob
   record(await probeClaudeAuth(runDir));
   record(await probeCodexAuth(runDir));
   record(probeEnvScrub(runDir));
+  record(await probeCliSurface(runDir));
 
   if (!options.quick) {
     record(await probeRoundTrip("claude", runDir, fixtureRoot));

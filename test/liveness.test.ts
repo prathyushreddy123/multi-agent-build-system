@@ -400,3 +400,34 @@ test("passing one check clears only obligations validated by that same check", a
   );
   await controller.stop();
 });
+
+test("a permanently blocked dependency blocks its dependent with the reason, and unblocking it re-queues the dependent", async (t) => {
+  const db = records();
+  t.after(() => db.store.close());
+  const project = db.createProject({
+    projectType: "personal", reviewChoice: "off", name: "blocked-dependency", repoPath: process.cwd(),
+    reviewPolicy: { mode: "none", skipTaskClasses: [] },
+  });
+  const dependency = db.createTask({ projectId: project.id, title: "dependency", objective: "blocked" });
+  const dependent = db.createTask({ projectId: project.id, title: "dependent", objective: "wait", dependsOn: [dependency.id] });
+  const chained = db.createTask({ projectId: project.id, title: "chained", objective: "wait", dependsOn: [dependent.id] });
+  db.transition(dependency.id, "READY");
+  db.transition(dependency.id, "RUNNING");
+  db.transition(dependency.id, "BLOCKED", { blocked_reason: "Unsupported model route", failure_class: "CONFIG" });
+  const controller = new Controller(db, { capabilityRegistry: VERIFIED_REGISTRY,
+    controllerId: "blocked-dependency-controller", workerLimit: 1, minFreeMemoryMb: Number.MAX_SAFE_INTEGER,
+  });
+  await controller.tick();
+  await controller.tick();
+  const blocked = db.getTask(dependent.id)!;
+  assert.equal(blocked.state, "BLOCKED", "a dependent never waits silently in QUEUED behind a stuck prerequisite");
+  assert.match(blocked.blockedReason ?? "", /Unsupported model route/);
+  assert.ok(db.getContinuation(dependent.id).openObligations.some((item) => item.sourceKey === `dependency:${dependency.id}`));
+  assert.equal(db.getTask(chained.id)?.state, "BLOCKED", "the block propagates down the chain");
+
+  // Once the prerequisite can run again, the dependent goes back to waiting on it.
+  db.transition(dependency.id, "READY", { blocked_reason: null, failure_class: null });
+  await controller.tick();
+  assert.equal(db.getTask(dependent.id)?.state, "QUEUED");
+  await controller.stop();
+});

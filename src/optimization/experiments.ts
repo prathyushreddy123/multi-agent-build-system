@@ -10,6 +10,7 @@ import { fromJson, nowIso, toJson, type Row } from "../store/db.ts";
 import type { TaskClass } from "../routing/router.ts";
 import type { Records, Task } from "../store/records.ts";
 import { normalizeAttemptUsage } from "../usage/summary.ts";
+import { runtimeFingerprint, type RuntimeFingerprint } from "./runtime.ts";
 
 export const EXPERIMENT_PROTOCOL_VERSION = "mabs.experiment-protocol.v1";
 
@@ -465,11 +466,20 @@ export function compareExperiment(records: Records, experimentId: string): Exper
   // A run that overspent its declared budget is not the run that was authorized.
   const budgetBreaches = protocol && current.runAuthorization ? experimentBudgetState(records, experimentId).reasons : [];
   if (budgetBreaches.length > 0) reasons.push(`Budget exceeded, so this result cannot support a proposal: ${budgetBreaches.join(" ")}`);
+  // Manual and replay measurements are descriptive: nothing binds them to a
+  // task, an authorization, or a controller run. Only live trials that the
+  // controller executed under the authorized manifest are evidence enough.
+  const unbound = measurements.filter((item) => item.source !== "live_trial" || !item.taskId || !trialBindingForTask(records, item.taskId));
+  const liveEvidence = unbound.length === 0 && measurements.length > 0;
+  if (!liveEvidence && (result === "improved" || result === "limitation_resolved")) {
+    reasons.push(`${unbound.length} measurement(s) are ${[...new Set(unbound.map((item) => item.source))].join("/")} rather than controller-bound live trials; ` +
+      "the result is descriptive and cannot support a proposal.");
+  }
   return {
     result, evidence, comparableCases: cases, missingPairs, perCase, primaryMetric: primary, baseline, candidate,
     safeguardsPassed, tradeOffsWithinTolerance, trials, sources,
     budgetBreaches,
-    supportsProposal: (result === "improved" || result === "limitation_resolved") && budgetBreaches.length === 0,
+    supportsProposal: (result === "improved" || result === "limitation_resolved") && budgetBreaches.length === 0 && liveEvidence,
     reasons,
   };
 }
@@ -486,6 +496,8 @@ export interface RunManifest {
   trialCases: Record<string, TrialCase> | null;
   /** The project's checks, configuration, and review/governance policy every trial runs under. */
   environment: { configVersion: string | null; checkCommands: unknown; reviewPolicy: unknown; governanceVersion: number | null } | null;
+  /** Controller code, capability evidence, provider CLIs, and Node every trial must share. */
+  runtime: RuntimeFingerprint;
   /** Why this manifest cannot be authorized for live trials; empty when it can. */
   liveBlockers: string[];
   providerCalls: 0;
@@ -560,6 +572,7 @@ function buildManifest(records: Records, current: OptimizationExperiment): RunMa
       reviewPolicy: project.reviewPolicy,
       governanceVersion: project.governance?.version ?? null,
     } : null,
+    runtime: runtimeFingerprint(),
     liveBlockers,
     providerCalls: 0 as const,
   };
@@ -633,7 +646,8 @@ function authorizedManifest(records: Records, current: OptimizationExperiment): 
   if (!current.runAuthorization) throw new Error("Live trials require an authorized run manifest.");
   const manifest = buildManifest(records, current);
   if (fingerprintOf(manifest) !== current.runAuthorization.fingerprint) {
-    throw new Error("The run manifest changed after authorization (cases, revisions, checks, review policy, or variants); prepare and authorize it again.");
+    throw new Error("The run manifest changed after authorization (cases, revisions, checks, review policy, variants, or the controller, " +
+      "capability, CLI, or Node runtime); prepare and authorize it again.");
   }
   return manifest;
 }
@@ -680,6 +694,33 @@ export function experimentBudgetState(records: Records, experimentId: string, no
   if (state.usageWarning) state.reasons.push(`Reported input tokens ${reportedInputTokens} exceeded the ${budget.usageWarningInputTokens} warning threshold.`);
   if (state.attemptCapExceeded) state.reasons.push(`A trial used more than ${maxAttemptsPerTrial} provider attempt(s).`);
   return state;
+}
+
+/**
+ * Why a bound trial task may not launch another provider attempt now, or null.
+ * Checked before every launch (initial, repair, reroute, review, and resumed
+ * admission), not only when the trial task is created: the authorized
+ * manifest must still match, the elapsed budget must not be spent, and the
+ * per-trial attempt cap must have room. An attempt already running when the
+ * deadline passes is allowed to finish; its result is recorded as late.
+ */
+export function trialLaunchRefusal(records: Records, taskId: string, now = new Date()): string | null {
+  const bound = trialBindingForTask(records, taskId);
+  if (!bound) return null;
+  const current = getExperiment(records, bound.experimentId);
+  if (!current) return `Experiment ${bound.experimentId} no longer exists.`;
+  if (current.status === "completed") return `Experiment ${current.id} is completed; its trials launch nothing further.`;
+  if (current.runAuthorization?.fingerprint !== bound.manifestFingerprint) return "The trial was started under a different authorization.";
+  try {
+    authorizedManifest(records, current);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const budget = experimentBudgetState(records, current.id, now);
+  if (budget.elapsedExceeded) return `The experiment's ${budget.maxElapsedMs} ms elapsed budget is spent; no further trial attempts launch.`;
+  const cap = budget.maxAttemptsPerTrial;
+  if (cap !== null && (budget.attemptsByTask[taskId] ?? 0) >= cap) return `Experiment trial attempt budget of ${cap} is spent.`;
+  return null;
 }
 
 /**
@@ -783,6 +824,19 @@ export function recordTrialFromTask(records: Records, input: {
       applied.effort !== undefined && attempt.requestedEffort !== applied.effort ? `effort ${attempt.requestedEffort}` : null,
     ].filter((item): item is string => item !== null);
     if (mismatch.length > 0) throw new Error(`Attempt ${attempt.id} ran ${mismatch.join(", ")}, not the ${input.variant} configuration.`);
+  }
+  // Check tools are part of the fixed environment: a trial whose checks ran a
+  // different tool version than an already recorded trial is confounded.
+  const recordedTasks = listMeasurements(records, current.id).filter((item) => item.source === "live_trial" && item.taskId).map((item) => item.taskId as string);
+  const seenTools = new Map<string, string>();
+  for (const gate of recordedTasks.flatMap((id) => records.gatesForTask(id))) {
+    if (gate.toolVersion) seenTools.set(gate.name, gate.toolVersion);
+  }
+  for (const gate of records.gatesForTask(task.id)) {
+    const earlier = seenTools.get(gate.name);
+    if (gate.toolVersion && earlier && earlier !== gate.toolVersion) {
+      throw new Error(`Check ${gate.name} ran ${gate.toolVersion} here but ${earlier} in an earlier trial; the comparison would be confounded.`);
+    }
   }
   const trialState: OptimizationMeasurement["trialState"] =
     task.state === "DONE" ? "completed" : task.state === "FAILED" || task.state === "CANCELLED" ? "failed" : "interrupted";

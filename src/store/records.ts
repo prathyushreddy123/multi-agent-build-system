@@ -6,7 +6,7 @@ import type { Row, StoreOptions } from "./db.ts";
 import { ids } from "../core/ids.ts";
 import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, projectConfigSnapshot, validateProjectConfig } from "../domain/config.ts";
 import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
-import { assertTransition } from "../domain/states.ts";
+import { assertTransition, IN_FLIGHT_BLOCKED_PREFIXES, SLOT_HOLDING_STATES } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
 import { evaluate } from "../domain/policy.ts";
 import type { Action, ApprovalBinding, ProjectApprovalPolicy } from "../domain/policy.ts";
@@ -3102,6 +3102,37 @@ export class Records {
     return row ? toApproval(row) : null;
   }
 
+  /**
+   * Everything in a project a configuration change would alter mid-flight:
+   * working tasks, in-flight work waiting for admission or review (BLOCKED
+   * but still holding its allocation), unresolved attempts, non-terminal
+   * stages, and reserved or active admission leases.
+   */
+  unresolvedProjectWork(projectId: string): string[] {
+    const tasks = this.listTasks({ projectId });
+    const inProject = new Set(tasks.map((task) => task.id));
+    const found: string[] = [];
+    for (const task of tasks) {
+      if ((SLOT_HOLDING_STATES as readonly string[]).includes(task.state)) found.push(`task ${task.id} is ${task.state}`);
+      else if (task.state === "BLOCKED" && IN_FLIGHT_BLOCKED_PREFIXES.some((prefix) => task.blockedReason?.startsWith(prefix))) {
+        found.push(`task ${task.id} is waiting to resume (${task.blockedReason})`);
+      }
+    }
+    for (const attempt of this.listRunningAttempts().filter((item) => inProject.has(item.taskId))) found.push(`attempt ${attempt.id} is running`);
+    for (const stage of this.listActiveStageRuns().filter((item) => inProject.has(item.taskId))) found.push(`stage ${stage.id} (${stage.stage}) is ${stage.state}`);
+    for (const lease of this.store.all("SELECT id, status FROM admission_leases WHERE project_id = ? AND status IN ('reserved','active')", projectId)) {
+      found.push(`admission lease ${String(lease.id)} is ${String(lease.status)}`);
+    }
+    return found;
+  }
+
+  private requireSafeCheckpoint(projectId: string, action: "activation" | "revert"): void {
+    const unresolved = this.unresolvedProjectWork(projectId);
+    if (unresolved.length > 0) {
+      throw new Error(`Configuration ${action} requires a safe checkpoint; ${unresolved.length} item(s) are active: ${unresolved.slice(0, 10).join("; ")}`);
+    }
+  }
+
   activateCuratorProposal(id: string, approvalId: string, activatedBy: string, reason: string): ConfigActivation {
     if (!reason.trim()) throw new Error("Activation reason is required");
     const proposal = this.getCuratorProposal(id);
@@ -3112,8 +3143,7 @@ export class Records {
     if (!project) throw new Error(`Unknown project ${proposal.projectId}`);
     requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     if (project.configVersion !== proposal.baseConfigVersion) throw new Error(`Proposal ${id} is stale because project configuration changed`);
-    const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
-    if (activeTasks.length > 0) throw new Error(`Configuration activation requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
+    this.requireSafeCheckpoint(project.id, "activation");
     const binding: ApprovalBinding = {
       action: "activate_config_change",
       target: id,
@@ -3153,8 +3183,7 @@ export class Records {
     const project = this.getProject(input.projectId);
     if (!project) throw new Error(`Unknown project ${input.projectId}`);
     requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
-    const activeTasks = this.listTasks({ projectId: project.id }).filter((task) => ["RUNNING", "CHECKING", "REVIEWING"].includes(task.state));
-    if (activeTasks.length > 0) throw new Error(`Configuration revert requires a safe checkpoint; ${activeTasks.length} task(s) are active`);
+    this.requireSafeCheckpoint(project.id, "revert");
     const target = this.getConfigVersion(input.targetConfigVersion);
     if (!target || target.project_id !== project.id) throw new Error(`Unknown project configuration ${input.targetConfigVersion}`);
     this.assertConfigurationGovernance(project, target.payload, "Target configuration", false);

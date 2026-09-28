@@ -25,6 +25,17 @@ export const TERMINAL_STATES: readonly TaskState[] = ["DONE", "FAILED", "CANCELL
 /** A task in one of these states owns a worker slot. */
 export const SLOT_HOLDING_STATES: readonly TaskState[] = ["RUNNING", "CHECKING", "REVIEWING"];
 
+/** Marks a task whose only outstanding work is a review the controller can retry. */
+export const REVIEW_PENDING_PREFIX = "Review pending:";
+export const REVIEW_RECOVERY_PREFIX = "Review recovery pending:";
+/** In-flight work (repair, reroute) waiting for shared admission capacity. */
+export const ADMISSION_PENDING_PREFIX = "Admission pending:";
+/**
+ * BLOCKED reasons for work that is still in flight: it keeps its allocation
+ * and will resume by itself, so it counts as active, not stopped.
+ */
+export const IN_FLIGHT_BLOCKED_PREFIXES: readonly string[] = [ADMISSION_PENDING_PREFIX, REVIEW_PENDING_PREFIX, REVIEW_RECOVERY_PREFIX];
+
 const TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   QUEUED: ["READY", "BLOCKED", "CANCELLED"],
   READY: ["RUNNING", "BLOCKED", "QUEUED", "CANCELLED"],

@@ -35,6 +35,7 @@ function slowCodex(t: TestContext, pauseMs: number): void {
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
+if (process.argv[2] === "login") { process.stderr.write("Logged in using ChatGPT\\n"); process.exit(0); }
 const cwd = process.argv[process.argv.indexOf("-C") + 1];
 const out = (text) => fs.writeSync(1, text);
 out(JSON.stringify({ type: "thread.started", thread_id: "slow" }) + "\\n");

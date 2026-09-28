@@ -8,6 +8,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { HarnessAdapter, START_MARKER_FILE } from "../src/adapters/harness.ts";
+import { gateJobStatus } from "../src/gates/runner.ts";
 import type { AdapterHandle, AdapterLaunch, CollectedResult, WorkerAdapter } from "../src/adapters/types.ts";
 import { Controller } from "../src/controller/controller.ts";
 import { validateProjectConfig, projectConfigSnapshot } from "../src/domain/config.ts";
@@ -22,7 +23,8 @@ import {
 import { DEFAULT_ROUTING_POLICY, selectRoute, type ProviderAvailability } from "../src/routing/router.ts";
 import { Store } from "../src/store/db.ts";
 import { Records, type Task } from "../src/store/records.ts";
-import { claudeArgs, codexArgs, launchClaude, launchCodex, type LaunchResult } from "../src/verify/launch.ts";
+import { claudeArgs, codexArgs, launchClaude, launchCodex, missingCliSurface, type LaunchResult } from "../src/verify/launch.ts";
+import { claudeAuthRefusals, codexAuthRefusals, managedSettingsRefusals, ProvenanceError } from "../src/verify/provenance.ts";
 import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function tempRoot(t: TestContext, prefix: string): string {
@@ -37,6 +39,8 @@ function tempRoot(t: TestContext, prefix: string): string {
  * exact argv and prints a minimal valid provider envelope; no real harness is
  * reachable from inside the test.
  */
+interface Invocation { bin: string; argv: string[]; loadedUserConfig: boolean; loadedExternalMcp: boolean }
+
 function fakeHarnesses(t: TestContext, options: { delayMs?: number } = {}) {
   const root = tempRoot(t, "mabs-fake-harness-");
   const bin = join(root, "bin");
@@ -46,12 +50,29 @@ function fakeHarnesses(t: TestContext, options: { delayMs?: number } = {}) {
   mkdirSync(join(home, ".claude"), { recursive: true });
   const codexConfig = join(home, ".codex", "config.toml");
   const claudeSettings = join(home, ".claude", "settings.json");
-  writeFileSync(codexConfig, 'model = "global-default"\nmodel_reasoning_effort = "high"\n');
-  writeFileSync(claudeSettings, JSON.stringify({ effortLevel: "high" }));
+  // A hostile global configuration: a paid provider, a key helper, a fallback
+  // model, and a hook. None of it may shape an attempt.
+  writeFileSync(codexConfig, 'model = "global-default"\nmodel_reasoning_effort = "high"\nmodel_provider = "paid-proxy"\n' +
+    '[model_providers.paid-proxy]\nbase_url = "https://proxy.invalid"\nenv_key = "PROXY_KEY"\n');
+  writeFileSync(claudeSettings, JSON.stringify({
+    effortLevel: "high", model: "claude-haiku-4-5", apiKeyHelper: "echo sk-paid",
+    hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "true" }] }] },
+  }));
   const argvLog = join(root, "argv.jsonl");
+  // Each fake answers its auth-status command, and otherwise reports which
+  // configuration the real CLI would have loaded given this argv: Codex reads
+  // $CODEX_HOME/config.toml unless --ignore-user-config; Claude reads user
+  // settings unless --setting-sources omits "user".
   const script = (envelope: string) => `#!${process.execPath}
-const { appendFileSync } = require("node:fs");
-appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ bin: require("node:path").basename(process.argv[1]), argv: process.argv.slice(2) }) + "\\n");
+const { appendFileSync, existsSync } = require("node:fs");
+const argv = process.argv.slice(2);
+const bin = require("node:path").basename(process.argv[1]);
+if (bin === "claude" && argv[0] === "auth") { process.stdout.write(process.env.FAKE_CLAUDE_AUTH ?? JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max" })); process.exit(0); }
+if (bin === "codex" && argv[0] === "login") { process.stderr.write(process.env.FAKE_CODEX_AUTH ?? "Logged in using ChatGPT\\n"); process.exit(0); }
+const sources = argv.includes("--setting-sources") ? argv[argv.indexOf("--setting-sources") + 1].split(",") : ["user", "project", "local"];
+const loadedUserConfig = bin === "codex" ? !argv.includes("--ignore-user-config") && existsSync(${JSON.stringify(codexConfig)}) : sources.includes("user");
+const loadedExternalMcp = bin === "claude" && !argv.includes("--strict-mcp-config");
+appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify({ bin, argv, loadedUserConfig, loadedExternalMcp }) + "\\n");
 setTimeout(() => process.stdout.write(${JSON.stringify(envelope)}), ${options.delayMs ?? 0});
 `;
   writeFileSync(join(bin, "claude"), script(JSON.stringify({
@@ -76,8 +97,8 @@ setTimeout(() => process.stdout.write(${JSON.stringify(envelope)}), ${options.de
   return {
     root,
     globalHashes: () => ({ codex: hash(codexConfig), claude: hash(claudeSettings) }),
-    invocations: (): { bin: string; argv: string[] }[] => existsSync(argvLog)
-      ? readFileSync(argvLog, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { bin: string; argv: string[] })
+    invocations: (): Invocation[] => existsSync(argvLog)
+      ? readFileSync(argvLog, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Invocation)
       : [],
   };
 }
@@ -101,17 +122,85 @@ test("RTE-01: an explicit per-attempt effort reaches the exact provider argv wit
   assert.ok(flagValue(codexCall.argv, "-c").includes('model_reasoning_effort="medium"'));
   assert.ok(flagValue(codexCall.argv, "-c").includes("features.multi_agent=false"));
   assert.deepEqual(flagValue(codexCall.argv, "-m"), [CODEX_MODEL], "the local config default model is never inherited");
+  assert.equal(codexCall.loadedUserConfig, false, "Codex never loads the user's providers, profiles, or defaults");
+  assert.ok(flagValue(codexCall.argv, "-c").includes('model_provider="openai"'), "the built-in provider is pinned");
+  assert.ok(flagValue(codexCall.argv, "-c").includes('forced_login_method="chatgpt"'), "ChatGPT subscription login is required");
   assert.equal(claudeCall?.bin, "claude");
   assert.deepEqual(flagValue(claudeCall.argv, "--effort"), ["low"]);
   assert.deepEqual(flagValue(claudeCall.argv, "--model"), ["claude-sonnet-5"]);
   const disallowed = claudeCall.argv.slice(claudeCall.argv.indexOf("--disallowedTools") + 1);
   assert.ok(disallowed.includes("Agent"), "Claude's native child-agent tool is disallowed");
+  assert.equal(claudeCall.loadedUserConfig, false, "Claude never loads user settings: no apiKeyHelper, hooks, or model default");
+  assert.deepEqual(flagValue(claudeCall.argv, "--setting-sources"), [""]);
+  assert.equal(claudeCall.loadedExternalMcp, false, "no MCP server outside the empty launch config");
+  assert.ok(!claudeCall.argv.includes("--fallback-model"), "no fallback model is ever requested");
+  assert.equal(claude.provenance?.authMethod, "claude.ai");
+  assert.equal(codex.provenance?.authMethod, "chatgpt");
 
   assert.deepEqual(codex.applied, { model: CODEX_MODEL, effort: "medium", effortSource: "explicit", delegation: "disabled" });
   assert.deepEqual(claude.applied, { model: "claude-sonnet-5", effort: "low", effortSource: "explicit", delegation: "disabled" });
   assert.deepEqual(fake.globalHashes(), before, "global provider configuration is never edited");
   // Evidence records the command shape but not a second copy of the prompt.
   assert.match(readFileSync(join(cwd, "codex.log"), "utf8"), /<prompt 4 bytes>/);
+});
+
+test("RTE-02: a launch without established subscription provenance starts no provider process", async (t) => {
+  const fake = fakeHarnesses(t);
+  const cwd = tempRoot(t, "mabs-provenance-");
+  const saved = { codex: process.env.FAKE_CODEX_AUTH, claude: process.env.FAKE_CLAUDE_AUTH, managed: process.env.MABS_CLAUDE_MANAGED_SETTINGS_DIR };
+  t.after(() => {
+    for (const [key, value] of [["FAKE_CODEX_AUTH", saved.codex], ["FAKE_CLAUDE_AUTH", saved.claude], ["MABS_CLAUDE_MANAGED_SETTINGS_DIR", saved.managed]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const options = { cwd, prompt: "task", effort: "low", timeoutMs: 10_000, evidencePath: join(cwd, "x.log") };
+
+  process.env.FAKE_CODEX_AUTH = "Logged in using an API key - sk-proj-***\n";
+  await assert.rejects(launchCodex({ ...options, model: CODEX_MODEL }), (error: Error) => error instanceof ProvenanceError && /API key/.test(error.message));
+
+  process.env.FAKE_CLAUDE_AUTH = JSON.stringify({ loggedIn: true, authMethod: "api_key", apiProvider: "firstParty" });
+  await assert.rejects(launchClaude({ ...options, model: "claude-sonnet-5" }), /not a claude.ai subscription/);
+
+  delete process.env.FAKE_CLAUDE_AUTH;
+  const managed = tempRoot(t, "mabs-managed-");
+  writeFileSync(join(managed, "managed-settings.json"), JSON.stringify({ apiKeyHelper: "/usr/bin/key", env: { ANTHROPIC_BASE_URL: "https://proxy" } }));
+  process.env.MABS_CLAUDE_MANAGED_SETTINGS_DIR = managed;
+  await assert.rejects(launchClaude({ ...options, model: "claude-sonnet-5" }), /sets apiKeyHelper/);
+
+  assert.deepEqual(fake.invocations(), [], "no provider inference ran without provenance");
+});
+
+test("RTE-02: provenance rules name every off-subscription route", (t) => {
+  assert.deepEqual(claudeAuthRefusals({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" }), []);
+  assert.match(claudeAuthRefusals({ loggedIn: true, authMethod: "claude.ai", apiProvider: "bedrock" }).join(), /not first-party/);
+  assert.match(claudeAuthRefusals({ loggedIn: false }).join(), /not logged in/);
+  assert.deepEqual(codexAuthRefusals("Logged in using ChatGPT"), []);
+  assert.match(codexAuthRefusals("Not logged in").join(), /cannot be established/);
+  const dir = tempRoot(t, "mabs-managed-rules-");
+  assert.deepEqual(managedSettingsRefusals(dir), { files: [], refusals: [] }, "no managed settings is the normal case");
+  mkdirSync(join(dir, "managed-settings.d"));
+  writeFileSync(join(dir, "managed-settings.d", "10-model.json"), JSON.stringify({ model: "claude-haiku-4-5", forceLoginMethod: "console" }));
+  writeFileSync(join(dir, "managed-settings.json"), "{not json");
+  const refusals = managedSettingsRefusals(dir).refusals.join(" ");
+  assert.match(refusals, /sets model/);
+  assert.match(refusals, /console/);
+  assert.match(refusals, /cannot be read/, "an unreadable managed file fails closed");
+});
+
+test("RTE-06: a CLI that drops an isolation flag or feature is reported, and a refused provenance collects as CONFIG", async (t) => {
+  const claude = "  --setting-sources <sources>\n  --strict-mcp-config\n  --mcp-config <configs...>\n  --disallowedTools, --disallowed-tools <tools...>\n" +
+    "  --allowedTools, --allowed-tools <tools...>\n  --effort <level>\n  --model <model>\n  --permission-mode <mode>\n";
+  const codexExec = "      --ignore-user-config\n      --json\n  -s, --sandbox <SANDBOX_MODE>\n  -c, --config <key=value>\n  -m, --model <MODEL>\n";
+  const codexFeatures = "multi_agent        stable  true\nmulti_agent_v2     experimental false\n";
+  assert.deepEqual(missingCliSurface({ claude, codexExec, codexFeatures }), []);
+  assert.deepEqual(missingCliSurface({ claude: claude.replace("--strict-mcp-config", "--other"), codexExec: codexExec.replace("--ignore-user-config", ""), codexFeatures: "multi_agent  stable true\n" }),
+    ["claude --strict-mcp-config", "codex exec --ignore-user-config", "codex feature multi_agent_v2"]);
+
+  const cwd = tempRoot(t, "mabs-provenance-collect-");
+  const completionPath = join(cwd, "completion.json");
+  writeFileSync(completionPath, JSON.stringify({ result: null, failureClass: "CONFIG", error: "ProvenanceError: Refusing to launch Codex: API key" }));
+  const collected = await new HarnessAdapter("codex").collectResult({ attemptId: "a", pid: null, sessionId: null, completionPath }, cwd);
+  assert.equal(collected.failureClass, "CONFIG", "an operator must fix the login; it is not retried as INFRA");
 });
 
 test("RTE-01: an absent model or effort is ineligible and never reaches a provider argv", () => {
@@ -420,8 +509,58 @@ test("REC-06: a launch with no durable PID is identified by marker or process ta
   await new Promise((resolvePromise) => wrapper.once("exit", resolvePromise));
   writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_other", pid: process.pid }));
   assert.equal(await adapter.status(handle), "lost", "a marker for another attempt is ignored; past grace with no process nothing ran");
+  // PID reuse: the marker names a live process that is not this launch's wrapper.
   writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid: process.pid }));
-  assert.equal(await adapter.status(handle), "running", "the wrapper's own marker names the live process");
+  assert.equal(await adapter.status(handle), "lost", "a live PID that does not name the launch specification is not the worker");
+});
+
+test("REC-06/PAR-11: recovery adopts and signals only the process whose start identity still matches", async (t) => {
+  const dir = tempRoot(t, "mabs-identity-");
+  const completionPath = join(dir, "completion.json");
+  const spec = join(dir, "launch.json");
+  writeFileSync(spec, "{}");
+  const wrapper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)", spec], { stdio: "ignore", detached: true });
+  t.after(() => { try { process.kill(-(wrapper.pid as number), "SIGKILL"); } catch { /* already gone */ } });
+  await new Promise((resolvePromise) => wrapper.once("spawn", resolvePromise));
+  const pid = wrapper.pid as number;
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const startTicks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const adapter = new HarnessAdapter("codex", VERIFIED_REGISTRY);
+  const handle = { attemptId: "att_1", pid, sessionId: null, completionPath };
+
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid, startTicks, bootId }));
+  assert.equal(await adapter.status(handle), "running", "matching PID, start time, boot, and argv is the worker");
+
+  // The recorded identity belongs to an earlier process that held this PID.
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid, startTicks: String(Number(startTicks) - 1), bootId }));
+  assert.equal(await adapter.status(handle), "lost", "a reused PID is never adopted");
+  await adapter.cancel(handle);
+  assert.doesNotThrow(() => process.kill(pid, 0), "cancel never signals a process whose identity does not match");
+
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid, startTicks, bootId: "another-boot" }));
+  assert.equal(await adapter.status(handle), "lost", "a PID from a previous boot is never ours");
+
+  writeFileSync(join(dir, START_MARKER_FILE), JSON.stringify({ attemptId: "att_1", pid, startTicks, bootId }));
+  const exited = new Promise((resolvePromise) => wrapper.once("exit", resolvePromise));
+  await adapter.cancel(handle);
+  await exited;
+  assert.equal(await adapter.status(handle), "lost");
+});
+
+test("PAR-11: a gate job whose PID was reused is lost, not running", async (t) => {
+  const dir = tempRoot(t, "mabs-gate-identity-");
+  const handle = {
+    jobId: "job_1", specPath: join(dir, "spec.json"), markerPath: join(dir, "marker.json"), completionPath: join(dir, "completion.json"),
+  } as Parameters<typeof gateJobStatus>[0];
+  writeFileSync(handle.specPath, "{}");
+  writeFileSync(handle.markerPath, JSON.stringify({ jobId: "job_1", pid: process.pid, startedAt: new Date().toISOString() }));
+  assert.equal(gateJobStatus(handle), "lost", "the test runner is alive but is not this gate job");
+  const job = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)", handle.specPath], { stdio: "ignore" });
+  t.after(() => job.kill("SIGKILL"));
+  await new Promise((resolvePromise) => job.once("spawn", resolvePromise));
+  writeFileSync(handle.markerPath, JSON.stringify({ jobId: "job_1", pid: job.pid }));
+  assert.equal(gateJobStatus(handle), "running");
 });
 
 test("REC-06: a worker launched just before a controller crash is adopted on restart and never relaunched", async (t) => {

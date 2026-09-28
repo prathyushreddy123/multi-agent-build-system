@@ -2,6 +2,7 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 
 import { exec } from "../core/exec.ts";
+import { selfIdentity } from "../core/process-identity.ts";
 
 export interface GateJobSpec {
   jobId: string;
@@ -20,7 +21,8 @@ async function main(): Promise<void> {
   const markerTemporary = `${spec.markerPath}.${process.pid}.tmp`;
   writeFileSync(markerTemporary, JSON.stringify({
     jobId: spec.jobId,
-    pid: process.pid,
+    // PID plus kernel start identity, so recovery never mistakes a reused PID for this job.
+    ...selfIdentity(),
     startedAt: new Date().toISOString(),
   }), { mode: 0o600 });
   renameSync(markerTemporary, spec.markerPath);

@@ -64,7 +64,8 @@ test("a complete, paired, repeated experiment can show an improvement on its pri
   assert.equal(comparison.result, "improved", comparison.reasons.join(" "));
   assert.equal(comparison.primaryMetric, "repairs");
   assert.equal(comparison.perCase.every((item) => item.pairedRepeats === 2), true);
-  assert.equal(comparison.supportsProposal, true);
+  assert.equal(comparison.supportsProposal, false, "manually entered numbers are descriptive, not proposal evidence");
+  assert.match(comparison.reasons.join(" "), /manual rather than controller-bound live trials/);
 });
 
 test("EVAL-01: one regressed case fails the safeguards despite equal aggregate acceptance", (t) => {
@@ -188,14 +189,16 @@ test("policy replay alone cannot show improvement", (t) => {
   assert.match(comparison.reasons.join(), /replay cannot show how a model would have performed/);
 });
 
-test("EVAL-05: a successful experiment supports a proposal but never activates configuration", (t) => {
+test("EVAL-05: forged manual measurements cannot become proposal-supporting evidence, and completion never activates configuration", (t) => {
   const { records, root } = setup(t);
   const project = records.createProject({ name: "exp", repoPath: root, projectType: "personal", reviewChoice: "off" });
   const before = records.getProject(project.id)?.configVersion;
+  // Invented numbers with no task, evidence, or authorization behind them.
   const experiment = load(records, fixture("paired-cases.json"), {}, project.id);
   const { comparison } = completeExperiment(records, experiment.id);
-  assert.equal(comparison.result, "improved");
-  assert.equal(comparison.supportsProposal, true);
+  assert.equal(comparison.result, "improved", "the numbers alone describe an improvement");
+  assert.deepEqual(comparison.sources, ["manual"]);
+  assert.equal(comparison.supportsProposal, false);
   assert.equal(records.getProject(project.id)?.configVersion, before, "configuration is unchanged");
   assert.equal(records.listCuratorProposals(project.id).length, 0, "no proposal was created or activated");
 });

@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 
 import type { DelegationPolicy } from "../routing/capabilities.ts";
 import { launchClaude, launchCodex } from "../verify/launch.ts";
+import { selfIdentity } from "../core/process-identity.ts";
+import { ProvenanceError } from "../verify/provenance.ts";
 
 interface ProcessSpec {
   attemptId: string;
@@ -26,7 +28,7 @@ async function main(): Promise<void> {
   // that crashed before persisting the PID can adopt it instead of relaunching.
   const markerPath = join(dirname(spec.completionPath), "start-marker.json");
   const markerTemporary = `${markerPath}.${process.pid}.tmp`;
-  writeFileSync(markerTemporary, JSON.stringify({ attemptId: spec.attemptId, pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
+  writeFileSync(markerTemporary, JSON.stringify({ attemptId: spec.attemptId, ...selfIdentity(), startedAt: new Date().toISOString() }), { mode: 0o600 });
   renameSync(markerTemporary, markerPath);
   const launch = spec.harness === "claude" ? launchClaude : launchCodex;
   let payload: Record<string, unknown>;
@@ -46,6 +48,8 @@ async function main(): Promise<void> {
     payload = {
       completedAt: new Date().toISOString(),
       result: null,
+      // A refused provenance is configuration the operator must fix, not a transient fault.
+      failureClass: error instanceof ProvenanceError ? "CONFIG" : null,
       error: error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error),
     };
   }

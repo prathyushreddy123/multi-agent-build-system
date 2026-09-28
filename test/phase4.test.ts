@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
+import { ADMISSION_PENDING_PREFIX, REVIEW_PENDING_PREFIX } from "../src/domain/states.ts";
 
 import type { AdapterHandle, AdapterLaunch, CollectedResult, WorkerAdapter } from "../src/adapters/types.ts";
 import { Controller } from "../src/controller/controller.ts";
@@ -129,6 +130,14 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
   records.transition(activeBlocker.id, "RUNNING");
   assert.throws(() => records.activateCuratorProposal(proposal.id, activationApproval.id, "project-owner", "too early"), /safe checkpoint/);
   records.transition(activeBlocker.id, "CANCELLED");
+  // A repair waiting for admission is BLOCKED but still in flight: it holds its
+  // allocation and would resume under whatever configuration is then active.
+  const deferred = records.createTask({ projectId: project.id, title: "deferred repair", objective: "in flight while blocked" });
+  records.transition(deferred.id, "READY");
+  records.transition(deferred.id, "RUNNING");
+  records.transition(deferred.id, "BLOCKED", { blocked_reason: `${ADMISSION_PENDING_PREFIX} repair: provider at capacity` });
+  assert.throws(() => records.activateCuratorProposal(proposal.id, activationApproval.id, "project-owner", "too early"), /safe checkpoint.*waiting to resume/);
+  records.transition(deferred.id, "CANCELLED");
   const activation = records.activateCuratorProposal(proposal.id, activationApproval.id, "project-owner", "Acceptance activation.");
   const active = records.getProject(project.id);
   assert.equal(activation.action, "activate");
@@ -155,6 +164,14 @@ test("curator evaluates, approval-gates, activates, applies, and reverts a versi
 
   const revertApproval = requestRevertApproval(records, project.id, initialConfigVersion, "Restore the known initial configuration.");
   records.decideApproval(revertApproval.id, "approved", "project-owner");
+  const reviewWaiting = records.createTask({ projectId: project.id, title: "review waiting", objective: "in flight while blocked" });
+  records.transition(reviewWaiting.id, "READY");
+  records.transition(reviewWaiting.id, "RUNNING");
+  records.transition(reviewWaiting.id, "BLOCKED", { blocked_reason: `${REVIEW_PENDING_PREFIX} reviewer at capacity` });
+  assert.throws(() => records.revertProjectConfig({
+    projectId: project.id, targetConfigVersion: initialConfigVersion, approvalId: revertApproval.id, activatedBy: "project-owner", reason: "too early",
+  }), /safe checkpoint.*waiting to resume/);
+  records.transition(reviewWaiting.id, "CANCELLED");
   const revert = records.revertProjectConfig({
     projectId: project.id,
     targetConfigVersion: initialConfigVersion,

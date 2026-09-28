@@ -52,16 +52,14 @@ import {
   type CapabilityRegistry,
 } from "../routing/capabilities.ts";
 import type { RouteCandidate, RouteSelection, RoutingPolicy } from "../routing/router.ts";
-import { getExperiment, trialBindingForTask, type TrialBinding } from "../optimization/experiments.ts";
+import { trialBindingForTask, trialLaunchRefusal, type TrialBinding } from "../optimization/experiments.ts";
 import type { Attempt, GateResult, GateSpec, Project, Records, Task } from "../store/records.ts";
 import type { ExecutionEpisode, ExecutionStage, StageRun, TaskObligation } from "../domain/execution.ts";
 import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, workspaceChangedFiles, workspaceContainsRevision, workspaceDiff, workspaceRevision } from "../workspace/git.ts";
 
-/** Marks a task whose only outstanding work is a review the controller can retry. */
-export const REVIEW_PENDING_PREFIX = "Review pending:";
-export const REVIEW_RECOVERY_PREFIX = "Review recovery pending:";
-/** In-flight work (repair, reroute) waiting for shared admission capacity. */
-export const ADMISSION_PENDING_PREFIX = "Admission pending:";
+import { assertNoMaintenance, MaintenanceInProgressError } from "../maintenance/lock.ts";
+import { ADMISSION_PENDING_PREFIX, IN_FLIGHT_BLOCKED_PREFIXES, REVIEW_PENDING_PREFIX, REVIEW_RECOVERY_PREFIX } from "../domain/states.ts";
+export { ADMISSION_PENDING_PREFIX, REVIEW_PENDING_PREFIX, REVIEW_RECOVERY_PREFIX };
 /** Ready tasks inspected per tick; bounded so a long queue cannot stall a tick. */
 const READY_SCAN_LIMIT = 200;
 const ENGINE_REVISION = "mabs.controller.stage.v1";
@@ -229,6 +227,8 @@ export class Controller {
     this.ticking = true;
     const loopDelayMs = Math.max(0, Date.now() - this.expectedTickAt);
     try {
+      // Migration holds this lock from its drain check until the upgrade ends.
+      assertNoMaintenance(this.records.store.path);
       if (!this.records.acquireControllerLease(this.options.controllerId, process.pid, this.options.leaseTimeoutMs)) {
         const lease = this.records.currentControllerLease();
         throw new ControllerLeaseHeldError(
@@ -266,6 +266,8 @@ export class Controller {
       // the health row, and overwriting it with "degraded" would misreport a
       // healthy peer as broken.
       if (error instanceof ControllerLeaseHeldError) this.steppedDown = error;
+      // Maintenance owns the database: write nothing, not even health.
+      else if (error instanceof MaintenanceInProgressError) { /* retried next tick */ }
       else try { this.writeHealth(loopDelayMs, "degraded"); } catch { /* database outage is already represented by the failed tick */ }
       throw error;
     } finally {
@@ -331,6 +333,12 @@ export class Controller {
       const adapter = this.requireAdapter(attempt.adapter);
       await adapter.cancel(this.handleOf(attempt));
       this.records.finishAttempt({ attemptId: attempt.id, state: "cancelled", outcome: "cancelled", failureClass: "CANCELLED" });
+    }
+    // Close every stage the task still owns and release its admission leases,
+    // so cancellation leaves no capacity held and no stage unresolved.
+    for (const stage of this.records.listActiveStageRuns().filter((item) => item.taskId === taskId)) {
+      const current = this.records.getTask(taskId) as Task;
+      this.finishStage(stage, { state: "cancelled", failureClass: "CANCELLED", failureDetail: "task cancelled", taskState: current.state });
     }
     this.records.transition(taskId, "CANCELLED", { claimed_by: null, claimed_at: null }, { requestedBy: "controller" });
   }
@@ -2123,7 +2131,11 @@ export class Controller {
       const project = this.records.getProject(task.projectId);
       if (!project || project.status !== "active") continue;
       const dependencies = this.records.dependenciesOf(task.id).map((id) => this.records.getTask(id)).filter((item): item is Task => item !== null);
-      const failed = dependencies.find((dependency) => ["FAILED", "CANCELLED"].includes(dependency.state));
+      // A prerequisite that failed, or is blocked on anything other than
+      // in-flight capacity, can make no progress by itself: the dependent is
+      // blocked with the reason instead of waiting silently in QUEUED.
+      const failed = dependencies.find((dependency) => ["FAILED", "CANCELLED"].includes(dependency.state) ||
+        (dependency.state === "BLOCKED" && !IN_FLIGHT_BLOCKED_PREFIXES.some((prefix) => dependency.blockedReason?.startsWith(prefix))));
       if (failed) {
         this.recordObligationOnce({
           taskId: task.id,
@@ -2135,9 +2147,14 @@ export class Controller {
           introducedRevision: failed.resultRevision,
           evidenceRefs: [`task:${failed.id}:${failed.state}`],
         });
+        const reason = `Dependency ${failed.id} is ${failed.state}${failed.state === "BLOCKED" && failed.blockedReason ? `: ${failed.blockedReason}` : "."}`;
         if (task.state !== "BLOCKED") {
-          this.records.transition(task.id, "BLOCKED", { blocked_reason: `Dependency ${failed.id} is ${failed.state}.` });
+          this.records.transition(task.id, "BLOCKED", { blocked_reason: reason });
         }
+      } else if (task.state === "BLOCKED" && !dependencies.every((dependency) => dependency.state === "DONE")) {
+        // The prerequisite was retried or unblocked: wait for it again. Its
+        // obligation stays open until it is DONE.
+        this.records.transition(task.id, "QUEUED", { blocked_reason: null }, { reason: "dependency no longer blocked" });
       } else if (dependencies.every((dependency) => dependency.state === "DONE")) {
         for (const obligation of this.records.getContinuation(task.id).openObligations) {
           if (!obligation.sourceKey.startsWith("dependency:")) continue;
@@ -2349,11 +2366,11 @@ export class Controller {
       throw new Error(selection.reason);
     }
     const candidate: RouteCandidate = selection.chosen;
-    // A trial's attempt budget is part of its authorized protocol.
-    const trial = trialBindingForTask(this.records, task.id);
-    const attemptCap = trial ? getExperiment(this.records, trial.experimentId)?.protocol?.budget.maxAttemptsPerTrial ?? null : null;
-    if (trial && attemptCap !== null && this.records.listAttempts(task.id).length >= attemptCap) {
-      this.blockTask(task, "CONFIG", `Experiment trial attempt budget of ${attemptCap} is spent; the trial ends interrupted.`);
+    // A trial's authorization and budgets hold at every launch, not only when
+    // its task was created.
+    const trialRefusal = trialLaunchRefusal(this.records, task.id);
+    if (trialRefusal) {
+      this.blockTask(task, "CONFIG", `${trialRefusal} The trial ends interrupted.`);
       return;
     }
     // Every launch path, not only initial dispatch, passes the same admission.

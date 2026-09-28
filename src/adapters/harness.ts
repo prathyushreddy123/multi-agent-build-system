@@ -7,6 +7,7 @@ import { classifyFailure, classifyFromEnvelope } from "../core/failure.ts";
 import { validateWorkerOutput } from "../domain/contract.ts";
 import { DEFAULT_CAPABILITY_REGISTRY, DISABLED_DELEGATION, evaluateCapability, type CapabilityRegistry } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "../verify/env.ts";
+import { PROC_AVAILABLE, verifyProcess } from "../core/process-identity.ts";
 import { primaryAnsweringModel, sameModel, type LaunchResult } from "../verify/launch.ts";
 import type { AdapterHandle, AdapterLaunch, AdapterStatus, CollectedResult, WorkerAdapter } from "./types.ts";
 
@@ -26,15 +27,6 @@ function extractJson(text: string): unknown {
   }
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 /** Written atomically by the worker wrapper before it starts any provider. */
 export const START_MARKER_FILE = "start-marker.json";
 const LAUNCH_SPEC_FILE = "launch.json";
@@ -45,16 +37,25 @@ function launchFiles(handle: Pick<AdapterHandle, "completionPath">): { spec: str
   return { spec: join(dir, LAUNCH_SPEC_FILE), marker: join(dir, START_MARKER_FILE) };
 }
 
-function readStartMarker(path: string, attemptId: string): number | null {
+interface RecordedProcess {
+  pid: number;
+  startTicks: string | null;
+  bootId: string | null;
+}
+
+function readStartMarker(path: string, attemptId: string): RecordedProcess | null {
   try {
-    const marker = JSON.parse(readFileSync(path, "utf8")) as { attemptId?: unknown; pid?: unknown };
-    return marker.attemptId === attemptId && typeof marker.pid === "number" ? marker.pid : null;
+    const marker = JSON.parse(readFileSync(path, "utf8")) as { attemptId?: unknown; pid?: unknown; startTicks?: unknown; bootId?: unknown };
+    if (marker.attemptId !== attemptId || typeof marker.pid !== "number") return null;
+    return {
+      pid: marker.pid,
+      startTicks: typeof marker.startTicks === "string" ? marker.startTicks : null,
+      bootId: typeof marker.bootId === "string" ? marker.bootId : null,
+    };
   } catch {
     return null;
   }
 }
-
-const PROC_AVAILABLE = existsSync("/proc/self/cmdline");
 
 /**
  * Find a live process whose argv names this exact launch specification. The
@@ -137,27 +138,44 @@ export class HarnessAdapter implements WorkerAdapter {
     return { attemptId: input.attemptId, pid: child.pid ?? null, sessionId: null, completionPath: input.completionPath };
   }
 
-  /** The durable PID, else the wrapper's own marker, else a live process naming this launch. */
-  private resolvePid(handle: AdapterHandle): number | null {
-    if (handle.pid !== null) return handle.pid;
+  /**
+   * The recorded process: the wrapper's own marker (which carries its start
+   * identity), else the durable PID, else a live process naming this launch.
+   */
+  private locate(handle: AdapterHandle): RecordedProcess | null {
     const files = launchFiles(handle);
-    return readStartMarker(files.marker, handle.attemptId) ?? (existsSync(files.spec) ? findProcessByArgument(files.spec) : null);
+    const marker = readStartMarker(files.marker, handle.attemptId);
+    if (marker && (handle.pid === null || handle.pid === marker.pid)) return marker;
+    if (handle.pid !== null) return { pid: handle.pid, startTicks: null, bootId: null };
+    const found = existsSync(files.spec) ? findProcessByArgument(files.spec) : null;
+    return found === null ? null : { pid: found, startTicks: null, bootId: null };
+  }
+
+  /** Whether the recorded process is still this launch's wrapper; a reused PID is never ours. */
+  private verify(handle: AdapterHandle): { recorded: RecordedProcess | null; verdict: "alive" | "gone" | "unverifiable" } {
+    const recorded = this.locate(handle);
+    if (!recorded) return { recorded, verdict: "gone" };
+    return { recorded, verdict: verifyProcess(recorded.pid, { argument: launchFiles(handle).spec, startTicks: recorded.startTicks, bootId: recorded.bootId }) };
   }
 
   recoverHandle(handle: AdapterHandle): AdapterHandle {
-    return { ...handle, pid: this.resolvePid(handle) };
+    const { recorded, verdict } = this.verify(handle);
+    return { ...handle, pid: verdict === "alive" && recorded ? recorded.pid : handle.pid };
   }
 
   async status(handle: AdapterHandle, options: { launchGraceMs?: number } = {}): Promise<AdapterStatus> {
     if (existsSync(handle.completionPath)) return "completed";
-    const pid = this.resolvePid(handle);
-    if (pid !== null && processAlive(pid)) return "running";
+    const { recorded, verdict } = this.verify(handle);
+    if (verdict === "alive") return "running";
+    // Something runs under the PID, but without a process table it cannot be
+    // proven to be ours, so it is neither adopted nor presumed lost.
+    if (verdict === "unverifiable") return "ambiguous";
     const files = launchFiles(handle);
     // A crash between spawn and the PID write leaves only the specification.
     // The wrapper marks itself before starting any provider, so a missing
     // marker with no matching process after the grace window proves nothing
     // ran; without a process table that proof is unavailable.
-    if (pid === null && existsSync(files.spec)) {
+    if (recorded === null && existsSync(files.spec)) {
       const ageMs = Date.now() - statSync(files.spec).mtimeMs;
       if (ageMs <= (options.launchGraceMs ?? DEFAULT_LAUNCH_GRACE_MS)) return "launching";
       if (!PROC_AVAILABLE) return "ambiguous";
@@ -166,29 +184,34 @@ export class HarnessAdapter implements WorkerAdapter {
   }
 
   async cancel(recorded: AdapterHandle): Promise<void> {
-    const handle = this.recoverHandle(recorded);
-    if (handle.pid === null || !processAlive(handle.pid)) return;
-    try {
-      process.kill(-handle.pid, "SIGTERM");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      return;
+    const first = this.verify(recorded);
+    if (first.verdict === "unverifiable") {
+      throw new Error(`Cannot prove pid ${first.recorded?.pid} is still attempt ${recorded.attemptId}'s worker; refusing to signal it. Stop it manually.`);
     }
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline && processAlive(handle.pid)) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    if (processAlive(handle.pid)) {
+    if (first.verdict !== "alive" || !first.recorded) return;
+    const pid = first.recorded.pid;
+    // Signal the group only while the identity still matches: between checks
+    // the wrapper can exit and its PID be reused.
+    const signal = (name: NodeJS.Signals): boolean => {
+      if (this.verify(recorded).verdict !== "alive") return false;
       try {
-        process.kill(-handle.pid, "SIGKILL");
+        process.kill(-pid, name);
+        return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        return false;
       }
+    };
+    if (!signal("SIGTERM")) return;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && this.verify(recorded).verdict === "alive") {
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    signal("SIGKILL");
   }
 
   async collectResult(handle: AdapterHandle, cwd: string): Promise<CollectedResult> {
-    let envelope: { result: LaunchResult | null; error: string | null };
+    let envelope: { result: LaunchResult | null; error: string | null; failureClass?: "CONFIG" | null };
     try {
       envelope = JSON.parse(readFileSync(handle.completionPath, "utf8")) as typeof envelope;
     } catch (error) {
@@ -203,7 +226,7 @@ export class HarnessAdapter implements WorkerAdapter {
       return {
         launch: null,
         validation: validateWorkerOutput(null),
-        failureClass: "INFRA",
+        failureClass: envelope.failureClass ?? "INFRA",
         error: envelope.error ?? "Worker process failed without a launch result.",
       };
     }
