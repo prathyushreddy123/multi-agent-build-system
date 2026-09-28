@@ -18,6 +18,7 @@ export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {
   review: [
     "This is an independent, read-only review. Do not edit tracked files. Inspect evidence directly instead of relying on the implementer's summary.",
     "Put actionable findings in follow_up.unresolved and prefix each with [critical], [major], or [minor]. Leave unresolved empty only when the revision is acceptable.",
+    "A clarification or question that does not block acceptance goes in follow_up.unresolved as [minor]. Put a question in follow_up.decisions_requested only when a user must answer it before this revision can be accepted, and prefix it with [blocking].",
   ],
 };
 

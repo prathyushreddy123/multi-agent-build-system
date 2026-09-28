@@ -138,7 +138,21 @@ export function buildContextPacket(input: {
   const obligationByText = new Map(obligations.map((item) => [normalizedText(item.summary), item.id]));
   const seenFindings = new Set<string>();
   const previousFindings: string[] = [];
+  // A person's answer to a blocking decision is authoritative input for every
+  // later attempt, so it is carried explicitly rather than left in the journal.
+  const answered = input.records.listObligations(input.task.id).filter((item) => item.kind === "decision_needed" && item.state === "resolved");
+  const decisions = input.records.listEventsOfKind(input.task.id, "obligation.decided")
+    .flatMap((event) => {
+      try {
+        const data = JSON.parse(String(event.data)) as { obligationId?: string; answer?: string; decidedBy?: string };
+        const obligation = answered.find((item) => item.id === data.obligationId);
+        return obligation && data.answer ? [`User decision (${data.decidedBy ?? "unknown"}) on "${obligation.summary}": ${data.answer}`] : [];
+      } catch {
+        return [];
+      }
+    });
   for (const finding of [
+    ...decisions,
     ...(input.previousFindings ?? []),
     ...dependencyTasks.map((task) => `${task.id}: ${task.resultSummary ?? `state=${task.state}`}`),
     ...(checkpoint ? checkpoint.findings : []),

@@ -23,6 +23,8 @@ export interface PlannedTask {
   executionMode: ExecutionMode;
   executionReason: string;
   priority?: number;
+  /** Mandatory requirement IDs this task is accountable for; omit for legacy broad coverage. */
+  requirements?: string[];
 }
 
 export interface ExecutionPlan {
@@ -108,6 +110,9 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
     if (task?.requiredTools !== undefined && (
       !Array.isArray(task.requiredTools) || task.requiredTools.some((tool) => typeof tool !== "string" || !tool.trim())
     )) errors.push(`${label}: requiredTools must contain only non-empty tool names.`);
+    if (task?.requirements !== undefined && (
+      !Array.isArray(task.requirements) || task.requirements.some((requirement) => typeof requirement !== "string" || !requirement.trim())
+    )) errors.push(`${label}: requirements must contain only requirement IDs.`);
     if (task?.priority !== undefined && (!Number.isSafeInteger(task.priority) || task.priority < 0)) {
       errors.push(`${label}: priority must be a non-negative integer.`);
     }
@@ -197,6 +202,7 @@ export function applyExecutionPlan(records: Records, projectId: string, plan: Ex
         dependsOn: (item.dependsOn ?? []).map((dependency) => (created.get(dependency) as Task).id),
         executionMode: item.executionMode,
         executionReason: item.executionReason,
+        ownedRequirements: item.requirements,
       });
       created.set(key, task);
     }

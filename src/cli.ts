@@ -169,6 +169,9 @@ PROJECTS AND TASKS
   task cancel <id> --version=<recordVersion>
   task watch [--project=<id>] [--interval=1000] [--json|--once]
   task steps <task>                            Recorded implementation steps
+  obligation list <task>                       Durable findings, decisions, and their lifecycle
+  obligation decide <obligation> --answer=... --by=<person>
+                                               Record a human answer to a blocking decision
 
 REVIEW, APPROVAL, FEEDBACK
   review decide <task>                         Explain the review decision for a task
@@ -1120,6 +1123,20 @@ async function main(): Promise<void> {
     }
     if (area === "provider" && action === "list") {
       console.log(JSON.stringify(records.listProviderCapacity(), null, 2));
+      return;
+    }
+    if (area === "obligation" && action === "list") {
+      if (!rest[0]) throw new Error("Usage: mabs obligation list <task>");
+      console.log(JSON.stringify(records.listObligations(rest[0]), null, 2));
+      return;
+    }
+    if (area === "obligation" && action === "decide") {
+      const args = parseArgs(rest);
+      const id = args.positionals[0];
+      const answer = textOption(args, "answer");
+      const by = textOption(args, "by");
+      if (!id || !answer?.trim() || !by?.trim()) throw new Error("Usage: mabs obligation decide <obligation> --answer=... --by=<person>");
+      console.log(JSON.stringify(records.decideObligation(id, { answer, decidedBy: by }), null, 2));
       return;
     }
     if (area === "routing" && action === "capabilities") {

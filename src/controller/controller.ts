@@ -27,8 +27,8 @@ import {
   launchGateJob,
 } from "../gates/runner.ts";
 import { preflightWorktree } from "../environment/preflight.ts";
-import { classifyFindings, describeReviewPolicy, evaluateReviewPolicy } from "../review/policy.ts";
-import type { ReviewDecision } from "../review/policy.ts";
+import { describeReviewPolicy, evaluateReviewPolicy, triageReviewOutput } from "../review/policy.ts";
+import type { ReviewDecision, ReviewItem, ReviewerRoute } from "../review/policy.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import {
@@ -386,16 +386,26 @@ export class Controller {
     return selection;
   }
 
-  private selectReviewRoute(task: Task, excludedAdapter?: string): RouteSelection {
+  /**
+   * Honor the recorded reviewer route. `independent_provider` excludes the
+   * implementer's provider and never falls back to it: when no other provider
+   * is eligible, the review waits or blocks under the policy's capacity
+   * action. Only an explicitly chosen `same_provider_fresh_context` policy may
+   * use the implementer's provider, always in a fresh session.
+   */
+  private selectReviewRoute(task: Task, route: ReviewerRoute, implementerAdapter?: string, failedAdapter?: string): RouteSelection {
     const reviewTask: Task = { ...task, role: "reviewer", taskClass: "review", requiredTools: [] };
-    const excluded = excludedAdapter ? new Set([excludedAdapter]) : new Set<string>();
-    const independent = this.selectTaskRoute(reviewTask, excluded);
-    if (independent.chosen || !excludedAdapter) return independent;
-    const sameProvider = this.selectTaskRoute(reviewTask);
-    if (sameProvider.chosen) {
-      sameProvider.reason += ` No second eligible provider was available; using a fresh, separate review context on ${sameProvider.chosen.adapter}.`;
+    const excluded = new Set<string>();
+    if (route === "independent_provider" && implementerAdapter) excluded.add(implementerAdapter);
+    if (failedAdapter) excluded.add(failedAdapter);
+    const selection = this.selectTaskRoute(reviewTask, excluded);
+    if (!selection.chosen && route === "independent_provider" && implementerAdapter) {
+      selection.reason += ` Reviewer policy requires a provider other than ${implementerAdapter}; same-provider review is not substituted.`;
     }
-    return sameProvider;
+    if (selection.chosen && route === "same_provider_fresh_context" && selection.chosen.adapter === implementerAdapter) {
+      selection.reason += ` Explicit same-provider policy: fresh, separate review session on ${selection.chosen.adapter}.`;
+    }
+    return selection;
   }
 
   /**
@@ -629,8 +639,7 @@ export class Controller {
       const checking = this.records.transition(running.id, "CHECKING", {}, { reason: "resume the already finalized revision" });
       const reviewing = this.records.transition(checking.id, "REVIEWING", {}, { reason: "retry only the outstanding review" });
       const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
-      const excluded = project.reviewPolicy.reviewerRoute === "independent_provider" ? implementer?.adapter : undefined;
-      const selection = this.selectReviewRoute(reviewing, excluded);
+      const selection = this.selectReviewRoute(reviewing, project.reviewPolicy.reviewerRoute, implementer?.adapter);
       if (selection.chosen) {
         await this.launchAttempt(reviewing, project, "review", [reviewRecovery.summary], ids.launch(), selection, { consumeRecovery: true });
       }
@@ -865,12 +874,20 @@ export class Controller {
       }
       const attempt = this.implementationAttempt(current.id);
       if (!attempt) {
-        await this.acceptTask(current, notConfigured ? "Mechanical task has no configured quality coverage." : "Mechanical checks passed.", gates);
+        await this.acceptTask(current, notConfigured ? "Mechanical task has no configured quality coverage." : "Mechanical checks passed.", gates,
+          { status: "not_required" });
         return;
       }
       const changedFiles = await workspaceChangedFiles(current.worktreePath as string, current.baseRevision ?? attempt.baseRevision ?? current.resultRevision);
       const diffText = (await workspaceDiff(current.worktreePath as string, current.baseRevision ?? attempt.baseRevision ?? current.resultRevision, current.resultRevision)).slice(0, 400_000);
-      const decision = this.reviewDecision(current, project, { changedFiles, diffText });
+      const policyDecision = this.reviewDecision(current, project, { changedFiles, diffText });
+      // Findings from an earlier review can only be validated by a review; a
+      // risk policy that would skip this revision must not strand them.
+      const openReviewFindings = this.records.getContinuation(current.id).openObligations
+        .filter((item) => item.blocking && item.sourceReviewId !== null && item.kind !== "decision_needed");
+      const decision: ReviewDecision = !policyDecision.review && openReviewFindings.length > 0
+        ? { ...policyDecision, review: true, reason: `${openReviewFindings.length} open review finding(s) need review validation. ${policyDecision.reason}` }
+        : policyDecision;
       this.records.recordEvent({
         kind: "review.decision",
         projectId: project.id,
@@ -894,7 +911,7 @@ export class Controller {
         evidence: gates.map((gate) => gate.evidencePath).filter((path): path is string => path !== null),
       });
       if (decision.review) await this.beginReview(current, project, attempt, decision);
-      else await this.acceptTask(current, decision.reason, gates);
+      else await this.acceptTask(current, decision.reason, gates, { status: "not_required" });
       return;
     }
 
@@ -952,7 +969,17 @@ export class Controller {
     }
   }
 
-  private async acceptTask(task: Task, reason: string, gates: GateResult[]): Promise<void> {
+  /**
+   * `review.status` says why acceptance did not need or did get a review.
+   * A task accepted with no review required is labeled `not_required`, never
+   * approved.
+   */
+  private async acceptTask(
+    task: Task,
+    reason: string,
+    gates: GateResult[],
+    review: { status: "approved" | "not_required"; reviewId?: string },
+  ): Promise<void> {
     const current = this.records.getTask(task.id) as Task;
     const blocking = this.records.getContinuation(current.id).openObligations.filter((item) => item.blocking);
     if (blocking.length > 0) {
@@ -968,7 +995,10 @@ export class Controller {
     this.finishStage(stage, { state: "succeeded" });
     this.records.updateTaskFields(current.id, { claimed_by: null, claimed_at: null });
     const done = this.records.getTask(current.id) as Task;
-    this.records.recordEvent({ kind: "task.accepted", projectId: current.projectId, taskId: current.id, data: { reason, stageRunId: stage.id } });
+    this.records.recordEvent({
+      kind: "task.accepted", projectId: current.projectId, taskId: current.id,
+      data: { reason, stageRunId: stage.id, review: { status: review.status, reviewId: review.reviewId ?? null } },
+    });
     this.records.completeFeedbackForTask(current.id, done.resultSummary ?? "Response task completed without a summary.");
   }
 
@@ -1303,6 +1333,17 @@ export class Controller {
     if (attemptStage && ["reserved", "launching", "running"].includes(attemptStage.state)) {
       this.finishStage(attemptStage, { state: "succeeded", taskState: "RUNNING" });
     }
+    if (attemptStage?.stage === "repair") {
+      // The worker's claim is not resolution: review findings move to
+      // addressed-pending-validation until a review of this revision confirms.
+      for (const obligation of this.records.getContinuation(task.id).openObligations) {
+        if (obligation.state !== "open" || obligation.sourceReviewId === null || obligation.kind !== "code_defect") continue;
+        this.records.resolveObligation(
+          { obligationId: obligation.id, state: "addressed_pending_validation", resolvedRevision: finalized.revision },
+          [`attempt:${attempt.id}:repaired@${finalized.revision}`],
+        );
+      }
+    }
     this.records.invalidateApprovals(task.id, "Task revision changed after implementation or repair.", finalized.revision);
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: attempt.id, kind: attempt.kind === "repair" ? "repair_complete" : "implementation_complete",
@@ -1354,10 +1395,9 @@ export class Controller {
       policy: decision.reason,
       scope: decision.scope,
     });
-    const excluded = decision.reviewerRoute === "independent_provider" ? implementationAttempt.adapter : undefined;
-    const selection = this.selectReviewRoute(reviewing, excluded);
+    const selection = this.selectReviewRoute(reviewing, decision.reviewerRoute, implementationAttempt.adapter);
     if (!selection.chosen) {
-      this.deferReview(reviewing, decision, selection);
+      this.deferReview(reviewing, decision.capacityAction, selection);
       return;
     }
     await this.launchAttempt(reviewing, project, "review", this.priorReviewFindings(reviewing), ids.launch(), selection);
@@ -1367,8 +1407,8 @@ export class Controller {
    * Required review coverage that cannot run right now is recorded as pending
    * or blocked, with the missing work named. It is never silently skipped.
    */
-  private deferReview(task: Task, decision: ReviewDecision, selection: RouteSelection): void {
-    const pending = decision.capacityAction === "pending";
+  private deferReview(task: Task, capacityAction: ReviewDecision["capacityAction"], selection: RouteSelection): void {
+    const pending = capacityAction === "pending";
     const reason = `${pending ? REVIEW_PENDING_PREFIX : "Independent review is blocked:"} ${selection.reason}`;
     this.records.recordCheckpoint({
       taskId: task.id, kind: pending ? "review_pending" : "review_blocked",
@@ -1382,7 +1422,7 @@ export class Controller {
       kind: pending ? "review.pending" : "review.blocked",
       projectId: task.projectId,
       taskId: task.id,
-      data: { capacityAction: decision.capacityAction, reason: selection.reason, revision: task.resultRevision },
+      data: { capacityAction, reason: selection.reason, revision: task.resultRevision },
     });
     this.blockTask(task, this.providerBlockClass(selection), reason);
   }
@@ -1398,8 +1438,7 @@ export class Controller {
       const project = this.records.getProject(task.projectId);
       if (!project || project.status !== "active") continue;
       const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
-      const excluded = project.reviewPolicy.reviewerRoute === "independent_provider" ? implementer?.adapter : undefined;
-      const selection = this.selectReviewRoute(task, excluded);
+      const selection = this.selectReviewRoute(task, project.reviewPolicy.reviewerRoute, implementer?.adapter);
       if (!selection.chosen) continue;
       const reviewing = this.records.transition(task.id, "REVIEWING", { blocked_reason: null, failure_class: null }, {
         reason: "review capacity became available; resuming the outstanding review",
@@ -1435,20 +1474,58 @@ export class Controller {
 
     const project = this.records.getProject(task.projectId);
     if (!project) throw new Error(`Unknown project ${task.projectId}`);
-    const required = this.records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
-    const missingCoverage = required.filter((requirement) => !output.addressed_requirements.includes(requirement));
-    const reported = [
-      ...output.follow_up.unresolved,
-      ...output.follow_up.decisions_requested.map((decision) => `[major] Decision required: ${decision}`),
-      ...missingCoverage.map((requirement) => `[major] Review did not verify mandatory requirement ${requirement}.`),
-    ];
-    if (output.outcome === "failed" && reported.length === 0) reported.push(`[major] ${output.reason || output.summary}`);
-    // Minor suggestions are retained as advice; only blocking severities send
-    // the task back for repair. An unfinished review is never disguised as
-    // approval: a blocked outcome stays blocked.
-    const classified = classifyFindings(reported, project.reviewPolicy.blockingSeverities);
-    const findings = classified.all;
-    const verdict = output.outcome === "blocked" ? "blocked" : classified.blocking.length > 0 ? "request_changes" : "approved";
+    // Evidence is bound to what was reviewed. A review of an older revision or
+    // under a different configuration is stale: record it, approve nothing,
+    // and run the validation again.
+    const packet = attempt.packetId ? this.records.getPacket(attempt.packetId) : undefined;
+    const staleReason = attempt.baseRevision !== revision
+      ? `reviewed ${attempt.baseRevision ?? "unknown"} but the task is now at ${revision}`
+      : packet?.config_version && packet.config_version !== project.configVersion
+        ? `reviewed under configuration ${String(packet.config_version)}, now ${project.configVersion}`
+        : null;
+    if (staleReason) {
+      this.records.finishAttempt({
+        attemptId: attempt.id, state: "failed", failureClass: "CONTRACT", reason: `Stale review evidence: ${staleReason}.`, usage,
+        outputPath: existsSync(resultArtifact) ? resultArtifact : undefined,
+      });
+      rmSync(join(task.worktreePath, ".mabs", "result.json"), { force: true });
+      if (attempt.stageRunId) {
+        const stage = this.records.getStageRun(attempt.stageRunId);
+        if (stage && ["reserved", "launching", "running"].includes(stage.state)) {
+          this.finishStage(stage, { state: "failed", failureClass: "CONTRACT", failureDetail: `Stale review evidence: ${staleReason}.`, taskState: "REVIEWING" });
+        }
+      }
+      this.records.recordEvent({ kind: "review.evidence_stale", projectId: project.id, taskId: task.id, attemptId: attempt.id,
+        data: { reason: staleReason, revision } });
+      const implementer = this.records.listAttempts(task.id).findLast((item) => item.kind !== "review");
+      const selection = this.selectReviewRoute(task, project.reviewPolicy.reviewerRoute, implementer?.adapter);
+      if (selection.chosen) await this.launchAttempt(this.records.getTask(task.id) as Task, project, "review", this.priorReviewFindings(task), ids.launch(), selection);
+      else this.deferReview(task, project.reviewPolicy.capacityAction, selection);
+      return;
+    }
+    const mandatory = this.records.listRequirements(task.projectId).filter((requirement) => requirement.mandatory).map((requirement) => requirement.id);
+    const ownership = this.records.requirementOwnership(task.id);
+    const items = triageReviewOutput({
+      unresolved: output.follow_up.unresolved,
+      decisionsRequested: output.follow_up.decisions_requested,
+      addressedRequirements: output.addressed_requirements,
+      mandatoryRequirements: mandatory,
+      ownedRequirements: ownership?.requirementIds ?? null,
+      blockingSeverities: project.reviewPolicy.blockingSeverities,
+    });
+    if (output.outcome === "failed" && items.length === 0) {
+      items.push(...triageReviewOutput({
+        unresolved: [`[major] ${output.reason || output.summary}`], decisionsRequested: [], addressedRequirements: [],
+        mandatoryRequirements: [], ownedRequirements: [], blockingSeverities: project.reviewPolicy.blockingSeverities,
+      }));
+    }
+    // Only blocking severities send the task back for repair; questions and
+    // minor suggestions are retained as advice. An unfinished review is never
+    // disguised as approval: a blocked outcome stays blocked.
+    const blockingItems = items.filter((item) => item.blocking);
+    const advisoryItems = items.filter((item) => !item.blocking);
+    const findings = items.map((item) => item.text);
+    const verdict = output.outcome === "blocked" ? "blocked" : blockingItems.length > 0 ? "request_changes" : "approved";
     const review = this.records.recordReview({
       taskId: task.id,
       attemptId: attempt.id,
@@ -1456,13 +1533,14 @@ export class Controller {
       verdict,
       summary: output.summary,
       findings,
-      blockingFindings: classified.blocking,
-      advisoryFindings: classified.advisory,
+      blockingFindings: blockingItems.map((item) => item.text),
+      advisoryFindings: advisoryItems.map((item) => item.text),
       requirementsChecked: output.addressed_requirements,
       evidencePath: existsSync(resultArtifact) ? resultArtifact : null,
       policyVersion: project.reviewPolicy.version,
       contextFingerprint: this.records.reviewContextFingerprint(task.id),
     });
+    const reviewEvidence = [review.evidencePath].filter((path): path is string => path !== null);
     for (const obligation of this.records.getContinuation(task.id).openObligations) {
       if (obligation.sourceKey.startsWith("review-recovery:")) {
         this.records.resolveObligation(
@@ -1471,44 +1549,34 @@ export class Controller {
         );
       }
     }
-    for (const [index, finding] of classified.blocking.entries()) {
-      const decision = /decision required|needs? (?:a )?user decision|unanswered requirement/i.test(finding);
-      const missingRequirementEvidence = /did not verify mandatory requirement/i.test(finding);
-      this.recordObligationOnce({
-        taskId: task.id,
-        kind: decision ? "decision_needed" : missingRequirementEvidence ? "requirement_evidence" : "code_defect",
-        severity: "blocking",
-        blocking: true,
-        sourceKey: `review:${review.id}:blocking:${index}`,
-        summary: finding,
-        sourceReviewId: review.id,
-        introducedRevision: revision,
-        evidenceRefs: [review.evidencePath].filter((path): path is string => path !== null),
-      });
-    }
-    for (const [index, finding] of classified.advisory.entries()) {
-      this.recordObligationOnce({
-        taskId: task.id,
-        kind: "advisory",
-        severity: "advisory",
-        blocking: false,
-        sourceKey: `review:${review.id}:advisory:${index}`,
-        summary: finding,
-        sourceReviewId: review.id,
-        introducedRevision: revision,
-        evidenceRefs: [review.evidencePath].filter((path): path is string => path !== null),
-      });
+    const restated = new Set<string>();
+    if (verdict !== "blocked") {
+      for (const item of items) {
+        const obligation = this.upsertReviewObligation(task, review.id, revision, item, reviewEvidence);
+        restated.add(obligation.id);
+      }
+      // A completed review of this revision that no longer reports an earlier
+      // finding is the validation evidence for that finding's resolution.
+      for (const obligation of this.records.getContinuation(task.id).openObligations) {
+        const fromReview = obligation.sourceKey.startsWith("finding:") || obligation.sourceKey.startsWith("review:");
+        if (!fromReview || restated.has(obligation.id)) continue;
+        if (obligation.kind === "decision_needed") continue;
+        this.records.resolveObligation(
+          { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
+          [`review:${review.id}:not-restated@${revision}`],
+        );
+      }
     }
     this.records.recordCheckpoint({
       taskId: task.id, attemptId: attempt.id, kind: `review_${verdict}`, summary: output.summary,
       resultRevision: revision, changedFiles: this.records.changedFilesForTask(task.id), findings,
       unresolved: output.follow_up.decisions_requested,
       nextAction: verdict === "approved"
-        ? classified.advisory.length > 0
-          ? `Complete task. ${classified.advisory.length} advisory finding(s) recorded without blocking acceptance.`
+        ? advisoryItems.length > 0
+          ? `Complete task. ${advisoryItems.length} advisory item(s) recorded without blocking acceptance.`
           : "Complete task."
         : verdict === "request_changes" ? "Repair blocking review findings and rerun checks." : output.follow_up.next_step,
-      evidence: [review.evidencePath].filter((path): path is string => path !== null),
+      evidence: reviewEvidence,
     });
     this.records.finishAttempt({
       attemptId: attempt.id,
@@ -1538,30 +1606,29 @@ export class Controller {
       return;
     }
     if (verdict === "approved") {
-      for (const obligation of this.records.getContinuation(task.id).openObligations) {
-        if (obligation.kind === "code_defect" && obligation.sourceReviewId !== review.id) {
-          this.records.resolveObligation(
-            { obligationId: obligation.id, state: "resolved", resolvedRevision: revision },
-            [`review:${review.id}:approved`],
-          );
-        }
-      }
-      await this.acceptTask(this.records.getTask(task.id) as Task, `Independent review ${review.id} approved ${revision}.`, this.records.gatesForRevision(task.id, revision));
+      await this.acceptTask(this.records.getTask(task.id) as Task, `Independent review ${review.id} approved ${revision}.`,
+        this.records.gatesForRevision(task.id, revision), { status: "approved", reviewId: review.id });
       return;
     }
 
     const current = this.records.getTask(task.id) as Task;
+    // A genuine ambiguity waits for the user; no worker guesses the answer.
     const decisionBlockers = this.records.getContinuation(task.id).openObligations.filter((item) =>
       item.blocking && (item.kind === "decision_needed" || item.kind === "requirement_evidence"),
     );
-    if (decisionBlockers.length > 0) {
+    const codeDefects = blockingItems.filter((item) => item.kind === "code_defect");
+    if (decisionBlockers.length > 0 && codeDefects.length === 0) {
       this.blockTask(current, "CONTRACT", `Independent review is waiting on ${decisionBlockers.length} requirement decision/evidence obligation(s).`);
+      return;
+    }
+    if (decisionBlockers.some((item) => item.kind === "decision_needed")) {
+      this.blockTask(current, "CONTRACT", `Independent review is waiting on ${decisionBlockers.length} requirement decision/evidence obligation(s) before repair.`);
       return;
     }
     if (current.repairsUsed >= current.repairLimit) {
       this.records.transition(task.id, "FAILED", {
         failure_class: "CODE",
-        blocked_reason: `Independent review found blocking changes after the repair limit was exhausted: ${classified.blocking.join("; ")}`,
+        blocked_reason: `Independent review found blocking changes after the repair limit was exhausted: ${codeDefects.map((item) => item.text).join("; ")}`,
         claimed_by: null,
         claimed_at: null,
       });
@@ -1571,11 +1638,33 @@ export class Controller {
       repairs_used: current.repairsUsed + 1,
       claimed_by: null,
       claimed_at: null,
-    }, { reason: "independent review requested changes", findings: classified.blocking, advisory: classified.advisory });
+    }, { reason: "independent review requested changes", findings: blockingItems.map((item) => item.text), advisory: advisoryItems.map((item) => item.text) });
     await this.launchAttempt(this.records.getTask(task.id) as Task, project, "repair", [
-      ...classified.blocking,
-      ...classified.advisory.map((finding) => `${finding} (advisory: optional, does not block acceptance)`),
+      ...advisoryItems.map((item) => `${item.text} (advisory: optional, does not block acceptance)`),
     ]);
+  }
+
+  /**
+   * One durable obligation per finding across reviews. A restated finding that
+   * a repair claimed to address is reopened; one that recurs after it was
+   * resolved gets a numbered recurrence rather than rewriting history.
+   */
+  private upsertReviewObligation(task: Task, reviewId: string, revision: string, item: ReviewItem, evidence: string[]): TaskObligation {
+    const prior = this.records.obligationsForSourceKey(task.id, item.stableKey);
+    const live = prior.findLast((obligation) => obligation.state === "open" || obligation.state === "addressed_pending_validation");
+    if (live?.state === "open") return live;
+    if (live?.state === "addressed_pending_validation") return this.records.reopenObligation(live.id, [`review:${reviewId}:restated@${revision}`]);
+    return this.records.recordObligation({
+      taskId: task.id,
+      kind: item.kind,
+      severity: item.blocking ? "blocking" : "advisory",
+      blocking: item.blocking,
+      sourceKey: prior.length === 0 ? item.stableKey : `${item.stableKey}:recurrence:${prior.length}`,
+      summary: item.text,
+      sourceReviewId: reviewId,
+      introducedRevision: revision,
+      evidenceRefs: evidence,
+    });
   }
 
   private async handleReviewFailure(task: Task, failure: FailureClass, reason: string, failedAdapter: string): Promise<void> {
@@ -1593,7 +1682,8 @@ export class Controller {
       this.noteProviderFailure(failedAdapter, failure, reason);
       const project = this.records.getProject(current.projectId);
       if (!project) throw new Error(`Unknown project ${current.projectId}`);
-      const selection = this.selectReviewRoute(current, failedAdapter);
+      const implementer = this.records.listAttempts(current.id).findLast((attempt) => attempt.kind !== "review");
+      const selection = this.selectReviewRoute(current, project.reviewPolicy.reviewerRoute, implementer?.adapter, failedAdapter);
       if (selection.chosen) {
         this.records.transition(current.id, "REVIEWING", {}, {
           reason: "review provider unavailable; rerouting without spending repair budget",

@@ -1161,6 +1161,50 @@ system prompts and tool schemas are outside MABS's control and are not counted.
 
 **Acceptance:** H1 advisory clarification does not automatically become a major code repair; genuine ambiguity waits for a user; missing required evidence remains a blocker; client review cannot silently use a forbidden route; personal off is labeled not-required, never approved. No historical verdict is rewritten.
 
+#### T09 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation;
+no historical review verdict or obligation is rewritten.
+
+- `triageReviewOutput` (`review-triage-v1`, `src/review/policy.ts`) turns a reviewer report into
+  typed items. An unlabeled finding phrased as a question or marked non-blocking is advisory, never
+  a default `[major]` defect (the H1 failure). A requested decision blocks only when the reviewer
+  marks it `[blocking]` or it names a requirement the task owns; otherwise it is a non-blocking
+  question for the user. Reviewer instructions now describe that convention.
+- Stable finding identity: an obligation's source key is `finding:<kind>:<sha256 of normalized
+  text>`, so a finding restated by a later review (different spacing or label) maps to the same
+  obligation. Lifecycle: `open` → `addressed_pending_validation` when a repair finishes (the worker's
+  claim is not resolution) → `open` again if the next review restates it (`reopenObligation`) →
+  `resolved` only with evidence `review:<id>:not-restated@<revision>`. A finding that recurs after
+  resolution gets a `:recurrence:<n>` key rather than overwriting history. Obligations with the old
+  per-review keys are resolved the same way, so in-flight tasks are not stranded.
+- A blocking decision leaves the task BLOCKED/CONTRACT with no repair launched.
+  `mabs obligation decide <id> --answer=... --by=<person>` records the answer
+  (`obligation.decided`); every later packet carries it as a user decision. Resuming stays an explicit
+  `task retry`. `mabs obligation list <task>` shows the lifecycle.
+- Requirement ownership: tasks and plan tasks may declare `ownedRequirements`/`requirements`,
+  stored in `task_requirement_ownership` (`mabs.requirement-ownership.v1`); unknown IDs are
+  rejected. A task-level review then demands verification only of owned mandatory requirements.
+  No mapping is legacy broad coverage (all mandatory requirements), never an empty set.
+- Reviewer independence is enforced. `independent_provider` excludes the implementer's provider on
+  every path (initial review, pending resume, review recovery, quota reroute, stale rerun) and never
+  falls back to it; the review waits or blocks per `capacityAction`. Only an explicit
+  `same_provider_fresh_context` policy may use the same provider. A legacy `mode`-shaped policy now
+  keeps an explicitly supplied `reviewerRoute`. Four existing tests with a single fake provider were
+  updated to choose that route explicitly; their assertions are unchanged.
+- `task.accepted` records `review: {status: "not_required" | "approved", reviewId}`, so an accepted
+  task whose review was not required is never presented as approved.
+- Stale evidence: a review collected for a revision other than the task's current result revision,
+  or under a different project configuration version, records `review.evidence_stale`, is not
+  recorded as a verdict, and the review runs again. Open blocking review findings force a re-review
+  even when the risk policy would skip the repaired revision.
+- Evidence: `test/review-obligations.test.ts` (REC-17..20, GOV-08, OBS-03, H1 fixture, ownership).
+  `test/controller.test.ts` restart test now waits up to 10 s for the asynchronous check job instead
+  of about 400 ms; it failed once under full-suite load.
+
+Known limits: triage is deterministic text classification of the reviewer's report; a reviewer
+that labels a question `[major]` is still treated as a blocking defect by design.
+
 ### T10 — Live bounded telemetry
 
 **Milestone:** M3. **Depends on:** T09. **Risk:** medium. **Mode:** sequential.

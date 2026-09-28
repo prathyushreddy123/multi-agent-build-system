@@ -306,7 +306,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
   const checks = [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }];
 
   const risky = records.createProject({ projectType: "personal", reviewChoice: "risk",
-    name: "risky", repoPath: repo, reviewPolicy: reviewPreset("personal"), checkCommands: checks,
+    name: "risky", repoPath: repo, reviewPolicy: { ...reviewPreset("personal"), reviewerRoute: "same_provider_fresh_context" }, checkCommands: checks,
   });
   const riskyTask = records.createTask({
     projectId: risky.id, title: "Store the session token", objective: "Persist the session token for reuse.",
@@ -352,7 +352,7 @@ test("a personal project reviews a credential change and skips an unrelated docu
   // policy choice and not from a change in what the worker did.
   const legacy = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "legacy-substantive", repoPath: repo,
-    reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical", "planning", "research"] },
+    reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical", "planning", "research"], reviewerRoute: "same_provider_fresh_context" } as never,
     checkCommands: checks,
   });
   const legacyTask = records.createTask({
@@ -378,7 +378,7 @@ test("required review that cannot be routed is recorded as pending and resumed, 
   repoAt(repo);
   const project = records.createProject({ projectType: "personal", reviewChoice: "required",
     name: "capacity", repoPath: repo,
-    reviewPolicy: { ...reviewPreset("client"), capacityAction: "pending" },
+    reviewPolicy: { ...reviewPreset("client"), capacityAction: "pending", reviewerRoute: "same_provider_fresh_context" },
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],
   });
   records.addRequirement(project.id, "REQ-1", "the change is implemented");

@@ -14,6 +14,8 @@
  * Risk is derived from what actually changed — controller-observed paths and
  * diff content — never from a worker's own claim that its change was harmless.
  */
+import { createHash } from "node:crypto";
+
 import { TASK_CLASSES, type ChangeRisk, type TaskClass } from "../routing/router.ts";
 import type { ProjectType, ReviewChoice } from "../domain/project-policy.ts";
 
@@ -192,7 +194,7 @@ function triggerForMode(mode: ReviewMode): ReviewTrigger {
  * so it migrates to a risk trigger carrying one explicit always-on rule: the
  * same set of tasks is reviewed, and the reason is now visible instead of implied.
  */
-export function migrateLegacyReviewPolicy(legacy: { mode?: unknown; skipTaskClasses?: unknown }): ReviewPolicy {
+export function migrateLegacyReviewPolicy(legacy: { mode?: unknown; skipTaskClasses?: unknown; reviewerRoute?: unknown }): ReviewPolicy {
   const mode = REVIEW_MODES.includes(legacy.mode as ReviewMode) ? (legacy.mode as ReviewMode) : DEFAULT_REVIEW_POLICY.mode;
   const declared = Array.isArray(legacy.skipTaskClasses)
     ? legacy.skipTaskClasses.filter((taskClass): taskClass is TaskClass => TASK_CLASSES.includes(taskClass as TaskClass))
@@ -206,6 +208,8 @@ export function migrateLegacyReviewPolicy(legacy: { mode?: unknown; skipTaskClas
     // explicit move to the experiment preset relaxes them.
     qualityExpectation: mode === "required" ? "acceptance_and_gates" : "configured_checks",
     skipTaskClasses: mode === "required" ? [] : declared,
+    // An explicitly supplied reviewer route is a choice, not a legacy default.
+    reviewerRoute: REVIEWER_ROUTES.includes(legacy.reviewerRoute as ReviewerRoute) ? (legacy.reviewerRoute as ReviewerRoute) : base.reviewerRoute,
     riskRules: mode === "substantive"
       ? [{
           id: "legacy-substantive-change",
@@ -246,7 +250,7 @@ export function normalizeReviewPolicy(input: unknown, fallback: ReviewPolicy = D
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...fallback, riskRules: fallback.riskRules.map((rule) => ({ ...rule })) };
   const candidate = input as Partial<ReviewPolicy> & { mode?: unknown };
   if (candidate.trigger === undefined && candidate.version === undefined && candidate.mode !== undefined) {
-    return migrateLegacyReviewPolicy(candidate as { mode?: unknown; skipTaskClasses?: unknown });
+    return migrateLegacyReviewPolicy(candidate as { mode?: unknown; skipTaskClasses?: unknown; reviewerRoute?: unknown });
   }
   const preset = REVIEW_PRESETS.includes(candidate.preset as ReviewPreset) ? (candidate.preset as ReviewPreset) : fallback.preset;
   const trigger = REVIEW_TRIGGERS.includes(candidate.trigger as ReviewTrigger)
@@ -553,4 +557,98 @@ export function describeReviewPolicy(policyInput: unknown): string {
     policy.skipTaskClasses.length > 0 ? `skips=${policy.skipTaskClasses.join(",")}` : "skips=none",
     `rules=${policy.riskRules.length}`,
   ].join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Review output triage
+
+export const REVIEW_TRIAGE_VERSION = "review-triage-v1";
+
+export type ReviewItemKind = "code_defect" | "decision_needed" | "requirement_evidence" | "advisory";
+
+export interface ReviewItem {
+  kind: ReviewItemKind;
+  blocking: boolean;
+  severity: FindingSeverity | "advisory";
+  /** Stored text; always carries an explicit label. */
+  text: string;
+  /**
+   * Derived from the kind and normalized content, not from the review that
+   * reported it, so the same finding restated by a later review maps to the
+   * same durable obligation.
+   */
+  stableKey: string;
+}
+
+const EXPLICIT_SEVERITY = /^\s*\[(critical|major|minor)\]\s*/i;
+const BLOCKING_MARK = /^\s*\[blocking\]\s*/i;
+const NON_BLOCKING = /\bnon[- ]blocking\b|\bnot (?:a )?blocker\b|\boptional\b|\bnice to have\b/i;
+const QUESTION = /\?\s*$|^\s*(?:question|clarif(?:y|ication)|should (?:we|this|it)|could|would|is it|confirm|consider)\b/i;
+
+function normalizedFinding(text: string): string {
+  return text.replace(EXPLICIT_SEVERITY, "").replace(BLOCKING_MARK, "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function stableKey(kind: ReviewItemKind, text: string): string {
+  return `finding:${kind}:${createHash("sha256").update(normalizedFinding(text)).digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * Turn a reviewer's report into typed, deduplicated items.
+ *
+ * - A labeled finding keeps its severity; blocking follows the policy.
+ * - An unlabeled finding that reads as a question, or says it is non-blocking,
+ *   is advisory. It is never promoted to a major code defect (H1).
+ * - A requested decision blocks acceptance only when the reviewer marks it
+ *   `[blocking]` or it names a requirement the task owns. Other requested
+ *   decisions are non-blocking questions for the user.
+ * - Missing verification of an owned mandatory requirement is blocking
+ *   requirement evidence. `ownedRequirements` null is legacy broad coverage:
+ *   every mandatory project requirement is owned.
+ */
+export function triageReviewOutput(input: {
+  unresolved: readonly string[];
+  decisionsRequested: readonly string[];
+  addressedRequirements: readonly string[];
+  mandatoryRequirements: readonly string[];
+  ownedRequirements: readonly string[] | null;
+  blockingSeverities: readonly FindingSeverity[];
+}): ReviewItem[] {
+  const items: ReviewItem[] = [];
+  const add = (item: Omit<ReviewItem, "stableKey">) => {
+    const key = stableKey(item.kind, item.text);
+    if (!items.some((existing) => existing.stableKey === key)) items.push({ ...item, stableKey: key });
+  };
+  for (const raw of input.unresolved) {
+    if (!raw.trim()) continue;
+    const labeled = EXPLICIT_SEVERITY.exec(raw);
+    if (!labeled && (QUESTION.test(raw) || NON_BLOCKING.test(raw))) {
+      add({ kind: "advisory", blocking: false, severity: "advisory", text: `[minor] ${raw.trim()}` });
+      continue;
+    }
+    const text = labelFinding(raw);
+    const severity = findingSeverity(text);
+    const blocking = input.blockingSeverities.includes(severity);
+    add({ kind: blocking ? "code_defect" : "advisory", blocking, severity, text });
+  }
+  const owned = input.ownedRequirements ?? input.mandatoryRequirements;
+  for (const raw of input.decisionsRequested) {
+    if (!raw.trim()) continue;
+    const explicit = BLOCKING_MARK.test(raw);
+    const namesOwned = owned.some((requirement) => new RegExp(`\\b${requirement.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(raw));
+    const body = raw.replace(BLOCKING_MARK, "").trim();
+    if (explicit || namesOwned) add({ kind: "decision_needed", blocking: true, severity: "major", text: `[major] Decision required: ${body}` });
+    else add({ kind: "advisory", blocking: false, severity: "advisory", text: `[minor] Question for the user (non-blocking): ${body}` });
+  }
+  const mandatory = new Set(input.mandatoryRequirements);
+  for (const requirement of owned) {
+    if (!mandatory.has(requirement) || input.addressedRequirements.includes(requirement)) continue;
+    add({
+      kind: "requirement_evidence",
+      blocking: true,
+      severity: "major",
+      text: `[major] Review did not verify mandatory requirement ${requirement}.`,
+    });
+  }
+  return items;
 }

@@ -118,7 +118,9 @@ test("controller restart collects one isolated launch without duplication and ch
     leaseTimeoutMs: 10,
   });
   await restarted.tick();
-  for (let poll = 0; poll < 20 && records.getTask(task.id)?.state !== "DONE"; poll += 1) {
+  // The check runs as a detached job; allow it real time under a loaded suite.
+  const deadline = Date.now() + 10_000;
+  while (records.getTask(task.id)?.state !== "DONE" && Date.now() < deadline) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
     await restarted.tick();
   }

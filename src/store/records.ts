@@ -735,6 +735,8 @@ function toActivation(row: Row): ConfigActivation {
   };
 }
 
+export const REQUIREMENT_OWNERSHIP_VERSION = "mabs.requirement-ownership.v1";
+
 const TASK_MUTABLE_COLUMNS = new Set([
   "role",
   "task_class",
@@ -861,6 +863,11 @@ export class Records {
 
   listEvents(taskId: string, limit = 200): Row[] {
     return this.store.all("SELECT * FROM events WHERE task_id = ? ORDER BY rowid DESC LIMIT ?", taskId, limit);
+  }
+
+  /** Every event of one kind for a task, oldest first and unbounded. */
+  listEventsOfKind(taskId: string, kind: string): Row[] {
+    return this.store.all("SELECT * FROM events WHERE task_id = ? AND kind = ? ORDER BY rowid ASC", taskId, kind);
   }
 
   recentEvents(limit = 100): Row[] {
@@ -1330,6 +1337,8 @@ export class Records {
     executionMode?: string;
     executionReason?: string | null;
     reviewOfTaskId?: string | null;
+    /** Requirement IDs this task is accountable for; absent means legacy broad coverage. */
+    ownedRequirements?: string[];
   }): Task {
     const project = this.getProject(input.projectId);
     if (!project) throw new Error(`Unknown project ${input.projectId}`);
@@ -1397,6 +1406,23 @@ export class Records {
       );
       for (const dep of dependsOn) {
         this.store.run("INSERT OR IGNORE INTO task_dependencies(task_id, depends_on_id) VALUES(?,?)", id, dep);
+      }
+      if (input.ownedRequirements !== undefined) {
+        const known = new Set(this.listRequirements(input.projectId).map((requirement) => requirement.id));
+        const unknown = input.ownedRequirements.filter((requirement) => !known.has(requirement));
+        if (unknown.length > 0) throw new Error(`Task owns unknown requirement(s): ${unknown.join(", ")}`);
+        for (const requirement of new Set(input.ownedRequirements)) {
+          this.store.run(
+            `INSERT INTO task_requirement_ownership(task_id, requirement_id, mapping_version, source, created_at)
+             VALUES(?,?,?,?,?)`,
+            id, requirement, REQUIREMENT_OWNERSHIP_VERSION, "task", at,
+          );
+        }
+        // Also marks an explicitly empty set, which differs from "unknown".
+        this.recordEvent({
+          kind: "task.requirement_ownership", projectId: input.projectId, taskId: id,
+          data: { requirementIds: [...new Set(input.ownedRequirements)], mappingVersion: REQUIREMENT_OWNERSHIP_VERSION },
+        });
       }
       this.recordEvent({
         kind: "task.created",
@@ -1843,6 +1869,85 @@ export class Records {
         data: { schemaVersion: 1, obligationId: id, kind: input.kind, sourceKey: input.sourceKey, blocking: input.blocking },
       });
       return toObligation(this.store.get("SELECT * FROM task_obligations WHERE id = ?", id) as Row);
+    });
+  }
+
+  /**
+   * The requirement IDs a task is accountable for, or null when no mapping was
+   * recorded. Null is "legacy broad coverage", never an empty ownership set.
+   */
+  requirementOwnership(taskId: string): { requirementIds: string[]; mappingVersion: string } | null {
+    const rows = this.store.all(
+      "SELECT requirement_id, mapping_version FROM task_requirement_ownership WHERE task_id = ? AND mapping_version = ? ORDER BY requirement_id",
+      taskId, REQUIREMENT_OWNERSHIP_VERSION,
+    );
+    if (rows.length === 0) {
+      const marker = this.store.get(
+        "SELECT 1 AS present FROM events WHERE task_id = ? AND kind = 'task.requirement_ownership' LIMIT 1", taskId,
+      );
+      return marker ? { requirementIds: [], mappingVersion: REQUIREMENT_OWNERSHIP_VERSION } : null;
+    }
+    return { requirementIds: rows.map((row) => row.requirement_id as string), mappingVersion: REQUIREMENT_OWNERSHIP_VERSION };
+  }
+
+  /** Every obligation of a task with this exact source key or a recurrence of it, oldest first. */
+  obligationsForSourceKey(taskId: string, sourceKey: string): TaskObligation[] {
+    return this.store.all(
+      "SELECT * FROM task_obligations WHERE task_id = ? AND (source_key = ? OR source_key LIKE ?) ORDER BY created_at, rowid",
+      taskId, sourceKey, `${sourceKey}:recurrence:%`,
+    ).map(toObligation);
+  }
+
+  listObligations(taskId: string): TaskObligation[] {
+    return this.store.all("SELECT * FROM task_obligations WHERE task_id = ? ORDER BY created_at, rowid", taskId).map(toObligation);
+  }
+
+  /**
+   * A finding a repair claimed to address was restated by the next review of
+   * the repaired revision: it returns to open with the restating evidence.
+   */
+  reopenObligation(obligationId: string, evidence: string[]): TaskObligation {
+    if (evidence.length === 0) throw new Error("Reopening an obligation requires the evidence that restated it.");
+    return this.store.tx(() => {
+      const current = this.store.get("SELECT * FROM task_obligations WHERE id = ?", obligationId);
+      if (!current) throw new Error(`Unknown obligation ${obligationId}`);
+      if (current.state !== "addressed_pending_validation") {
+        throw new Error(`Only an addressed obligation can be reopened; ${obligationId} is ${String(current.state)}.`);
+      }
+      const at = nowIso();
+      const refs = [...fromJson<string[]>(current.evidence_refs, []), ...evidence];
+      this.store.run(
+        "UPDATE task_obligations SET state = 'open', evidence_refs = ?, updated_at = ? WHERE id = ?",
+        toJson([...new Set(refs)]), at, obligationId,
+      );
+      const task = this.getTask(current.task_id as string) as Task;
+      this.recordEvent({
+        kind: "obligation.updated", projectId: task.projectId, taskId: task.id,
+        data: { schemaVersion: 1, obligationId, state: "open", reopened: true, evidence },
+      });
+      return toObligation(this.store.get("SELECT * FROM task_obligations WHERE id = ?", obligationId) as Row);
+    });
+  }
+
+  /**
+   * Record a person's answer to a blocking decision. Only `decision_needed`
+   * obligations are decided this way; defects need validation evidence. The
+   * task is not resumed automatically: a retry is a separate explicit action.
+   */
+  decideObligation(obligationId: string, decision: { answer: string; decidedBy: string }): TaskObligation {
+    const current = this.store.get("SELECT * FROM task_obligations WHERE id = ?", obligationId);
+    if (!current) throw new Error(`Unknown obligation ${obligationId}`);
+    if (current.kind !== "decision_needed") throw new Error(`Obligation ${obligationId} is ${String(current.kind)}, not a decision.`);
+    const task = this.getTask(current.task_id as string) as Task;
+    return this.store.tx(() => {
+      const eventId = this.recordEvent({
+        kind: "obligation.decided", projectId: task.projectId, taskId: task.id,
+        data: { obligationId, answer: decision.answer, decidedBy: decision.decidedBy },
+      });
+      return this.resolveObligation(
+        { obligationId, state: "resolved", resolvedRevision: task.resultRevision },
+        [`decision:${eventId}:${decision.decidedBy}`],
+      );
     });
   }
 

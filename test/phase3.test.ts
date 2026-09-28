@@ -140,7 +140,8 @@ test("substantive work passes gates, independent review, one review repair, and 
   const repo = join(root, "repo"); repoAt(repo);
   const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "reviewed", repoPath: repo,
-    reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical"] },
+    // One fake provider: this test opts into fresh-session same-provider review.
+    reviewPolicy: { mode: "substantive", skipTaskClasses: ["mechanical"], reviewerRoute: "same_provider_fresh_context" } as never,
     checkCommands: [{
       name: "value", required: true,
       command: [process.execPath, "-e", "const f=require('fs').readFileSync('value.txt','utf8');process.exit(f.startsWith('feature')?0:1)"],

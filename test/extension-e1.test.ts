@@ -300,7 +300,7 @@ test("a review that finds only minor issues approves the revision without anothe
   repoAt(repo);
   const project = records.createProject({ projectType: "personal", reviewChoice: "risk",
     name: "advisory-review", repoPath: repo,
-    reviewPolicy: { mode: "substantive", skipTaskClasses: [] },
+    reviewPolicy: { mode: "substantive", skipTaskClasses: [], reviewerRoute: "same_provider_fresh_context" } as never,
     checkCommands: [{ name: "unit", command: [process.execPath, "-e", "process.exit(0)"], required: true }],
   });
   records.addRequirement(project.id, "REQ-1", "invoiceTotal sums item prices");
