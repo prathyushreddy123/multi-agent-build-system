@@ -107,6 +107,8 @@ export interface Task {
   contextSize: Complexity;
   requiredTools: string[];
   allowedScope: string[];
+  /** Exclusive named resources held while the task runs; never co-admitted. */
+  resources: string[];
   state: TaskState;
   priority: number;
   executionMode: string;
@@ -358,6 +360,7 @@ function toTask(row: Row): Task {
     contextSize: row.context_size as Complexity,
     requiredTools: fromJson<string[]>(row.required_tools, []),
     allowedScope: fromJson<string[]>(row.allowed_scope, []),
+    resources: fromJson<string[]>(row.resources, []),
     state: row.state as TaskState,
     priority: Number(row.priority ?? 100),
     executionMode: row.execution_mode as string,
@@ -1339,6 +1342,7 @@ export class Records {
     reviewOfTaskId?: string | null;
     /** Requirement IDs this task is accountable for; absent means legacy broad coverage. */
     ownedRequirements?: string[];
+    resources?: string[];
   }): Task {
     const project = this.getProject(input.projectId);
     if (!project) throw new Error(`Unknown project ${input.projectId}`);
@@ -1356,6 +1360,11 @@ export class Records {
     if (!["low", "medium", "high"].includes(input.contextSize ?? "medium")) throw new Error(`Invalid context size: ${input.contextSize}`);
     if (!["single", "sequential", "parallel", "mixed"].includes(input.executionMode ?? "single")) {
       throw new Error(`Invalid execution mode: ${input.executionMode}`);
+    }
+    for (const resource of input.resources ?? []) {
+      if (!/^[a-z][a-z0-9_-]*:[A-Za-z0-9._:/@-]+$/.test(resource)) {
+        throw new Error(`Resource must be a named kind:value such as port:3000 or db:test, got ${resource}`);
+      }
     }
     for (const scope of input.allowedScope ?? []) {
       const normalized = scope.replaceAll("\\", "/").replace(/^\.\//, "");
@@ -1375,8 +1384,8 @@ export class Records {
         `INSERT INTO tasks(id, project_id, title, objective, acceptance_criteria, role, task_class,
            complexity, ambiguity, change_risk, language, domain, context_size, required_tools, allowed_scope,
            state, priority, execution_mode, execution_reason, in_scope_actions, repair_limit, repairs_used,
-           deadline_at, review_of_task_id, created_at, updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           deadline_at, review_of_task_id, created_at, updated_at, resources)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id,
         input.projectId,
         input.title,
@@ -1403,6 +1412,7 @@ export class Records {
         input.reviewOfTaskId ?? null,
         at,
         at,
+        toJson([...new Set(input.resources ?? [])]),
       );
       for (const dep of dependsOn) {
         this.store.run("INSERT OR IGNORE INTO task_dependencies(task_id, depends_on_id) VALUES(?,?)", id, dep);

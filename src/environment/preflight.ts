@@ -336,10 +336,23 @@ export function inspectWorktreeReadiness(input: PreflightInput): PreflightResult
     flag("unavailable");
     addEvidence("worktree", "fail", "The worktree branch does not match the expected branch.", { expected: expected.branch, actual: gitFacts.branch });
   }
+  const dependencies = new Set(expected.dependencyRevisions ?? []);
   for (const ancestor of [expected.baseRevision, ...(expected.dependencyRevisions ?? [])].filter((item): item is string => Boolean(item))) {
-    const integrated = input.worktreeSnapshot
+    let integrated = input.worktreeSnapshot
       ? { code: input.worktreeSnapshot.integratedRevisions.includes(ancestor) || input.worktreeSnapshot.revision === ancestor ? 0 : 1, stdout: "", stderr: "" }
       : git(worktreePath, ["merge-base", "--is-ancestor", ancestor, "HEAD"]);
+    if (integrated.code === 1 && dependencies.has(ancestor) && !input.worktreeSnapshot) {
+      // Dependencies are integrated by cherry-pick, which never reuses the
+      // source hash. They are integrated when every commit they introduce is
+      // present by patch identity: `git cherry` marks those with "-".
+      const cherry = git(worktreePath, ["cherry", "HEAD", ancestor]);
+      if (cherry.code === 0) {
+        const pending = cherry.stdout.split("\n").filter((line) => line.startsWith("+"));
+        integrated = { code: pending.length === 0 ? 0 : 1, stdout: cherry.stdout, stderr: "" };
+      } else {
+        integrated = { code: 2, stdout: "", stderr: cherry.stderr };
+      }
+    }
     if (integrated.code === 1) {
       flag("unavailable");
       addEvidence("worktree", "fail", "A required base or dependency revision is not integrated.", { revision: ancestor });
@@ -546,7 +559,11 @@ export function inspectWorktreeReadiness(input: PreflightInput): PreflightResult
     capabilityPolicy: policy ?? null,
     worktreeSnapshot: input.worktreeSnapshot ?? null,
     outputFacts,
-    freeBytes,
+    // The headroom verdict, not the byte count: free space changes with every
+    // write on the filesystem, and hashing it would make the cache never hit.
+    freeSpace: freeBytes === null
+      ? "unknown"
+      : input.minimumFreeBytes === undefined || freeBytes >= input.minimumFreeBytes ? "sufficient" : "insufficient",
     minimumFreeBytes: input.minimumFreeBytes ?? null,
     pathEnv: input.pathEnv ?? process.env.PATH ?? "",
   };

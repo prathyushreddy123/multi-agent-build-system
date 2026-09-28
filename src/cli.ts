@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
-import { Controller, ControllerLeaseHeldError } from "./controller/controller.ts";
+import { ADMISSION_PENDING_PREFIX, Controller, ControllerLeaseHeldError, REVIEW_PENDING_PREFIX } from "./controller/controller.ts";
 import { defaultAdapters } from "./adapters/harness.ts";
 import { DEFAULT_CAPABILITY_REGISTRY } from "./routing/capabilities.ts";
 import { selectRoute } from "./routing/router.ts";
+import { SCHEDULING_POLICY_VERSION, canonicalRepoKey, collectActiveWork, evaluateAdmission } from "./scheduling/admission.ts";
 import {
   analyzeProject,
   createProposal,
@@ -135,6 +136,7 @@ EVERYDAY
   status                                    Queue, controller liveness, and health
   controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
       [--model=...] [--effort=low|medium|high] [--capacity-fallback=allow|wait]
+      [--workers=1] [--gate-limit=N] [--adaptive]   One model worker unless a pilot is approved
   controller once [--adapter=codex]         Reconcile and dispatch one cycle
   task list [--project=id] [--state=READY]  What is queued, running, or blocked
   task show <id>                            One task with its evidence
@@ -207,6 +209,8 @@ MAINTENANCE
   provider list | provider reset <name>
   routing capabilities                         Versioned model/effort/quota-domain registry (local only)
   routing explain <task>                       Recorded route decisions plus a dry, launch-free selection
+  scheduler explain <task> [--workers=1] [--gate-limit=2]
+                                               Why a task would or would not be admitted now (read-only)
 
 OCCASIONAL — tuning and measurement
   curator analyze|snapshot|suggest <project>
@@ -1139,6 +1143,27 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(records.decideObligation(id, { answer, decidedBy: by }), null, 2));
       return;
     }
+    if (area === "scheduler" && action === "explain") {
+      const args = parseArgs(rest);
+      const task = args.positionals[0] ? records.getTask(args.positionals[0]) : null;
+      if (!task) throw new Error("Usage: mabs scheduler explain <task>");
+      const project = records.getProject(task.projectId);
+      if (!project) throw new Error(`Unknown project ${task.projectId}`);
+      const workers = numberOption(args, "workers", 1);
+      const providerLimits: Record<string, number> = {};
+      for (const provider of records.listProviderCapacity()) providerLimits[provider.provider] = provider.maxConcurrency;
+      const active = collectActiveWork(records, [ADMISSION_PENDING_PREFIX, REVIEW_PENDING_PREFIX]);
+      const explanation = evaluateAdmission({
+        taskId: task.id, projectId: task.projectId, repoKey: canonicalRepoKey(project.repoPath),
+        kind: task.taskClass === "mechanical" ? "gate" : "model", provider: null,
+        executionMode: task.executionMode, writeScope: task.allowedScope, resources: task.resources,
+      }, active, {
+        modelWorkers: workers, providerLimits, perProjectTasks: numberOption(args, "per-project-workers", workers),
+        activeProjects: numberOption(args, "active-projects", 2), gateJobs: numberOption(args, "gate-limit", Math.max(2, workers)), childAgents: 0,
+      });
+      console.log(JSON.stringify({ task: task.id, state: task.state, policy: SCHEDULING_POLICY_VERSION, explanation, active }, null, 2));
+      return;
+    }
     if (area === "routing" && action === "capabilities") {
       console.log(JSON.stringify(DEFAULT_CAPABILITY_REGISTRY, null, 2));
       return;
@@ -1321,14 +1346,17 @@ async function main(): Promise<void> {
         defaultModel: textOption(args, "model") ?? null,
         defaultEffort: textOption(args, "effort") ?? null,
         capacityFallback: capacityFallbackOption(textOption(args, "capacity-fallback")),
-        workerLimit: numberOption(args, "workers", 2),
+        // One model worker is the production setting; more is an explicit, separately approved pilot.
+        workerLimit: numberOption(args, "workers", 1),
         activeProjectLimit: numberOption(args, "active-projects", 2),
-        perProjectWorkerLimit: numberOption(args, "per-project-workers", numberOption(args, "workers", 2)),
+        perProjectWorkerLimit: numberOption(args, "per-project-workers", numberOption(args, "workers", 1)),
+        gateLimit: args.options.has("gate-limit") ? numberOption(args, "gate-limit", 2) : undefined,
+        adaptiveConcurrency: args.options.has("adaptive") ? {} : undefined,
         minFreeMemoryMb: numberOption(args, "min-free-memory-mb", 0),
         maxLoadPerCpu: numberOption(args, "max-load-per-cpu", Number.MAX_SAFE_INTEGER),
         providerLimits: {
-          claude: numberOption(args, "claude-limit", Math.max(1, Math.ceil(numberOption(args, "workers", 2) / 2))),
-          codex: numberOption(args, "codex-limit", Math.max(1, Math.floor(numberOption(args, "workers", 2) / 2))),
+          claude: numberOption(args, "claude-limit", Math.max(1, Math.ceil(numberOption(args, "workers", 1) / 2))),
+          codex: numberOption(args, "codex-limit", Math.max(1, Math.floor(numberOption(args, "workers", 1) / 2))),
         },
       });
       if (action === "once") {

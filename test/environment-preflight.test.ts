@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -225,4 +226,38 @@ test("a missing worktree returns structured unavailable evidence instead of thro
   assert.equal(result.worktreePath, missing);
   assert.equal(result.evidence[0]?.kind, "worktree");
   assert.equal(result.evidence[0]?.status, "fail");
+});
+
+test("a cherry-picked dependency is integrated by patch identity; a missing one is not", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mabs-preflight-deps-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const run = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@l", ...args], { cwd, encoding: "utf8" }).trim();
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  writeFileSync(join(repo, "base.txt"), "base\n");
+  run(repo, "init", "-q", "-b", "main");
+  run(repo, "add", "-A");
+  run(repo, "commit", "-q", "-m", "base");
+  const base = run(repo, "rev-parse", "HEAD");
+  run(repo, "checkout", "-q", "-b", "dep");
+  writeFileSync(join(repo, "dep.txt"), "dep\n");
+  run(repo, "add", "-A");
+  run(repo, "commit", "-q", "-m", "dep");
+  const dependency = run(repo, "rev-parse", "HEAD");
+  run(repo, "checkout", "-q", "-b", "other", base);
+  writeFileSync(join(repo, "other.txt"), "other\n");
+  run(repo, "add", "-A");
+  run(repo, "commit", "-q", "-m", "other");
+  const missing = run(repo, "rev-parse", "HEAD");
+  const target = join(root, "target");
+  run(repo, "worktree", "add", "-q", "-b", "target", target, base);
+  // The controller integrates as a different committer, so the hash changes.
+  execFileSync("git", ["-c", "user.name=MABS Controller", "-c", "user.email=mabs@local", "cherry-pick", dependency], { cwd: target });
+  assert.notEqual(run(target, "rev-parse", "HEAD"), dependency, "cherry-pick changed the hash");
+
+  const integrated = preflightWorktree({ worktreePath: target, expected: { baseRevision: base, dependencyRevisions: [dependency] } });
+  assert.equal(integrated.evidence.some((item) => item.status === "fail" && /not integrated/.test(item.summary)), false);
+  const absent = preflightWorktree({ worktreePath: target, expected: { baseRevision: base, dependencyRevisions: [missing] } });
+  assert.ok(absent.evidence.some((item) => item.status === "fail" && /not integrated/.test(item.summary)));
 });

@@ -25,6 +25,8 @@ export interface PlannedTask {
   priority?: number;
   /** Mandatory requirement IDs this task is accountable for; omit for legacy broad coverage. */
   requirements?: string[];
+  /** Exclusive named resources, e.g. "port:3000"; tasks sharing one never run together. */
+  resources?: string[];
 }
 
 export interface ExecutionPlan {
@@ -110,6 +112,9 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
     if (task?.requiredTools !== undefined && (
       !Array.isArray(task.requiredTools) || task.requiredTools.some((tool) => typeof tool !== "string" || !tool.trim())
     )) errors.push(`${label}: requiredTools must contain only non-empty tool names.`);
+    if (task?.resources !== undefined && (
+      !Array.isArray(task.resources) || task.resources.some((resource) => typeof resource !== "string" || !/^[a-z][a-z0-9_-]*:\S+$/.test(resource))
+    )) errors.push(`${label}: resources must be named kind:value entries such as port:3000.`);
     if (task?.requirements !== undefined && (
       !Array.isArray(task.requirements) || task.requirements.some((requirement) => typeof requirement !== "string" || !requirement.trim())
     )) errors.push(`${label}: requirements must contain only requirement IDs.`);
@@ -203,6 +208,7 @@ export function applyExecutionPlan(records: Records, projectId: string, plan: Ex
         executionMode: item.executionMode,
         executionReason: item.executionReason,
         ownedRequirements: item.requirements,
+        resources: item.resources,
       });
       created.set(key, task);
     }

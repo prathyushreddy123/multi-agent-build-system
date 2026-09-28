@@ -1259,6 +1259,58 @@ paid model. Neither provider reports effort or Codex's model, so these remain un
 
 **Acceptance:** every cap holds during review/reroute/repair/restart, not only initial dispatch; no head-of-line starvation; same-repo projects cannot bypass write locks; independent fake tasks overlap; incompatible interfaces fail integration; current production limit remains one. A two-worker pilot is prepared, not activated.
 
+#### T11 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation;
+the production controller setting stays one model worker.
+
+- `src/scheduling/admission.ts` (`mabs.scheduling.v2`) is the single admission authority.
+  `evaluateAdmission` is pure and explains every refusal. It enforces the model-worker cap,
+  per-provider caps, per-project task cap, active-project cap (rechecked per reservation), a separate
+  check-job cap, repository write locks (exclusive modes or overlapping scope within one canonical
+  repository), and exclusive named resources. `collectActiveWork` derives active work from durable
+  state on every call, so a restart neither leaks nor forgets a slot.
+- Every launch path asks it: initial dispatch, mechanical tasks, repair, reroute, review, pending-review
+  resume, and check jobs. Previously caps were checked only at initial dispatch. In-flight model work
+  that is refused waits as `Admission pending: <kind>` (reviews as `Review pending:`), keeps its
+  repository lock and repair allocation, and resumes before any new work is admitted. A provider at
+  its concurrency limit during a repair now waits instead of throwing out of the controller tick
+  (a pre-existing bug this package's tests exposed). Over the check-job cap a check stage stays
+  `reserved`, and `reconcileGateStages` launches it when capacity frees.
+- Dispatch scans a bounded, fair order (`fairOrder`: service received minus waiting-time aging,
+  round-robin across projects, then priority and age), and skips work that cannot be admitted instead
+  of stopping the round, so there is no head-of-line starvation.
+- Canonical repository identity (`realpath`) means two projects on one repository share its write lock.
+- Tasks and plan tasks may declare exclusive `resources` (`kind:value`, e.g. `port:3000`); schema 16
+  adds `tasks.resources` (additive, default `[]`, nothing inferred for existing tasks).
+- Opt-in adaptive target (`controller run --adaptive`): host backpressure or a provider cooldown lowers
+  the model-worker target by one; it rises one step only after a healthy streak, never above the
+  approved ceiling, and never stops running work.
+- The CLI default is now one model worker (`--workers=1`; previously 2); `--gate-limit` caps check jobs
+  (default `max(2, workers)`). Native child agents remain disabled (T07), so the child cap is 0.
+- New read-only command: `mabs scheduler explain <task>`.
+- Prepared, not activated, two-worker pilot (Gate F): `controller run --workers=2 --claude-limit=1
+  --codex-limit=1 --capacity-fallback=wait`.
+- Pre-existing defects found and fixed while testing:
+  1. Preflight required each dependency revision to be a git ancestor of HEAD, but dependencies are
+     integrated by cherry-pick (new hashes), so every dependent task would have been blocked with "A
+     required base or dependency revision is not integrated". Dependencies are now accepted when all
+     of their commits are present by patch identity (`git cherry`).
+  2. The readiness-cache fingerprint included raw free disk bytes, so any disk write invalidated it
+     and the cache almost never hit on a busy machine. It now hashes the headroom verdict; the byte
+     count stays in the evidence.
+  3. A check job was declared "ambiguous launch" once `leaseTimeoutMs` passed without a launch marker.
+     That reused the controller-lease timeout for an unrelated question; with a short lease timeout
+     a healthy job could be blocked as INFRA (3 of 12 stressed runs). It now has its own
+     `launchMarkerGraceMs` (default 30 s).
+- Evidence: `test/scheduler-admission.test.ts` (PAR-01..11; PAR-12 is covered by T07's delegation
+  rejection), a preflight cherry-pick regression test (fails on the previous preflight), and stressed
+  reruns of the restart and readiness-cache tests (12/12 and 8/8 under parallel load).
+
+Known limits: fairness is by dispatch count and waiting time, not by measured runtime; the ambiguous
+check-launch path after the grace period is unchanged and is not separately exercised at controller
+level.
+
 ### T12 — Incidents and curator learning
 
 **Milestone:** M4. **Depends on:** T11. **Risk:** medium. **Mode:** sequential.

@@ -32,6 +32,17 @@ import type { ReviewDecision, ReviewItem, ReviewerRoute } from "../review/policy
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import { BoundedTelemetryQueue, type TelemetrySink } from "../telemetry/sink.ts";
+import {
+  AdaptiveConcurrency,
+  canonicalRepoKey,
+  collectActiveWork,
+  evaluateAdmission,
+  fairOrder,
+  type ActiveWork,
+  type SchedulingLimits,
+  type WorkKind,
+} from "../scheduling/admission.ts";
+import type { AdmissionExplanation } from "../scheduling/types.ts";
 import { readProgress, telemetryGap } from "../telemetry/stream.ts";
 import {
   DEFAULT_CAPABILITY_REGISTRY,
@@ -48,6 +59,10 @@ import { finalizeWorkspace, integrateDependencyRevisions, prepareWorkspace, work
 /** Marks a task whose only outstanding work is a review the controller can retry. */
 export const REVIEW_PENDING_PREFIX = "Review pending:";
 export const REVIEW_RECOVERY_PREFIX = "Review recovery pending:";
+/** In-flight work (repair, reroute) waiting for shared admission capacity. */
+export const ADMISSION_PENDING_PREFIX = "Admission pending:";
+/** Ready tasks inspected per tick; bounded so a long queue cannot stall a tick. */
+const READY_SCAN_LIMIT = 200;
 const ENGINE_REVISION = "mabs.controller.stage.v1";
 
 function fingerprint(value: unknown): string {
@@ -101,6 +116,16 @@ export interface ControllerOptions {
   adapters?: Map<string, WorkerAdapter>;
   /** Optional export fan-out; disabled by default and never able to stop execution. */
   telemetry?: TelemetrySink;
+  /** Concurrent check jobs, capped separately from model workers. */
+  gateLimit?: number;
+  /**
+   * How long a launched check job may take to write its launch marker before
+   * the launch is treated as ambiguous. Deliberately separate from the
+   * controller lease timeout, which governs a different question.
+   */
+  launchMarkerGraceMs?: number;
+  /** Opt-in: lower the model-worker target under pressure, raise it after a healthy streak. */
+  adaptiveConcurrency?: { raiseAfterHealthyTicks?: number };
 }
 
 export class Controller {
@@ -122,12 +147,18 @@ export class Controller {
     maxLoadPerCpu: number;
     controllerId: string;
     capacityFallback: "allow" | "wait";
+    gateLimit: number;
+    launchMarkerGraceMs: number;
   };
   readonly adapters: Map<string, WorkerAdapter>;
   readonly routingPolicy: RoutingPolicy;
   readonly capabilityRegistry: CapabilityRegistry;
   readonly telemetry: TelemetrySink;
   private readonly firstOutputSeen = new Set<string>();
+  readonly adaptive: AdaptiveConcurrency | null;
+  /** Last admission decision per task, for `scheduler explain` and deduplicated events. */
+  readonly admissionExplanations = new Map<string, AdmissionExplanation & { kind: WorkKind; at: string }>();
+  private readonly repoKeys = new Map<string, string>();
   private readonly preferredAdapter: "claude" | "codex" | null;
   readonly startedAt = new Date().toISOString();
   private stopped = false;
@@ -167,15 +198,21 @@ export class Controller {
       maxLoadPerCpu: options.maxLoadPerCpu ?? Number.POSITIVE_INFINITY,
       controllerId: options.controllerId ?? ids.launch(),
       capacityFallback: options.capacityFallback ?? "allow",
+      gateLimit: options.gateLimit ?? Math.max(2, workerLimit),
+      launchMarkerGraceMs: options.launchMarkerGraceMs ?? 30_000,
     };
     this.capabilityRegistry = options.capabilityRegistry ?? DEFAULT_CAPABILITY_REGISTRY;
     this.adapters = options.adapters ?? defaultAdapters(this.capabilityRegistry);
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
     this.telemetry = options.telemetry ?? new BoundedTelemetryQueue();
+    this.adaptive = options.adaptiveConcurrency
+      ? new AdaptiveConcurrency(this.options.workerLimit, { raiseAfterHealthyTicks: options.adaptiveConcurrency.raiseAfterHealthyTicks })
+      : null;
     this.preferredAdapter = options.defaultAdapter ?? null;
     if (!Number.isSafeInteger(this.options.workerLimit) || this.options.workerLimit < 1) throw new Error("Worker limit must be a positive integer");
     if (!Number.isSafeInteger(this.options.perProjectWorkerLimit) || this.options.perProjectWorkerLimit < 1) throw new Error("Per-project worker limit must be a positive integer");
     if (!Number.isSafeInteger(this.options.activeProjectLimit) || this.options.activeProjectLimit < 1) throw new Error("Active-project limit must be a positive integer");
+    if (!Number.isSafeInteger(this.options.gateLimit) || this.options.gateLimit < 1) throw new Error("Gate limit must be a positive integer");
     if (!Number.isFinite(this.options.minFreeMemoryMb) || this.options.minFreeMemoryMb < 0) throw new Error("Minimum free memory must be non-negative");
     if (Number.isNaN(this.options.maxLoadPerCpu) || this.options.maxLoadPerCpu <= 0) throw new Error("Maximum load per CPU must be positive");
     if (options.defaultAdapter && !this.adapters.has(options.defaultAdapter)) {
@@ -200,6 +237,9 @@ export class Controller {
       }
       await this.reconcileAttempts();
       await this.reconcileGateStages();
+      this.observePressure();
+      // In-flight work resumes before new work is admitted.
+      await this.resumeAdmissionPending();
       await this.resumePendingReviews();
       this.promoteTasks();
       await this.dispatchReadyTasks();
@@ -738,6 +778,9 @@ export class Controller {
       revision: current.resultRevision,
       environmentFingerprint: this.records.latestEnvironmentCheck(current.id)?.runtimeFingerprint ?? null,
     });
+    // Over the check-job cap the stage stays reserved; reconcileGateStages
+    // launches it once capacity frees, and a restart sees it as active work.
+    if (!this.admit(current, "gate", null).admitted) return;
     const lease = this.records.reserveAdmission({
       stageRunId: stage.id,
       controllerId: this.options.controllerId,
@@ -765,6 +808,7 @@ export class Controller {
       }
       if (stage.state === "waiting" || stage.state === "unknown") continue;
       if (stage.state === "reserved") {
+        if (!this.admit(task, "gate", null).admitted) continue;
         let lease = this.records.admissionForStage(stage.id);
         if (!lease) {
           lease = this.records.reserveAdmission({
@@ -790,7 +834,7 @@ export class Controller {
       }
       if (status === "running") continue;
       if (status === "unknown") {
-        if (Date.now() - Date.parse(stage.startedAt ?? stage.reservedAt) <= this.options.leaseTimeoutMs) continue;
+        if (Date.now() - Date.parse(stage.startedAt ?? stage.reservedAt) <= this.options.launchMarkerGraceMs) continue;
         // A launch spec without a trustworthy marker is an ambiguous crash
         // boundary. Never create a second process to make it look recovered.
         this.recordObligationOnce({
@@ -1478,7 +1522,6 @@ export class Controller {
 
   /** Resume reviews deferred for capacity once an eligible provider is free. */
   private async resumePendingReviews(): Promise<void> {
-    if (this.records.listRunningAttempts().length >= this.options.workerLimit) return;
     for (const task of this.records.listTasks({ state: "BLOCKED" })) {
       if (!task.blockedReason?.startsWith(REVIEW_PENDING_PREFIX)) continue;
       if (!task.resultRevision || !task.worktreePath) continue;
@@ -1489,12 +1532,12 @@ export class Controller {
       const implementer = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
       const selection = this.selectReviewRoute(task, project.reviewPolicy.reviewerRoute, implementer?.adapter);
       if (!selection.chosen) continue;
+      if (!this.admit(task, "model", selection.chosen.adapter).admitted) continue;
       const reviewing = this.records.transition(task.id, "REVIEWING", { blocked_reason: null, failure_class: null }, {
         reason: "review capacity became available; resuming the outstanding review",
         revision: task.resultRevision,
       });
       await this.launchAttempt(reviewing, project, "review", this.priorReviewFindings(reviewing), ids.launch(), selection);
-      if (this.records.listRunningAttempts().length >= this.options.workerLimit) return;
     }
   }
 
@@ -1858,6 +1901,120 @@ export class Controller {
     });
   }
 
+  // --- scheduling ----------------------------------------------------------
+
+  schedulingLimits(): SchedulingLimits {
+    const providerLimits: Record<string, number> = {};
+    for (const provider of this.records.listProviderCapacity()) providerLimits[provider.provider] = provider.maxConcurrency;
+    return {
+      modelWorkers: Math.min(this.options.workerLimit, this.adaptive?.target ?? this.options.workerLimit),
+      providerLimits,
+      perProjectTasks: this.options.perProjectWorkerLimit,
+      activeProjects: this.options.activeProjectLimit,
+      gateJobs: this.options.gateLimit,
+      childAgents: 0,
+    };
+  }
+
+  private repoKeyFor(project: Project): string {
+    let key = this.repoKeys.get(project.id);
+    if (!key) {
+      key = canonicalRepoKey(project.repoPath);
+      this.repoKeys.set(project.id, key);
+    }
+    return key;
+  }
+
+  activeWork(): ActiveWork[] {
+    return collectActiveWork(this.records, [ADMISSION_PENDING_PREFIX, REVIEW_PENDING_PREFIX], (projectId, repoPath) => {
+      let key = this.repoKeys.get(projectId);
+      if (!key) {
+        key = canonicalRepoKey(repoPath);
+        this.repoKeys.set(projectId, key);
+      }
+      return key;
+    });
+  }
+
+  /** Ask the shared admission authority; record a denial only when its reasons change. */
+  private admit(task: Task, kind: WorkKind, provider: string | null): AdmissionExplanation {
+    const project = this.records.getProject(task.projectId) as Project;
+    const explanation = evaluateAdmission({
+      taskId: task.id, projectId: task.projectId, repoKey: this.repoKeyFor(project), kind, provider,
+      executionMode: task.executionMode, writeScope: task.allowedScope, resources: task.resources,
+    }, this.activeWork(), this.schedulingLimits());
+    const previous = this.admissionExplanations.get(task.id);
+    this.admissionExplanations.set(task.id, { ...explanation, kind, at: new Date().toISOString() });
+    if (!explanation.admitted && previous?.reasons.join("|") !== explanation.reasons.join("|")) {
+      this.records.recordEvent({
+        kind: "admission.denied", projectId: task.projectId, taskId: task.id,
+        data: { workKind: kind, provider, reasons: explanation.reasons, observed: explanation.observed, limits: explanation.limits },
+      });
+    }
+    return explanation;
+  }
+
+  /** Feed the opt-in adaptive target: host backpressure or a provider in cooldown is pressure. */
+  private observePressure(): void {
+    if (!this.adaptive) return;
+    const before = this.adaptive.target;
+    const pressure = this.machineBackpressure() !== null ||
+      this.records.listProviderCapacity().some((provider) => provider.state === "cooldown");
+    const after = this.adaptive.observe(pressure);
+    if (after !== before) {
+      this.records.recordEvent({ kind: "scheduler.target_changed", data: { from: before, to: after, ceiling: this.adaptive.ceiling, pressure } });
+    }
+  }
+
+  /**
+   * In-flight model work (a repair or reroute) that could not be admitted
+   * waits here without losing its purpose or its repair allocation.
+   */
+  private deferForAdmission(task: Task, kind: Attempt["kind"], explanation: AdmissionExplanation): void {
+    const current = this.records.getTask(task.id) ?? task;
+    const reason = explanation.reasons.join("; ");
+    if (kind === "review") {
+      this.records.recordEvent({ kind: "review.pending", projectId: current.projectId, taskId: current.id,
+        data: { capacityAction: "pending", reason, revision: current.resultRevision } });
+      if (current.state !== "BLOCKED") {
+        this.records.transition(current.id, "BLOCKED", {
+          blocked_reason: `${REVIEW_PENDING_PREFIX} ${reason}`, claimed_by: null, claimed_at: null,
+        }, { reason: "review waiting for admission capacity" });
+      }
+      return;
+    }
+    const failed = this.records.listAttempts(current.id).at(-1);
+    this.records.recordEvent({ kind: "admission.deferred", projectId: current.projectId, taskId: current.id,
+      data: { attemptKind: kind, reasons: explanation.reasons } });
+    if (current.state !== "BLOCKED") {
+      this.records.transition(current.id, "BLOCKED", {
+        blocked_reason: `${ADMISSION_PENDING_PREFIX} ${kind}: ${reason}`,
+        // A reroute keeps the provider failure so its resume still excludes that provider.
+        failure_class: kind === "reroute" ? failed?.failureClass ?? current.failureClass : current.failureClass,
+        claimed_by: null, claimed_at: null,
+      }, { reason: "in-flight work waiting for admission capacity", attemptKind: kind });
+    }
+  }
+
+  private async resumeAdmissionPending(): Promise<void> {
+    const waiting = this.records.listTasks({ state: "BLOCKED" }).filter((task) => task.blockedReason?.startsWith(ADMISSION_PENDING_PREFIX));
+    const service = new Map([...this.records.projectSchedule()].map(([id, item]) => [id, item.dispatchCount]));
+    for (const candidate of fairOrder(waiting.map((task) => ({ taskId: task.id, projectId: task.projectId, priority: task.priority, readySince: task.updatedAt })), service)) {
+      const task = this.records.getTask(candidate.taskId);
+      if (!task || task.state !== "BLOCKED" || !task.blockedReason?.startsWith(ADMISSION_PENDING_PREFIX)) continue;
+      const project = this.records.getProject(task.projectId);
+      if (!project || project.status !== "active") continue;
+      const deferred = this.records.listEventsOfKind(task.id, "admission.deferred").at(-1);
+      const kind = ((deferred ? JSON.parse(String(deferred.data)) : {}) as { attemptKind?: Attempt["kind"] }).attemptKind ?? "repair";
+      const selection = this.selectTaskRoute(task);
+      if (!selection.chosen) continue;
+      if (!this.admit(task, "model", selection.chosen.adapter).admitted) continue;
+      const resumed = this.records.transition(task.id, "RUNNING", { blocked_reason: null, claimed_by: null, claimed_at: null },
+        { reason: "admission capacity available; resuming in-flight work", attemptKind: kind });
+      await this.launchAttempt(resumed, project, kind, [], ids.launch(), selection);
+    }
+  }
+
   private promoteTasks(): void {
     const candidates = [
       ...this.records.listTasks({ state: "QUEUED" }),
@@ -1903,78 +2060,45 @@ export class Controller {
   private async dispatchReadyTasks(): Promise<void> {
     this.backpressureReason = this.machineBackpressure();
     if (this.backpressureReason) return;
-    let available = this.options.workerLimit - this.records.listRunningAttempts().length;
-    if (available <= 0) return;
-    const activeProjectIds = new Set(
-      this.records.listTasks().filter((task) => task.state === "RUNNING" || task.state === "REVIEWING").map((task) => task.projectId),
-    );
-    const ready = this.records.listTasks({ state: "READY" });
-    const perProject = new Map<string, Task[]>();
-    for (const task of ready) {
-      const tasks = perProject.get(task.projectId) ?? [];
-      tasks.push(task);
-      perProject.set(task.projectId, tasks);
-    }
-
-    while (available > 0 && perProject.size > 0) {
-      const schedule = this.records.projectSchedule();
-      const candidates = [...perProject.entries()]
-        .filter(([projectId]) => activeProjectIds.has(projectId) || activeProjectIds.size < this.options.activeProjectLimit)
-        .sort(([a], [b]) => {
-          const left = schedule.get(a)?.dispatchCount ?? 0;
-          const right = schedule.get(b)?.dispatchCount ?? 0;
-          return left - right || a.localeCompare(b);
-        });
-      if (candidates.length === 0) break;
-      let dispatchedInRound = false;
-      for (const [projectId, tasks] of candidates) {
-        if (available <= 0) break;
-        const task = tasks.shift();
-        if (!task) { perProject.delete(projectId); continue; }
-        const project = this.records.getProject(projectId);
-        if (project?.status === "active") {
-          const readiness = this.records.recordGovernanceNeedsInput(project.id, task.id);
-          if (!readiness.ready) {
-            if (tasks.length === 0) perProject.delete(projectId);
-            continue;
-          }
-        }
-        if (project?.status === "active" && this.executionResourcesAvailable(task)) {
-          const continuation = this.records.getContinuation(task.id);
-          if (continuation.episode && continuation.episode.repairsConsumed >= continuation.episode.repairLimit &&
-              continuation.openObligations.some((item) => item.blocking && item.kind === "code_defect")) {
-            this.blockTask(task, "CODE", "The active execution episode exhausted its repair budget; a new authorized episode is required.");
-            if (tasks.length === 0) perProject.delete(projectId);
-            continue;
-          }
-          if (await this.resumeOperationalTask(task, project)) {
-            this.records.markProjectDispatched(projectId);
-            activeProjectIds.add(projectId);
-            if (this.records.listRunningAttempts().some((attempt) => attempt.taskId === task.id)) available -= 1;
-            dispatchedInRound = true;
-            if (tasks.length === 0) perProject.delete(projectId);
-            continue;
-          }
-          const selection = this.selectTaskRoute(task);
-          if (task.taskClass === "mechanical") {
-            await this.dispatchMechanical(task, project);
-            this.records.markProjectDispatched(projectId);
-            dispatchedInRound = true;
-          } else if (selection.chosen) {
-            const started = await this.dispatchInitial(task, project, selection);
-            if (started) {
-              this.records.markProjectDispatched(projectId);
-              activeProjectIds.add(projectId);
-              available -= 1;
-              dispatchedInRound = true;
-            }
-          } else if (selection.deferred.length === 0) {
-            this.blockTask(task, this.providerBlockClass(selection), selection.reason);
-          }
-        }
-        if (tasks.length === 0) perProject.delete(projectId);
+    // Bounded, fair scan: a task that cannot be admitted is skipped, never a
+    // barrier for compatible work behind it.
+    const ready = this.records.listTasks({ state: "READY" }).slice(0, READY_SCAN_LIMIT);
+    const service = new Map([...this.records.projectSchedule()].map(([id, item]) => [id, item.dispatchCount]));
+    const ordered = fairOrder(ready.map((task) => ({ taskId: task.id, projectId: task.projectId, priority: task.priority, readySince: task.updatedAt })), service);
+    for (const candidate of ordered) {
+      if (this.records.listRunningAttempts().length >= this.schedulingLimits().modelWorkers &&
+          this.activeWork().filter((work) => work.kind === "gate").length >= this.options.gateLimit) break;
+      const task = this.records.getTask(candidate.taskId);
+      if (!task || task.state !== "READY") continue;
+      const project = this.records.getProject(task.projectId);
+      if (!project || project.status !== "active") continue;
+      const readiness = this.records.recordGovernanceNeedsInput(project.id, task.id);
+      if (!readiness.ready) continue;
+      const continuation = this.records.getContinuation(task.id);
+      if (continuation.episode && continuation.episode.repairsConsumed >= continuation.episode.repairLimit &&
+          continuation.openObligations.some((item) => item.blocking && item.kind === "code_defect")) {
+        this.blockTask(task, "CODE", "The active execution episode exhausted its repair budget; a new authorized episode is required.");
+        continue;
       }
-      if (!dispatchedInRound) break;
+      if (task.taskClass === "mechanical") {
+        if (!this.admit(task, "gate", null).admitted) continue;
+        await this.dispatchMechanical(task, project);
+        this.records.markProjectDispatched(project.id);
+        continue;
+      }
+      const selection = this.selectTaskRoute(task);
+      if (!selection.chosen) {
+        if (selection.deferred.length === 0 && !await this.resumeOperationalTask(task, project)) {
+          this.blockTask(task, this.providerBlockClass(selection), selection.reason);
+        }
+        continue;
+      }
+      if (!this.admit(task, "model", selection.chosen.adapter).admitted) continue;
+      if (await this.resumeOperationalTask(task, project)) {
+        this.records.markProjectDispatched(project.id);
+        continue;
+      }
+      if (await this.dispatchInitial(task, project, selection)) this.records.markProjectDispatched(project.id);
     }
   }
 
@@ -1988,18 +2112,6 @@ export class Controller {
       return `One-minute load per CPU ${loadPerCpu.toFixed(2)} exceeds configured maximum ${this.options.maxLoadPerCpu}.`;
     }
     return null;
-  }
-
-  private executionResourcesAvailable(task: Task): boolean {
-    const running = this.records.listTasks({ projectId: task.projectId })
-      .filter((candidate) => candidate.state === "RUNNING" || candidate.state === "REVIEWING");
-    if (running.length === 0) return true;
-    if (running.length >= this.options.perProjectWorkerLimit) return false;
-    if (task.executionMode === "single" || task.executionMode === "sequential") return false;
-    return running.every((active) =>
-      (active.executionMode === "parallel" || active.executionMode === "mixed") &&
-      !scopesOverlap(task.allowedScope, active.allowedScope),
-    );
   }
 
   private providerBlockClass(selection: RouteSelection): FailureClass {
@@ -2126,8 +2238,22 @@ export class Controller {
     requireProjectReadiness({ kind: "project", id: project.id }, project.governance, project.reviewPolicy);
     if (!task.worktreePath || !task.branch || !task.baseRevision) throw new Error(`Task ${task.id} has no prepared workspace`);
     const selection = routeSelection ?? this.selectTaskRoute(task);
-    if (!selection.chosen) throw new Error(selection.reason);
+    if (!selection.chosen) {
+      // A provider at its concurrency limit is a capacity wait, not a fault:
+      // the in-flight work waits for admission instead of failing the tick.
+      if (selection.deferred.length > 0) {
+        this.deferForAdmission(task, kind, { admitted: false, reasons: [selection.reason], limits: {}, observed: {} });
+        return;
+      }
+      throw new Error(selection.reason);
+    }
     const candidate: RouteCandidate = selection.chosen;
+    // Every launch path, not only initial dispatch, passes the same admission.
+    const admission = this.admit(task, "model", candidate.adapter);
+    if (!admission.admitted) {
+      this.deferForAdmission(task, kind, admission);
+      return;
+    }
     const adapter = this.requireAdapter(candidate.adapter);
     const execution: ExecutionSelection = {
       harness: adapter.name,
@@ -2154,14 +2280,14 @@ export class Controller {
       consumeRepair: kind !== "reroute",
       consumeRecovery: stageOptions.consumeRecovery,
     });
-    const admission = this.records.reserveAdmission({
+    const lease = this.records.reserveAdmission({
       stageRunId: stage.id,
       controllerId: this.options.controllerId,
       provider: adapter.name,
       quotaDomain: selection.quotaDomain ?? adapter.authMode,
       resources: ["model-worker", `provider:${adapter.name}`, `quota:${selection.quotaDomain ?? adapter.authMode}`, `worktree:${task.id}`],
     });
-    this.records.activateAdmission(admission.id, admission.fencingToken);
+    this.records.activateAdmission(lease.id, lease.fencingToken);
     const attemptId = ids.attempt();
     const dir = artifactDir(task.id, attemptId);
     const completionPath = join(dir, "completion.json");

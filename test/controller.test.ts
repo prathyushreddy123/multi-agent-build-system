@@ -125,7 +125,7 @@ test("controller restart collects one isolated launch without duplication and ch
     await restarted.tick();
   }
   const done = records.getTask(task.id);
-  assert.equal(done?.state, "DONE");
+  assert.equal(done?.state, "DONE", `${done?.failureClass}: ${done?.blockedReason}`);
   assert.ok(done?.resultRevision);
   assert.equal(records.listAttempts(task.id)[0]?.state, "succeeded");
   assert.equal(fake.starts, 1, "restart must collect the existing launch rather than dispatch a duplicate");

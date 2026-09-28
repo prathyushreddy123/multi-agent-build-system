@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "15";
+export const SCHEMA_VERSION = "16";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -106,6 +106,18 @@ const MIGRATIONS: Migration[] = [
       "CREATE UNIQUE INDEX IF NOT EXISTS attempts_by_stage_run ON attempts(stage_run_id) WHERE stage_run_id IS NOT NULL",
       "CREATE UNIQUE INDEX IF NOT EXISTS gates_by_stage_run ON gate_results(stage_run_id) WHERE stage_run_id IS NOT NULL",
     ],
+  },
+  {
+    version: 16,
+    file: "migrations/016_scheduler_resources.sql",
+    columns: {
+      tasks: {
+        // Exclusive named resources (e.g. "port:3000", "db:test") a task
+        // needs while it runs; two tasks sharing one are never co-admitted.
+        resources: "TEXT NOT NULL DEFAULT '[]'",
+      },
+    },
+    indexes: [],
   },
 ];
 
