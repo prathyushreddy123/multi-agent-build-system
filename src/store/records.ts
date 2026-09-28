@@ -2368,7 +2368,8 @@ export class Records {
       const observedAt = input.observedAt ?? nowIso();
       // A new occurrence after a fix was recorded is a recurrence: the lesson
       // reopens and loses its verified status rather than being trusted blindly.
-      if ((incident.lifecycle === "resolved" || incident.lifecycle === "mitigated") && Date.parse(observedAt) > Date.parse(incident.updatedAt)) {
+      // At or after the fix was recorded counts: same-millisecond timestamps are common.
+      if ((incident.lifecycle === "resolved" || incident.lifecycle === "mitigated") && Date.parse(observedAt) >= Date.parse(incident.updatedAt)) {
         this.store.run(
           "UPDATE incidents SET lifecycle = 'open', confidence = ?, updated_at = ? WHERE id = ?",
           incident.confidence === "verified" ? "medium" : incident.confidence, nowIso(), incident.id,

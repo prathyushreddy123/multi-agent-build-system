@@ -1463,6 +1463,47 @@ extension API changes). The workbench scorecard is a basic table, not a redesign
 
 **Acceptance:** all required checks have actual evidence or explicit unmet prerequisites; no live database/controller mutation by tests; classification and review decisions are enforced end to end; prepared versus activated features are clearly distinguished; one-worker canary and two-worker pilot gates documented; retrospective reviews remain separate.
 
+#### T15 implementation record and rollout evidence
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). Nothing was
+activated: no live migration, engine switch, exporter, or concurrency change.
+
+**Evidence produced**
+
+| Check | Result |
+| --- | --- |
+| `npm run typecheck` | pass |
+| `npm run typecheck:extensions` (Pi linked with `npm run link-pi`) | pass |
+| `npm test` (350 tests, fake adapters, disposable state) | pass, repeated runs |
+| Deterministic soak (`test/reliability-acceptance.test.ts`) | 16 tasks across 2 projects; 100+ stage transitions; injected quota faults, failing checks, review change requests, dependency integration; model/provider caps and repository locks asserted every tick; no leaked leases, duplicate obligations, or unbounded retries; 3/3 repeated runs |
+| Upgrade/restore rehearsal on a schema-14 fixture | pass (every pre-existing value preserved, schema 17, restore digest equal, source byte-identical) |
+| Upgrade/restore rehearsal on a read-only copy of the live database (2026-09-28) | pass: schema 14 → 17, 35 tables preserved, restore consistent; live `mabs.sqlite` and WAL hashes unchanged before/after. Both registered projects (`multi-agent-build-system`, `ai-engineering-study-assistant`) still need a project-type decision, so v3 would block their new implementation until classified, by design. |
+| `npm run verify` (live providers) | **not run**: it calls paid-subscription models and needs separate authorization |
+
+**Deviations from the plan's process**
+
+- T07–T15 were implemented in one direct session at the user's request instead of by MABS
+  workers. The plan's independent review gates (MABS tasks "Review gate 3–6") were **not run** for
+  this code; those tasks are held by the operator in the live database. The code has not had an
+  independent review.
+- While this work was in progress, the live controller (main branch) was restarted outside this
+  session and completed MABS task T07 through a Codex worker (task branch commit `627b7a0`). That
+  is a second, independent T07 implementation that is not on this branch. MABS task T08 is
+  now blocked because it cannot cherry-pick that commit. Choosing between the two T07
+  implementations, and reconciling the MABS task records with this branch, is an operator decision.
+
+**Rollout gates (unchanged, now with commands)**
+
+- Gate A needs the MABS project's type and review choice (`mabs project readiness` shows the question).
+- Gate C one-worker canary: `controller run --workers=1` on the pinned v3 revision after Gate E.
+- Gate E: stop and drain the controller; `maintenance backup`; `scripts/validate-execution-upgrade.ts`
+  on the backup; pin the engine revision; start one controller on the intended database; confirm
+  `project readiness`, `queue explain`, and `telemetry status` (disabled).
+- Gate F two-worker pilot (prepared, not activated): `controller run --workers=2 --claude-limit=1
+  --codex-limit=1 --capacity-fallback=wait`.
+
+Retrospective reviews of H7–H9 remain separate and were not performed.
+
 ## 15. Detailed validation matrix
 
 All tests below are proposed additions/expansions. Use fake adapters and disposable repositories/databases by default. Test IDs provide requirement-to-evidence traceability.
@@ -1664,6 +1705,29 @@ telemetry status
 
 Existing curator and optimization commands remain compatible where semantics are unchanged. New mutation commands must expose expected-version/approval requirements rather than allowing dashboards to mutate state implicitly.
 
+**Implemented spellings (T07–T15).** These now exist. Governance (`project governance`) and history
+audit (`scripts/audit-execution-history.ts`) come from T03 and T01.
+
+```text
+project readiness
+task scorecard <task>              task timeline <task> [--limit --offset]
+queue explain [--limit --offset]   scheduler explain <task>
+routing capabilities               routing explain <task>
+obligation list <task>             obligation decide <obligation> --answer=... --by=<person>
+incident import-history [--project] [--dry-run]
+incident list|show|hypothesize|verify|supersede ...
+curator recommend <project>        improvements <project>
+optimization prepare-run <experiment> --dry-run
+optimization authorize <experiment> --fingerprint=... --by=<person>
+optimization record-trial <experiment> <variant> <case> <task> [--repeat=N]
+telemetry status
+node scripts/validate-execution-upgrade.ts --source <explicit.sqlite> --work <new-dir>
+```
+
+Not implemented as proposed: `task continuation <task>` (the continuation is visible through
+`task show`, `task scorecard`, and `obligation list`), and `optimization run` (live trials are
+ordinary tasks recorded with `record-trial` after authorization).
+
 ### 16.5 Fixture and evidence conventions
 
 Proposed fixture layout:
@@ -1766,21 +1830,27 @@ Restore procedures must be tested on disposable paths first. A backup without re
 
 ### 19.1 Implementation definition of done
 
-- [ ] All REQ-01 through REQ-15 have linked test/evidence IDs.
-- [ ] T01–T15 acceptance criteria satisfied on the integrated revision.
-- [ ] Missing type always asks; no default-personal implementation path remains.
-- [ ] Personal review choice is explicit and durable; client review cannot be disabled implicitly.
-- [ ] History preserved; all historical projections reproducible and versioned.
-- [ ] Quota reroute retains findings; retries resume the correct stage.
-- [ ] Environment errors do not consume code-repair budget.
-- [ ] Full-prompt accounting and normalized usage show unknown/partial coverage honestly.
-- [ ] Explicit model/effort settings reach the provider launch contract.
-- [ ] Every launch path uses admission; parallel/resource/restart tests pass.
-- [ ] Required checks/reviews are revision-bound; advisory questions are not automatic code defects.
-- [ ] Native live/scorecard/improvement views work with no external platform.
-- [ ] Curator/optimizer remain proposal-and-evidence mechanisms, not self-activation loops.
-- [ ] Migration/restore and engine-version rollout rehearsed on isolated state.
-- [ ] Documentation states which capabilities are implemented, tested, approved, and activated separately.
+Status on the integrated revision of `mabs/reliability-adaptive-execution-v3` (deterministic suite:
+350 tests passing). "Implemented" is not "activated": nothing below is live until Gate E.
+
+- [x] Missing type always asks; no default-personal implementation path remains (T03; T14 `project readiness`).
+- [x] Personal review choice is explicit and durable; client review cannot be disabled implicitly (T03, T09 GOV-08).
+- [x] History preserved; historical projections reproducible and versioned (T01, T04, T12 LRN-01; T15 rehearsal).
+- [x] Quota reroute retains findings; retries resume the correct stage (T06, T08 REC-01).
+- [x] Environment errors do not consume code-repair budget (T05, T06; T12 re-diagnosis).
+- [x] Full-prompt accounting and normalized usage show unknown/partial coverage honestly (T04, T08, T14 OBS-04).
+- [x] Explicit model/effort settings reach the provider launch contract (T07 RTE-01; verified with fake executables only).
+- [x] Every launch path uses admission; parallel/resource/restart tests pass (T11 PAR-01..11; T15 soak).
+- [x] Required checks/reviews are revision-bound; advisory questions are not automatic code defects (T09 REC-17..20).
+- [x] Native live/scorecard/improvement views work with no external platform (T10, T14).
+- [x] Curator/optimizer remain proposal-and-evidence mechanisms, not self-activation loops (T12, T13 EVAL-05).
+- [x] Migration/restore rehearsed on isolated state (T15: fixture and a read-only copy of the live database).
+- [x] Documentation states which capabilities are implemented, tested, approved, and activated separately (records T07–T15).
+- [ ] All REQ-01 through REQ-15 have linked test/evidence IDs. Package records cite test IDs; a single
+  REQ-to-test traceability table has not been produced.
+- [ ] T01–T15 acceptance criteria satisfied on the integrated revision **with independent review**. The
+  plan's review gates 3–6 were not run for T07–T15 (see T15 record).
+- [ ] Engine-version rollout rehearsed end to end (Gate E steps 1–3 and 5–8 are operational actions not performed).
 
 ### 19.2 Still required before activation or live evaluation
 

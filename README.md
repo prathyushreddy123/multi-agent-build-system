@@ -75,6 +75,7 @@ These steps install and check MABS; they do not start coding workers. Follow the
 - [Documentation hub](docs/index.md): choose a guide by what you want to do.
 - [Local workbench](docs/getting-started.md#4-start-the-controller): inspect tasks, checks, reviews, and evidence at `http://127.0.0.1:4317` while the UI is running.
 - [Configuration curator](docs/curator.md) and [routing policy](docs/routing-policy-v1.md): advanced configuration.
+- [Reliability, efficiency, and adaptive execution](docs/plans/mabs-reliability-efficiency-adaptive-execution.md): the plan and per-package implementation records (explicit routes, complete-prompt budgets, review obligations, live telemetry, shared admission, incidents, experiments, operator views), with what is implemented versus activated.
 - [Implementation history](docs/index.md#history-and-design-decisions): earlier phase summaries and verification evidence, separate from current usage instructions.
 
 Want to help? [Contribute a focused fix, test, or documentation improvement](CONTRIBUTING.md).

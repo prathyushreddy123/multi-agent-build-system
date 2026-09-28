@@ -19,6 +19,16 @@ Run commands from the MABS checkout. This is a curated reference; `node src/cli.
 | `node src/cli.ts profile inspect /absolute/path/to/repo` | Detected components, checks, and setup needs |
 | `node src/cli.ts ui` | Localhost workbench; does not start dispatch, but its controls can mutate records |
 | `node src/cli.ts operator probe` | Pi, Herdr, viewer, and worktree capabilities of the installed tools ([details](operator/phase-0-capabilities.md)) |
+| `node src/cli.ts project readiness` | Governance decisions still needed, with the command to answer; nothing is defaulted |
+| `node src/cli.ts task scorecard TASK_ID` | Review label (approved vs not required), quality, usage coverage, requested/configured/reported model and effort |
+| `node src/cli.ts task timeline TASK_ID --limit=50` | Paged event history with evidence paths |
+| `node src/cli.ts queue explain` | Why each waiting task is waiting |
+| `node src/cli.ts scheduler explain TASK_ID` | The admission decision for one task under the current active work |
+| `node src/cli.ts routing capabilities` | The versioned model/effort/quota-domain registry |
+| `node src/cli.ts routing explain TASK_ID` | Recorded route decisions plus a launch-free dry selection |
+| `node src/cli.ts obligation list TASK_ID` | Durable findings and decisions with their lifecycle |
+| `node src/cli.ts improvements PROJECT` | Incidents, curator recommendations, experiments, and proposals |
+| `node src/cli.ts telemetry status` | Optional export state; disabled unless configured |
 
 Inspection commands do not launch workers. Commands that open MABS records can initialize or migrate the local database; they are not a promise of zero filesystem writes.
 
@@ -36,6 +46,9 @@ Inspection commands do not launch workers. Commands that open MABS records can i
 | `node src/cli.ts task retry TASK_ID --version=N` | Retry a blocked/failed task using its latest record version |
 | `node src/cli.ts task cancel TASK_ID --version=N` | Cancel the task and its worker process group |
 | `node src/cli.ts provider reset codex` | Clear recorded provider unavailability after fixing the cause |
+| `node src/cli.ts obligation decide OBLIGATION_ID --answer=... --by=NAME` | Answer a blocking review decision; resuming is a separate `task retry` |
+| `node src/cli.ts incident import-history --dry-run` | Project systemic incidents from history; drop `--dry-run` to record them (idempotent) |
+| `node src/cli.ts incident verify INCIDENT_ID --cause=... --fix=REF --test=REF --by=NAME` | Mark a lesson verified; requires fix and test evidence |
 
 For submission, use the scoped example in [Getting started](getting-started.md#3-register-the-project-and-task). For retry/cancel decisions, use [Troubleshooting](troubleshooting.md#retry-or-cancel-deliberately).
 
@@ -51,8 +64,13 @@ Flags on `controller run` or `controller once`:
 | `--codex-limit=N`, `--claude-limit=N` | Provider capacity limits |
 | `--min-free-memory-mb=N` | Pause dispatch below a free-memory threshold |
 | `--max-load-per-cpu=N` | Pause dispatch above a load threshold |
+| `--gate-limit=N` | Concurrent check jobs, capped separately from model workers |
+| `--capacity-fallback=allow\|wait` | Whether a busy preferred route may move to a free provider (`allow`, the default, records the fallback) |
+| `--adaptive` | Opt-in: lower the model-worker target under pressure, raise it after a healthy streak |
+| `--model=`, `--effort=low\|medium\|high` | Explicit per-attempt settings; rejected before launch when not in the capability registry |
+| `--export=file:/abs/path` or `--export=https://collector` | Optional redacted telemetry export; off by default |
 
-Parallel tasks also need compatible execution modes and disjoint edit scopes. More slots cannot bypass that rule or a provider's actual subscription limits.
+`--workers` defaults to 1, the production setting. One admission authority applies every cap to initial work, repairs, reroutes, reviews, and checks; refused in-flight work waits as `Admission pending:` and resumes first. Parallel tasks also need compatible execution modes, disjoint edit scopes, and distinct named `resources`; two projects on one repository share its lock. More slots cannot bypass those rules or a provider's actual subscription limits.
 
 ## Plans, review, and optional operations
 
@@ -65,6 +83,10 @@ Parallel tasks also need compatible execution modes and disjoint edit scopes. Mo
 | `node src/cli.ts ops status PROJECT` | Inspect effective optional-operation settings |
 | `node src/cli.ts ops prepare PROJECT ci` | Prepare a dry-run plan; does not write provider config or enable CI |
 | `node src/cli.ts optimization routing PROJECT` | Inspect recorded routing outcomes, not remaining quota or actual spend |
+| `node src/cli.ts optimization prepare-run EXPERIMENT_ID --dry-run` | Counterbalanced trial manifest, budget, and eligibility; zero provider calls |
+| `node src/cli.ts optimization authorize EXPERIMENT_ID --fingerprint=... --by=NAME` | Bind live trials to that exact manifest |
+| `node src/cli.ts optimization record-trial EXPERIMENT_ID VARIANT CASE TASK_ID --repeat=N` | Record a live trial from a normal task, including failed ones |
+| `node src/cli.ts curator recommend PROJECT` | Evidence-backed remedies for recurring incidents; proposal only |
 
 `ops prepare` also accepts `deployment`, `monitoring`, `scheduling`, `delivery`, and `costs`. None of these preparations executes an external action.
 
@@ -82,6 +104,14 @@ Use the [curator guide](curator.md) for configuration proposal, approval, activa
 Database records are retained indefinitely. Attempt artifacts become eligible after 30 days for successful tasks or 90 days for failed/cancelled tasks. Active and blocked task artifacts are not eligible under this policy. A SQLite backup does not back up all artifact files or task worktrees.
 
 See [state locations and overrides](getting-started.md#where-things-live) and the [retention implementation](../src/maintenance/retention.ts).
+
+Before activating a new engine version on a real database, rehearse it on copies:
+
+```bash
+node scripts/validate-execution-upgrade.ts --source /explicit/path/mabs.sqlite --work /new/empty/dir
+```
+
+The source is opened read-only; the upgrade and a restore run on copies in the work directory. It exits 0 only when every pre-existing value survives, the copy reaches the supported schema, and the restore matches.
 
 ## Operator workspace (Pi slash commands)
 
