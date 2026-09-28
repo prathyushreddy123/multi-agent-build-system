@@ -8,6 +8,9 @@ export interface ExecResult {
   stderr: string;
   timedOut: boolean;
   durationMs: number;
+  /** True when the in-memory copy stopped at maxBuffer; the stream callbacks still saw everything. */
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
 }
 
 export interface ExecOptions {
@@ -42,6 +45,8 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
     const child = spawn(command, args, spawnOptions);
     let stdout = "";
     let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let timedOut = false;
     let settled = false;
 
@@ -65,11 +70,13 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
     child.stdout?.on("data", (chunk: string) => {
       options.onStdout?.(chunk);
       if (stdout.length < maxBuffer) stdout += chunk;
+      else stdoutTruncated = true;
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       options.onStderr?.(chunk);
       if (stderr.length < maxBuffer) stderr += chunk;
+      else stderrTruncated = true;
     });
 
     const finish = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -77,7 +84,7 @@ export function exec(command: string, args: string[], options: ExecOptions = {})
       settled = true;
       if (timer) clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
-      resolvePromise({ code, signal, stdout, stderr, timedOut, durationMs: Date.now() - started });
+      resolvePromise({ code, signal, stdout, stderr, timedOut, durationMs: Date.now() - started, stdoutTruncated, stderrTruncated });
     };
 
     child.on("error", (error: NodeJS.ErrnoException) => {

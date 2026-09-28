@@ -1215,6 +1215,40 @@ that labels a question `[major]` is still treated as a blocking defect by design
 
 **Acceptance:** logs appear before exit; UTF-8/chunk splits and malformed events do not break collection; usage is not counted twice; bounded buffers cannot hide truncation; an exporter outage cannot stop execution; missing provider internals remain unknown rather than synthesized.
 
+#### T10 implementation record
+
+Implemented directly on `mabs/reliability-adaptive-execution-v3` (no MABS worker). No activation.
+
+- `src/telemetry/stream.ts` (`mabs.telemetry.v1`): `LineAssembler` (lines split across chunks),
+  `LiveLog` (append-as-it-arrives evidence with a 16 MiB default budget; cuts on a UTF-8 boundary,
+  writes an in-file truncation marker, counts dropped bytes and write errors), `ProviderStreamParser`
+  (incremental Codex and Claude JSON-lines parsing; malformed, plain-text, and oversized lines are
+  counted, never guessed), and `ProgressWriter` (throttled, atomically replaced `progress.json`).
+- Worker output now streams to `worker.log` and `progress.json` while the provider runs; previously
+  the log was written only after exit. Claude launches use `--output-format stream-json --verbose`;
+  its final `result` event is the envelope (`launch.raw`), so classification, usage, and reported
+  model read the same fields as before. A single-object `json` envelope is still accepted.
+- `exec` reports `stdoutTruncated`/`stderrTruncated` instead of silently capping its in-memory copy.
+- Liveness and progress are separate: the heartbeat still means "the process exists";
+  `attempts.last_progress_at` advances only from real provider events read from `progress.json`;
+  `attempt.first_output` (once per attempt) marks readiness. The operator dashboard shows
+  `[output Ns ago]` beside the heartbeat, and the "not instrumented" gap is shown only until the
+  first provider output.
+- Usage is counted once: live usage is observed in `progress.json` only; the recorded usage remains
+  the final envelope's.
+- Loss is visible: any truncation, write error, malformed or oversized line, or buffer cap records
+  `telemetry.gap` at collection.
+- `src/telemetry/sink.ts`: `BoundedTelemetryQueue` with an optional exporter. Disabled by default
+  (retains and sends nothing). Emits never throw; flushes run detached from the controller tick;
+  failures and drops are counted and a failed batch is retained up to the bound.
+- Evidence: `test/streaming.test.ts` (OBS-01 end to end with the real `HarnessAdapter`, detached
+  worker process, and a slow fake `codex` on a temporary PATH; OBS-02 exporter outage; chunk/UTF-8
+  splits; malformed lines; bounded log).
+
+Known limits: the Claude `stream-json` switch is verified only against fake executables; a live run
+is needed to confirm the installed CLI's event shape, and it was not made here because it calls a
+paid model. Neither provider reports effort or Codex's model, so these remain unknown.
+
 ### T11 — Resource-safe parallel scheduler
 
 **Milestone:** M4. **Depends on:** T10. **Risk:** high. **Mode:** sequential.

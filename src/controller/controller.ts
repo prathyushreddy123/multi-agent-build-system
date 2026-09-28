@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { accessSync, constants, copyFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { cpus, freemem, loadavg } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import { defaultAdapters } from "../adapters/harness.ts";
 import type { AdapterHandle, CollectedResult, WorkerAdapter } from "../adapters/types.ts";
@@ -31,6 +31,8 @@ import { describeReviewPolicy, evaluateReviewPolicy, triageReviewOutput } from "
 import type { ReviewDecision, ReviewItem, ReviewerRoute } from "../review/policy.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
+import { BoundedTelemetryQueue, type TelemetrySink } from "../telemetry/sink.ts";
+import { readProgress, telemetryGap } from "../telemetry/stream.ts";
 import {
   DEFAULT_CAPABILITY_REGISTRY,
   DISABLED_DELEGATION,
@@ -97,6 +99,8 @@ export interface ControllerOptions {
   capacityFallback?: "allow" | "wait";
   controllerId?: string;
   adapters?: Map<string, WorkerAdapter>;
+  /** Optional export fan-out; disabled by default and never able to stop execution. */
+  telemetry?: TelemetrySink;
 }
 
 export class Controller {
@@ -122,6 +126,8 @@ export class Controller {
   readonly adapters: Map<string, WorkerAdapter>;
   readonly routingPolicy: RoutingPolicy;
   readonly capabilityRegistry: CapabilityRegistry;
+  readonly telemetry: TelemetrySink;
+  private readonly firstOutputSeen = new Set<string>();
   private readonly preferredAdapter: "claude" | "codex" | null;
   readonly startedAt = new Date().toISOString();
   private stopped = false;
@@ -165,6 +171,7 @@ export class Controller {
     this.capabilityRegistry = options.capabilityRegistry ?? DEFAULT_CAPABILITY_REGISTRY;
     this.adapters = options.adapters ?? defaultAdapters(this.capabilityRegistry);
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
+    this.telemetry = options.telemetry ?? new BoundedTelemetryQueue();
     this.preferredAdapter = options.defaultAdapter ?? null;
     if (!Number.isSafeInteger(this.options.workerLimit) || this.options.workerLimit < 1) throw new Error("Worker limit must be a positive integer");
     if (!Number.isSafeInteger(this.options.perProjectWorkerLimit) || this.options.perProjectWorkerLimit < 1) throw new Error("Per-project worker limit must be a positive integer");
@@ -201,6 +208,9 @@ export class Controller {
       // controller beyond this small grace window.
       await this.reconcileGateStages();
       this.writeHealth(loopDelayMs, "running");
+      // Export is detached from the loop: a slow or failing exporter can
+      // neither delay nor fail a tick.
+      if (this.telemetry instanceof BoundedTelemetryQueue) void this.telemetry.flush();
     } catch (error) {
       this.failedTicks += 1;
       // A lease loss is not this controller's health to report: the holder owns
@@ -1019,6 +1029,7 @@ export class Controller {
       const status = await adapter.status(this.handleOf(attempt));
       if (status === "running") {
         this.records.heartbeat(attempt.id);
+        this.observeProgress(task, attempt);
         continue;
       }
       if (status === "lost") {
@@ -1365,11 +1376,49 @@ export class Controller {
   }
 
   /**
+   * Liveness (the process exists) and progress (the provider emitted events)
+   * are separate observations. Only real provider events advance progress.
+   */
+  private observeProgress(task: Task, attempt: Attempt): void {
+    const progress = readProgress(join(dirname(this.handleOf(attempt).completionPath), "progress.json"));
+    if (!progress) return;
+    if (progress.firstOutputAt && !this.firstOutputSeen.has(attempt.id)) {
+      this.firstOutputSeen.add(attempt.id);
+      const recorded = this.records.listEventsOfKind(task.id, "attempt.first_output").some((event) => event.attempt_id === attempt.id);
+      if (!recorded) {
+        this.records.recordEvent({
+          kind: "attempt.first_output", projectId: task.projectId, taskId: task.id, attemptId: attempt.id,
+          data: { at: progress.firstOutputAt, provider: progress.provider },
+        });
+      }
+    }
+    if (progress.lastEventAt && this.records.recordAttemptProgress(attempt.id, progress.lastEventAt)) {
+      this.telemetry.emit({
+        kind: "attempt.progress", at: progress.lastEventAt, taskId: task.id, attemptId: attempt.id,
+        data: { provider: progress.provider, events: progress.events, lastEventType: progress.lastEventType, logBytes: progress.log.bytesWritten },
+      });
+    }
+  }
+
+  /**
    * Provider-reported settings and child-agent activity. Effort is never
    * reported by either harness, so it remains unknown rather than inferred.
    */
   private recordLaunchObservations(task: Task, attempt: Attempt, launch: CollectedResult["launch"]): void {
     if (!launch) return;
+    const telemetry = launch.telemetry;
+    if (telemetry) {
+      const gaps = telemetryGap(telemetry);
+      if (telemetry.stdoutTruncated) gaps.push("in-memory stdout copy reached its buffer limit");
+      if (telemetry.stderrTruncated) gaps.push("in-memory stderr copy reached its buffer limit");
+      if (gaps.length > 0) {
+        this.records.recordEvent({
+          kind: "telemetry.gap", projectId: task.projectId, taskId: task.id, attemptId: attempt.id,
+          data: { gaps, log: telemetry.log, malformedLines: telemetry.malformedLines, events: telemetry.events },
+        });
+        this.telemetry.emit({ kind: "telemetry.gap", at: new Date().toISOString(), taskId: task.id, attemptId: attempt.id, data: { gaps } });
+      }
+    }
     this.records.recordReportedSettings(attempt.id, { reportedModel: launch.reportedModel, reportedEffort: null });
     const spawned = launch.delegation?.spawned ?? null;
     if (spawned !== null && spawned > 0) {

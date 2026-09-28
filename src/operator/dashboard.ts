@@ -117,7 +117,8 @@ function rowLine(row: TaskRow, selected: boolean): string {
   const route = row.provider ? `${row.provider}${row.model ? `/${row.model}` : ""}` : "unrouted";
   const attempt = row.attemptNumber === null ? "—" : `#${row.attemptNumber}${row.attemptKind ? ` ${row.attemptKind.slice(0, 4)}` : ""}`;
   const reason = row.blockedReason ?? (row.waitingOn.length > 0 ? `waiting on ${row.waitingOn.length} dependency` : "");
-  const stale = row.staleHeartbeat ? " [stale heartbeat]" : "";
+  const live = row.providerEventAgeMs !== null ? ` [output ${duration(row.providerEventAgeMs)} ago]` : "";
+  const stale = (row.staleHeartbeat ? " [stale heartbeat]" : "") + live;
   return `${marker} ${pad(row.state, 18)} ${pad(row.taskId, 14)} ${pad(row.title, 32)} ${pad(route, 20)} ${pad(attempt, 10)} ${pad(duration(row.elapsedMs), 8)} ${pad(reason + stale, 40)}`;
 }
 

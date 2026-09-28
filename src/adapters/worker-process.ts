@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import type { DelegationPolicy } from "../routing/capabilities.ts";
 import { launchClaude, launchCodex } from "../verify/launch.ts";
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
       delegation: spec.delegation,
       timeoutMs: spec.timeoutMs,
       evidencePath: spec.evidencePath,
+      progressPath: join(dirname(spec.completionPath), "progress.json"),
     });
     payload = { completedAt: new Date().toISOString(), result, error: null };
   } catch (error) {

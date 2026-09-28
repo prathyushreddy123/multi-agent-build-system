@@ -2195,6 +2195,19 @@ export class Records {
     );
   }
 
+  /**
+   * Record observed provider activity. Distinct from the heartbeat: a live
+   * process (heartbeat) can be silent, and progress means the provider
+   * actually emitted events. Only moves forward.
+   */
+  recordAttemptProgress(id: string, at: string): boolean {
+    const attempt = this.getAttempt(id);
+    if (!attempt || attempt.state !== "running") return false;
+    if (attempt.lastProgressAt && Date.parse(attempt.lastProgressAt) >= Date.parse(at)) return false;
+    this.store.run("UPDATE attempts SET last_progress_at = ? WHERE id = ? AND state = 'running'", at, id);
+    return true;
+  }
+
   heartbeat(id: string): void {
     this.store.run("UPDATE attempts SET heartbeat_at = ? WHERE id = ?", nowIso(), id);
   }

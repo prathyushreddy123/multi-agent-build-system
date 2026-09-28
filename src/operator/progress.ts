@@ -100,6 +100,12 @@ export interface TaskRow {
   heartbeatAgeMs: number | null;
   /** The worker heartbeat is older than the threshold. Not proof of failure. */
   staleHeartbeat: boolean;
+  /**
+   * Last provider event for the running attempt. Liveness (heartbeat) says the
+   * process exists; this says it is doing something. Null until live output.
+   */
+  lastProviderEventAt: string | null;
+  providerEventAgeMs: number | null;
   repairsUsed: number;
   repairLimit: number;
   steps: TaskStep[];
@@ -290,12 +296,13 @@ export function stepsForTask(records: Records, taskId: string): TaskStep[] {
  * not "no steps": it is progress *inside* a running attempt, which no executor
  * currently reports. That is stated rather than filled in.
  */
-function stepGapsFor(task: Task, attempts: Attempt[], steps: TaskStep[]): string[] {
+function stepGapsFor(task: Task, attempts: Attempt[], steps: TaskStep[], liveAttempts: Set<string>): string[] {
   const gaps: string[] = [];
-  if (attempts.some((attempt) => attempt.state === "running")) {
+  const running = attempts.find((attempt) => attempt.state === "running");
+  if (running && !liveAttempts.has(running.id)) {
     gaps.push(
-      "Progress inside the running attempt is not instrumented. The worker reports its result at the end, " +
-      "so only the attempt's start and heartbeat are known while it runs.",
+      "Progress inside the running attempt is not instrumented yet: the provider has emitted no live output, " +
+      "so only the attempt's start and heartbeat are known.",
     );
   }
   if (attempts.length === 0 && !TERMINAL_STATES.includes(task.state)) {
@@ -395,6 +402,10 @@ export function buildProgressSnapshot(records: Records, options: SnapshotOptions
 
     const heartbeatAt = running?.heartbeatAt ?? running?.startedAt ?? null;
     const heartbeatAgeMs = heartbeatAt ? now - Date.parse(heartbeatAt) : null;
+    const liveAttempts = new Set(running
+      ? records.listEventsOfKind(task.id, "attempt.first_output").map((event) => event.attempt_id as string)
+      : []);
+    const lastProviderEventAt = running && liveAttempts.has(running.id) ? running.lastProgressAt : null;
 
     const dependsOn = records.dependenciesOf(task.id);
     const waitingOn = dependsOn.filter((id) => records.getTask(id)?.state !== "DONE");
@@ -433,11 +444,13 @@ export function buildProgressSnapshot(records: Records, options: SnapshotOptions
       heartbeatAt,
       heartbeatAgeMs: heartbeatAgeMs === null ? null : Math.round(heartbeatAgeMs),
       staleHeartbeat: heartbeatAgeMs !== null && heartbeatAgeMs > staleMs,
+      lastProviderEventAt,
+      providerEventAgeMs: lastProviderEventAt ? Math.round(now - Date.parse(lastProviderEventAt)) : null,
       repairsUsed: task.repairsUsed,
       repairLimit: task.repairLimit,
       steps,
       stepInstrumentation: steps.length > 0 ? "recorded" : "none",
-      stepGaps: options.withSteps ? stepGapsFor(task, attempts, steps) : [],
+      stepGaps: options.withSteps ? stepGapsFor(task, attempts, steps, liveAttempts) : [],
       checks: records.gatesForTask(task.id).map((gate) => ({
         name: gate.name, status: gate.status, required: gate.required, revision: gate.revision,
       })),
