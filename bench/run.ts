@@ -71,6 +71,10 @@ export interface RunRow {
   blockedReason: string | null;
   attempts: AttemptRow[];
   hidden: { passed: number; total: number; failures: string[] } | null;
+  /** How wallMs was measured; rows without it ended at the last task.state event and are corrected by fix-wall.ts. */
+  wallBasis?: "task.updatedAt";
+  taskId?: string;
+  evidence?: string;
 }
 
 function option(name: string, fallback?: string): string {
@@ -270,10 +274,11 @@ async function runMabs(fixture: Fixture, harness: "mabs-claude" | "mabs-codex", 
   show = mabsCli(mabs, env, ["task", "show", taskId]);
   writeFileSync(join(root, "task-show.json"), JSON.stringify(show, null, 2));
 
-  // Wall time ends at the recorded terminal transition, not at the next poll.
-  const events = (show.events as { kind: string; at: string }[] | undefined) ?? [];
-  const lastState = events.filter((event) => event.kind === "task.state").map((event) => Date.parse(event.at)).filter(Number.isFinite);
-  const end = finalState === "TIMEOUT" || lastState.length === 0 ? observedEnd : Math.max(...lastState);
+  // Wall time ends when the task reached its final state, not at the next
+  // poll. Acceptance is recorded as task.accepted, not task.state, so the
+  // task's own last update is the end, never the last state-change event.
+  const finalAt = Date.parse(String((show.task as Record<string, unknown>).updatedAt));
+  const end = finalState === "TIMEOUT" || !Number.isFinite(finalAt) ? observedEnd : finalAt;
 
   const attempts = ((show.attempts as Record<string, unknown>[] | undefined) ?? []).map((attempt): AttemptRow => {
     const id = String(attempt.id);
@@ -293,7 +298,8 @@ async function runMabs(fixture: Fixture, harness: "mabs-claude" | "mabs-codex", 
   const task = show.task as Record<string, unknown>;
   const worktree = typeof task.worktreePath === "string" ? task.worktreePath : join(root, "missing");
   return {
-    fixture: fixture.name, harness, mode, wallMs: end - started, finalState, blockedReason: (task.blockedReason as string) ?? null,
+    fixture: fixture.name, harness, mode, wallMs: end - started, wallBasis: "task.updatedAt", taskId: String(task.id), evidence: root,
+    finalState, blockedReason: (task.blockedReason as string) ?? null,
     // Scored whatever the final state, so a blocked run still shows the quality it reached.
     attempts, hidden: evaluate(fixture, worktree),
   };
