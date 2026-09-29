@@ -101,25 +101,39 @@ function output(overrides: Partial<WorkerOutput> = {}): WorkerOutput {
   };
 }
 
-/** Injects quota failures, genuinely failing changes, and review findings from a seeded stream. */
+/**
+ * Injects quota failures, genuinely failing changes, and review findings from a seeded stream.
+ *
+ * Both adapters draw from one stream in dispatch order, and dispatch order
+ * depends on tick and gate timing, so under machine load the seeded faults can
+ * all land on reviews or on moments when both providers are cooling down,
+ * leaving the implementation reroute path unexercised. The first
+ * implementation attempt therefore always hits quota: nothing else has failed
+ * yet, so the other provider is always an eligible fallback.
+ */
 class SoakAdapter implements WorkerAdapter {
   readonly authMode = "test-subscription";
   readonly name: string;
   private readonly rng: () => number;
+  private readonly shared: { forcedQuota: boolean };
   private readonly outcomes = new Map<string, "quota" | "ok" | { review: WorkerOutput }>();
   private readonly repaired = new Set<string>();
   private readonly reviewed = new Set<string>();
   private reviewCount = 0;
 
-  constructor(name: string, rng: () => number) {
+  constructor(name: string, rng: () => number, shared: { forcedQuota: boolean }) {
     this.name = name;
     this.rng = rng;
+    this.shared = shared;
   }
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
     const reviewing = input.prompt.includes('"role": "reviewer"');
     const taskId = /"task_id": "([^"]+)"/.exec(input.prompt)?.[1] ?? "unknown";
-    if (this.rng() < 0.12) {
+    const roll = this.rng();
+    const forced = !reviewing && !this.shared.forcedQuota;
+    if (forced) this.shared.forcedQuota = true;
+    if (forced || roll < 0.12) {
       this.outcomes.set(input.attemptId, "quota");
     } else if (reviewing) {
       // Deterministic: every second reviewed task's first review requests changes.
@@ -214,8 +228,9 @@ for (const seed of [20260928, 7, 424242]) test(`soak (seed ${seed}): two project
     }
   }
   const rng = mulberry32(seed);
+  const shared = { forcedQuota: false };
   const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
-    adapters: new Map<string, WorkerAdapter>([["codex", new SoakAdapter("codex", rng)], ["claude", new SoakAdapter("claude", rng)]]),
+    adapters: new Map<string, WorkerAdapter>([["codex", new SoakAdapter("codex", rng, shared)], ["claude", new SoakAdapter("claude", rng, shared)]]),
     defaultAdapter: "codex", workerLimit: 2, providerLimits: { codex: 1, claude: 1 }, quotaCooldownMs: 40, gateLimit: 1,
   });
   const repoOf = new Map([[quiet.id, canonicalRepoKey(quiet.repoPath)], [reviewed.id, canonicalRepoKey(reviewed.repoPath)]]);

@@ -24,7 +24,16 @@ import { DEFAULT_ROUTING_POLICY, selectRoute, type ProviderAvailability } from "
 import { Store } from "../src/store/db.ts";
 import { Records, type Task } from "../src/store/records.ts";
 import { claudeArgs, codexArgs, launchClaude, launchCodex, missingCliSurface, type LaunchResult } from "../src/verify/launch.ts";
-import { claudeAuthRefusals, codexAuthRefusals, managedSettingsRefusals, ProvenanceError } from "../src/verify/provenance.ts";
+import {
+  CLAUDE_MANAGED_SETTINGS_DIR,
+  CODEX_MANAGED_CONFIG_DIR,
+  claudeAuthRefusals,
+  codexAuthRefusals,
+  codexManagedConfigRefusals,
+  managedDirectories,
+  managedSettingsRefusals,
+  ProvenanceError,
+} from "../src/verify/provenance.ts";
 import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 function tempRoot(t: TestContext, prefix: string): string {
@@ -185,6 +194,50 @@ test("RTE-02: provenance rules name every off-subscription route", (t) => {
   assert.match(refusals, /sets model/);
   assert.match(refusals, /console/);
   assert.match(refusals, /cannot be read/, "an unreadable managed file fails closed");
+});
+
+test("N2: a managed-settings override adds a directory and never disables the system location", () => {
+  assert.deepEqual(managedDirectories(CLAUDE_MANAGED_SETTINGS_DIR, undefined), [CLAUDE_MANAGED_SETTINGS_DIR]);
+  assert.deepEqual(managedDirectories(CLAUDE_MANAGED_SETTINGS_DIR, "/tmp/empty"), [CLAUDE_MANAGED_SETTINGS_DIR, "/tmp/empty"]);
+  assert.deepEqual(managedDirectories(CODEX_MANAGED_CONFIG_DIR, CODEX_MANAGED_CONFIG_DIR), [CODEX_MANAGED_CONFIG_DIR]);
+});
+
+test("N3: system-managed Codex configuration that can reroute an attempt is refused", (t) => {
+  const dir = tempRoot(t, "mabs-codex-managed-");
+  assert.deepEqual(codexManagedConfigRefusals(dir), { files: [], refusals: [] }, "no managed configuration is the normal case");
+  writeFileSync(join(dir, "managed_config.toml"), [
+    "# a comment: model = \"ignored\"",
+    "forced_login_method = \"chatgpt\"",
+    "approval_policy = \"never\"",
+    "model = \"gpt-4o\"",
+    "[model_providers.proxy]",
+    "base_url = \"https://proxy\"",
+  ].join("\n"));
+  writeFileSync(join(dir, "requirements.toml"), "preferred_auth_method = \"apikey\"\n[sandbox_workspace_write]\nmodel = \"nested keys are not top-level\"\n");
+  const { files, refusals } = codexManagedConfigRefusals(dir);
+  assert.equal(files.length, 2);
+  const text = refusals.join(" ");
+  assert.match(text, /managed_config\.toml sets model,/);
+  assert.match(text, /\[model_providers\.proxy\]/);
+  assert.match(text, /sets preferred_auth_method/);
+  assert.doesNotMatch(text, /forced_login_method/, "forcing the ChatGPT login is the safe value");
+  assert.doesNotMatch(text, /approval_policy/);
+  assert.equal(refusals.length, 3, "comments and keys inside unrelated tables are ignored");
+});
+
+test("N3: a Codex launch under rerouting managed configuration starts no provider process", async (t) => {
+  const fake = fakeHarnesses(t);
+  const cwd = tempRoot(t, "mabs-codex-managed-launch-");
+  const managed = tempRoot(t, "mabs-codex-managed-dir-");
+  writeFileSync(join(managed, "config.toml"), "model_provider = \"proxy\"\n");
+  const saved = process.env.MABS_CODEX_MANAGED_CONFIG_DIR;
+  t.after(() => { if (saved === undefined) delete process.env.MABS_CODEX_MANAGED_CONFIG_DIR; else process.env.MABS_CODEX_MANAGED_CONFIG_DIR = saved; });
+  process.env.MABS_CODEX_MANAGED_CONFIG_DIR = managed;
+  await assert.rejects(
+    launchCodex({ cwd, prompt: "task", model: CODEX_MODEL, effort: "low", timeoutMs: 10_000, evidencePath: join(cwd, "x.log") }),
+    (error: Error) => error instanceof ProvenanceError && /sets model_provider/.test(error.message),
+  );
+  assert.deepEqual(fake.invocations(), [], "no provider inference ran");
 });
 
 test("RTE-06: a CLI that drops an isolation flag or feature is reported, and a refused provenance collects as CONFIG", async (t) => {

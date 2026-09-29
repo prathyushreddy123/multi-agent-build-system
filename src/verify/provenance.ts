@@ -3,8 +3,8 @@
  *
  * Launch flags make the harnesses ignore user, project, and local
  * configuration, but two sources remain outside MABS's control: the
- * credential the CLI is logged in with, and admin-managed Claude settings,
- * which always apply. Either could route an attempt to billed API access or a
+ * credential the CLI is logged in with, and admin-managed Claude settings or
+ * system-managed Codex configuration, which always apply. Either could route an attempt to billed API access or a
  * model no registry entry approved, so the launch fails closed instead.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -40,6 +40,53 @@ function managedSettingsFiles(directory: string): string[] {
     for (const name of readdirSync(dropIns).filter((item) => item.endsWith(".json")).sort()) files.push(join(dropIns, name));
   }
   return files;
+}
+
+/**
+ * The managed directories a launch must inspect. An override adds a directory
+ * (tests inject settings this way); it never replaces the system location,
+ * because an environment variable must not be able to switch the check off.
+ */
+export function managedDirectories(system: string, override: string | undefined): string[] {
+  return override && override !== system ? [system, override] : [system];
+}
+
+/** System-managed Codex configuration on Linux; it applies even with --ignore-user-config. */
+export const CODEX_MANAGED_CONFIG_DIR = "/etc/codex";
+
+const CODEX_MANAGED_FILES = ["config.toml", "managed_config.toml", "requirements.toml"];
+
+/** Top-level keys that can select a credential, provider, endpoint, or model. */
+const CODEX_PROVIDER_KEYS = ["model", "model_provider", "profile", "forced_login_method", "preferred_auth_method", "openai_base_url", "chatgpt_base_url"];
+
+/** Every system-managed Codex setting that could launch Codex off-subscription or on an unapproved model. */
+export function codexManagedConfigRefusals(directory = CODEX_MANAGED_CONFIG_DIR): { files: string[]; refusals: string[] } {
+  const files = CODEX_MANAGED_FILES.map((name) => join(directory, name)).filter((file) => existsSync(file));
+  const refusals: string[] = [];
+  for (const file of files) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch (error) {
+      refusals.push(`${file} cannot be read (${error instanceof Error ? error.message : String(error)}); its effect on the provider route is unknown.`);
+      continue;
+    }
+    let table = "";
+    for (const raw of text.split("\n")) {
+      const line = raw.replace(/#.*$/, "").trim();
+      const header = line.match(/^\[\[?\s*([^\]]+?)\s*\]\]?$/);
+      if (header) {
+        table = header[1] ?? "";
+        if (/^(model_providers|profiles)(\.|$)/.test(table)) refusals.push(`${file} defines [${table}], which can change the provider or model an attempt uses.`);
+        continue;
+      }
+      const key = line.match(/^([A-Za-z0-9_.-]+)\s*=/)?.[1];
+      if (!key || table !== "") continue;
+      if (key === "forced_login_method" && /=\s*["']chatgpt["']/.test(line)) continue;
+      if (CODEX_PROVIDER_KEYS.includes(key)) refusals.push(`${file} sets ${key}, which can change the credential or model an attempt uses.`);
+    }
+  }
+  return { files, refusals };
 }
 
 /** Every managed-setting reason this machine could launch Claude off-subscription. */
@@ -88,10 +135,15 @@ export function codexAuthRefusals(output: string): string[] {
 export async function requireSubscriptionProvenance(
   harness: "claude" | "codex",
   env: NodeJS.ProcessEnv,
-  options: { managedSettingsDir?: string } = {},
+  options: { managedSettingsDir?: string; codexManagedDir?: string } = {},
 ): Promise<ProviderProvenance> {
   if (harness === "claude") {
-    const managed = managedSettingsRefusals(options.managedSettingsDir ?? env.MABS_CLAUDE_MANAGED_SETTINGS_DIR ?? CLAUDE_MANAGED_SETTINGS_DIR);
+    const managed = { files: [] as string[], refusals: [] as string[] };
+    for (const directory of managedDirectories(CLAUDE_MANAGED_SETTINGS_DIR, options.managedSettingsDir ?? env.MABS_CLAUDE_MANAGED_SETTINGS_DIR)) {
+      const found = managedSettingsRefusals(directory);
+      managed.files.push(...found.files);
+      managed.refusals.push(...found.refusals);
+    }
     const result = await exec("claude", ["auth", "status"], { env, timeoutMs: 30_000, maxBuffer: 64_000 });
     let status: Record<string, unknown> = {};
     try {
@@ -106,8 +158,14 @@ export async function requireSubscriptionProvenance(
       managedSettings: managed.files,
     };
   }
+  const managed = { files: [] as string[], refusals: [] as string[] };
+  for (const directory of managedDirectories(CODEX_MANAGED_CONFIG_DIR, options.codexManagedDir ?? env.MABS_CODEX_MANAGED_CONFIG_DIR)) {
+    const found = codexManagedConfigRefusals(directory);
+    managed.files.push(...found.files);
+    managed.refusals.push(...found.refusals);
+  }
   const result = await exec("codex", ["login", "status"], { env, timeoutMs: 30_000, maxBuffer: 64_000 });
-  const refusals = codexAuthRefusals(`${result.stdout}\n${result.stderr}`);
+  const refusals = [...managed.refusals, ...codexAuthRefusals(`${result.stdout}\n${result.stderr}`)];
   const authFile = join(env.CODEX_HOME ?? join(env.HOME ?? "", ".codex"), "auth.json");
   if (existsSync(authFile)) {
     try {
@@ -121,5 +179,5 @@ export async function requireSubscriptionProvenance(
   }
   if (result.code !== 0 && refusals.length === 0) refusals.push(`codex login status exited ${result.code}.`);
   if (refusals.length > 0) throw new ProvenanceError(`Refusing to launch Codex: ${refusals.join(" ")}`);
-  return { harness, authMethod: "chatgpt", subscription: null, managedSettings: [] };
+  return { harness, authMethod: "chatgpt", subscription: null, managedSettings: managed.files };
 }

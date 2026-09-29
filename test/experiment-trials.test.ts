@@ -241,6 +241,39 @@ test("EVAL-05: controller-run live trials that improve the primary metric suppor
   assert.equal(records.listCuratorProposals(project.id).length, 0, "no proposal was created or activated");
 });
 
+test("N1: re-authorizing the same manifest keeps its original elapsed-budget clock", (t) => {
+  const { records, experiment } = setup(t, { budget: { maxElapsedMs: 60_000 } });
+  const earlier = new Date(Date.now() - 120_000).toISOString();
+  records.store.run("UPDATE optimization_experiments SET run_authorization = json_set(run_authorization, '$.at', ?) WHERE id = ?", earlier, experiment.id);
+  const { fingerprint } = prepareRun(records, experiment.id);
+  const again = authorizeRun(records, experiment.id, { fingerprint, authorizedBy: "owner" });
+  assert.equal(again.runAuthorization?.at, earlier, "the budget clock was not restarted");
+  assert.throws(() => startTrial(records, { experimentId: experiment.id, variant: "baseline", caseKey: "case-a", repeatIndex: 0 }), /elapsed budget is spent/);
+});
+
+test("N1: a bound trial freezes the authorization, and trials from another manifest never support a proposal", async (t) => {
+  const firstFails: GateSpec = { name: "unit", required: true, command: [process.execPath, "-e",
+    "if(require('fs').readFileSync('value.txt','utf8')==='changed 1\\n'){console.error('AssertionError [ERR_ASSERTION]: first attempt');process.exit(1)}"] };
+  const { records, project, experiment, controller } = setup(t, { checks: [firstFails] });
+  for (const variant of ["baseline", "candidate"] as const) {
+    const { task } = startTrial(records, { experimentId: experiment.id, variant, caseKey: "case-a", repeatIndex: 0 });
+    await runToRest(controller, records, task.id);
+    recordTrialFromTask(records, { experimentId: experiment.id, variant, caseKey: "case-a", repeatIndex: 0, taskId: task.id });
+  }
+  assert.equal(compareExperiment(records, experiment.id).supportsProposal, true);
+
+  // A changed manifest cannot take over an experiment that already has bound trials.
+  records.store.run("UPDATE projects SET check_commands = ? WHERE id = ?", JSON.stringify([{ name: "new", required: true, command: ["true"] }]), project.id);
+  const { fingerprint: changed } = prepareRun(records, experiment.id);
+  assert.throws(() => authorizeRun(records, experiment.id, { fingerprint: changed, authorizedBy: "owner" }), /cannot be replaced/);
+
+  // Defense in depth: legacy rows re-authorized before this guard still cannot mix epochs.
+  records.store.run("UPDATE optimization_experiments SET run_authorization = json_set(run_authorization, '$.fingerprint', ?) WHERE id = ?", changed, experiment.id);
+  const comparison = compareExperiment(records, experiment.id);
+  assert.equal(comparison.supportsProposal, false);
+  assert.match(comparison.reasons.join(" "), /rather than controller-bound live trials/);
+});
+
 test("a provider CLI upgrade between trials stops the run instead of confounding the comparison", async (t) => {
   const bin = mkdtempSync(join(tmpdir(), "mabs-cli-drift-"));
   const fake = join(bin, "codex");

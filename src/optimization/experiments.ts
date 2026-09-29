@@ -469,7 +469,14 @@ export function compareExperiment(records: Records, experimentId: string): Exper
   // Manual and replay measurements are descriptive: nothing binds them to a
   // task, an authorization, or a controller run. Only live trials that the
   // controller executed under the authorized manifest are evidence enough.
-  const unbound = measurements.filter((item) => item.source !== "live_trial" || !item.taskId || !trialBindingForTask(records, item.taskId));
+  // A trial bound to any manifest other than the current authorization belongs
+  // to a different evidence epoch and never counts as live evidence here.
+  const authorizedFingerprint = current.runAuthorization?.fingerprint ?? null;
+  const unbound = measurements.filter((item) => {
+    if (item.source !== "live_trial" || !item.taskId) return true;
+    const bound = trialBindingForTask(records, item.taskId);
+    return !bound || bound.experimentId !== experimentId || bound.manifestFingerprint !== authorizedFingerprint;
+  });
   const liveEvidence = unbound.length === 0 && measurements.length > 0;
   if (!liveEvidence && (result === "improved" || result === "limitation_resolved")) {
     reasons.push(`${unbound.length} measurement(s) are ${[...new Set(unbound.map((item) => item.source))].join("/")} rather than controller-bound live trials; ` +
@@ -605,6 +612,15 @@ export function authorizeRun(records: Records, experimentId: string, input: { fi
   const ineligible = prepared.manifest.eligibility.filter((item) => !item.eligible);
   if (ineligible.length > 0) throw new Error(`Cannot authorize: ${ineligible.map((item) => `${item.variant}: ${item.reasons.join("; ")}`).join(" | ")}`);
   if (prepared.manifest.liveBlockers.length > 0) throw new Error(`Cannot authorize a live run: ${prepared.manifest.liveBlockers.join(" ")}`);
+  // One authorization is one immutable evidence epoch. Re-authorizing the same
+  // manifest must not restart its elapsed budget, and once a trial is bound a
+  // different manifest would mix evidence from two runs under one result.
+  const existing = getExperiment(records, experimentId)?.runAuthorization ?? null;
+  if (existing?.fingerprint === input.fingerprint) return getExperiment(records, experimentId) as OptimizationExperiment;
+  if (existing && listTrialBindings(records, experimentId).length > 0) {
+    throw new Error(`Experiment ${experimentId} already has live trials bound to manifest ${existing.fingerprint}; ` +
+      "its authorization cannot be replaced. Create a new experiment for a changed manifest.");
+  }
   const authorization = { fingerprint: input.fingerprint, authorizedBy: input.authorizedBy, at: nowIso() };
   records.store.run("UPDATE optimization_experiments SET run_authorization = ? WHERE id = ?", toJson(authorization), experimentId);
   const current = getExperiment(records, experimentId) as OptimizationExperiment;
