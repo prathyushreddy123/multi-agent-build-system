@@ -1,0 +1,1 @@
+parseDuration handles all listed valid forms;each invalid category throws the specified error type;round-trip test passes;README mentions parseDuration;npm test passes

@@ -1,0 +1,7 @@
+{
+  "title": "Add parseDuration",
+  "objectiveFile": "objective.txt",
+  "acceptFile": "accept.txt",
+  "scope": ["src/parse.js", "test/parse.test.js", "README.md"],
+  "taskClass": "small_implementation"
+}

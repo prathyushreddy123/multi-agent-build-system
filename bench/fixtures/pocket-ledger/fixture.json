@@ -1,0 +1,7 @@
+{
+  "title": "Implement Pocket Ledger",
+  "objectiveFile": "spec.txt",
+  "accept": ["every numbered contract item in the objective holds", "README documents usage and behavior", "npm test passes"],
+  "scope": ["src/", "test/", "README.md", "package.json"],
+  "taskClass": "small_implementation"
+}

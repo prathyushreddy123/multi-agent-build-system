@@ -1,0 +1,22 @@
+Implement Pocket Ledger as a production-quality, zero-dependency TypeScript CLI.
+
+Commands:
+- node src/cli.ts add AMOUNT CATEGORY DESCRIPTION...
+- node src/cli.ts list [--category=CATEGORY]
+- node src/cli.ts summary
+
+Contract:
+1. Persist an object with schemaVersion: 1 and an expenses array at POCKET_LEDGER_FILE, defaulting to ledger.json in cwd.
+2. Each expense has id, amountCents, category, description, and createdAt. IDs are monotonic exp-0001, exp-0002, etc., based on existing data.
+3. Parse decimal amounts exactly into positive integer cents. Accept 12, 12.3, and 12.34. Reject zero, negative, exponent notation, signs, more than two decimal places, and non-numbers.
+4. Normalize category by trimming and lowercasing it. Reject an empty category or description.
+5. add prints the created expense as JSON.
+6. list prints a JSON array in insertion order. --category filters by normalized exact category.
+7. summary prints {totalCents, count, byCategory}; byCategory keys must be lexicographically ordered and values are integer cents.
+8. A missing data file means an empty ledger. A malformed or schema-incompatible file is an error and must not be overwritten.
+9. Persist atomically by writing a sibling temporary file and renaming it. Do not leave a temporary file after success.
+10. Errors go to stderr with a non-zero exit code. Successful output goes to stdout only.
+11. Add meaningful node:test coverage and update README with usage and behavior.
+12. Run npm test before finishing. Do not add dependencies.
+
+Work only in src/, test/, README.md, and package.json. Preserve the existing Git history. Do not merely describe the solution: implement it and verify it.
