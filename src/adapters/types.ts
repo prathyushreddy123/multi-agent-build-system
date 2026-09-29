@@ -1,6 +1,7 @@
 import type { FailureClass } from "../core/failure.ts";
 import type { ValidationResult } from "../domain/contract.ts";
 import type { DelegationPolicy } from "../routing/capabilities.ts";
+import type { GateSpec } from "../store/records.ts";
 import type { LaunchResult } from "../verify/launch.ts";
 
 /**
@@ -23,6 +24,8 @@ export interface AdapterLaunch {
   timeoutMs: number;
   evidencePath: string;
   completionPath: string;
+  /** Registered project checks the worker may run through the controller's check tool. */
+  workerChecks?: GateSpec[];
 }
 
 export interface AdapterHandle {

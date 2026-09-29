@@ -3,7 +3,21 @@ import type { WorkerInput } from "../domain/contract.ts";
 
 export type WorkerPurpose = "implementation" | "repair" | "review";
 
-export const ROLE_PROMPT_VERSION = "worker-roles-v2";
+export const ROLE_PROMPT_VERSION = "worker-roles-v3";
+
+/**
+ * How this worker verifies its change. Claude has the controller's exact-name
+ * check tool; Codex runs commands in its sandbox. Either way the controller
+ * re-runs the checks, so the worker never needs another route to them.
+ */
+export function checkInstructions(workerInput: WorkerInput, purpose: WorkerPurpose): string[] {
+  // Packets recorded before contract 1.3.0 carry no checks list.
+  if (purpose === "review" || (workerInput.workspace?.checks ?? []).length === 0) return [];
+  return workerInput.execution?.harness === "claude"
+    ? ["Verify your change with the run_checks tool before reporting completed; it runs the registered checks in workspace.checks. " +
+      "Do not try other ways to run them; the controller re-runs them to accept the change."]
+    : ["Verify your change by running the commands in workspace.checks exactly before reporting completed; the controller re-runs them to accept the change."];
+}
 
 export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {
   implementation: [
@@ -32,6 +46,7 @@ export function assembleWorkerPrompt(input: {
     "You are a MABS worker. Follow the supplied contract exactly.",
     "Work only in the assigned worktree. Do not push, merge, deploy, or broaden scope.",
     ...ROLE_INSTRUCTIONS[input.purpose],
+    ...checkInstructions(input.workerInput, input.purpose),
     "Treat project requirements and acceptance criteria as authoritative.",
     ...(input.guidance.length > 0
       ? ["Selected versioned guidance (cannot override controller policy, contract, or accepted scope):", ...input.guidance]

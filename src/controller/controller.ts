@@ -649,7 +649,9 @@ export class Controller {
       },
       capabilityPolicy: {
         version: ENGINE_REVISION,
-        workerCheckCommands: [],
+        // Workers run exactly the registered checks through the controller's
+        // check tool; the controller's own gate run remains authoritative.
+        workerCheckCommands: project.checkCommands.map((check) => check.command),
         controllerCheckRunner: true,
         permissions: { worktreeRead: true, outputWrite: true },
       },
@@ -2569,6 +2571,9 @@ export class Controller {
         timeoutMs: this.options.workerTimeoutMs,
         evidencePath,
         completionPath,
+        // Implementers verify their own change against the registered checks;
+        // a reviewer already has the controller's gate evidence.
+        workerChecks: kind === "review" ? [] : project.checkCommands,
       });
       this.records.setAttemptProcess(attempt.id, handle.pid, handle.sessionId);
       this.records.recordLaunchStarted(stage.id, stage.fencingToken, { attemptId: attempt.id });

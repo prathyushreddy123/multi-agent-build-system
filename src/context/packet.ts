@@ -241,10 +241,17 @@ export function buildContextPacket(input: {
       allowed_scope: input.task.allowedScope.length > 0
         ? input.task.allowedScope.map((scope) => join(input.workspace.path, scope))
         : [input.workspace.path],
-      allowed_actions: purpose === "review" ? ["read", "run_checks"] : ["read", "edit", "run_checks"],
+      // Only what the worker can actually do: implementers get the registered-check
+      // tool when checks exist; reviewers read the controller's gate evidence instead.
+      allowed_actions: purpose === "review" ? ["read"] : input.project.checkCommands.length > 0 ? ["read", "edit", "run_checks"] : ["read", "edit"],
       forbidden_actions: purpose === "review"
         ? ["edit", "git_commit", "push", "merge", "deploy", "delete_shared_data", "change_scope"]
         : ["git_commit (controller-owned)", "push", "merge", "deploy", "delete_shared_data", "change_scope"],
+      checks: input.project.checkCommands.map((check) => ({
+        name: check.name,
+        command: `${check.cwd ? `(cd ${check.cwd}) ` : ""}${check.command.join(" ")}`,
+        required: check.required,
+      })),
     },
     execution: {
       harness: input.execution.harness,

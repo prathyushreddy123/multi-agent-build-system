@@ -7,7 +7,7 @@ import type { FailureClass } from "../core/failure.ts";
  * silently become success: it is a CONTRACT failure with the raw transcript
  * preserved as evidence.
  */
-export const CONTRACT_VERSION = "1.2.0";
+export const CONTRACT_VERSION = "1.3.0";
 
 export type WorkerRole = "implementer" | "reviewer" | "researcher" | "troubleshooter" | "curator";
 
@@ -48,6 +48,8 @@ export interface WorkerInput {
     allowed_scope: string[];
     allowed_actions: string[];
     forbidden_actions: string[];
+    /** Registered checks, as the controller will run them; empty when none are registered. */
+    checks: { name: string; command: string; required: boolean }[];
   };
   execution: {
     harness: string;

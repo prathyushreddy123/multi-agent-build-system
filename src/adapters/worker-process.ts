@@ -3,6 +3,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { DelegationPolicy } from "../routing/capabilities.ts";
+import type { GateSpec } from "../store/records.ts";
 import { launchClaude, launchCodex } from "../verify/launch.ts";
 import { selfIdentity } from "../core/process-identity.ts";
 import { ProvenanceError } from "../verify/provenance.ts";
@@ -18,6 +19,7 @@ interface ProcessSpec {
   timeoutMs: number;
   evidencePath: string;
   completionPath: string;
+  workerChecks?: GateSpec[];
 }
 
 async function main(): Promise<void> {
@@ -42,6 +44,7 @@ async function main(): Promise<void> {
       timeoutMs: spec.timeoutMs,
       evidencePath: spec.evidencePath,
       progressPath: join(dirname(spec.completionPath), "progress.json"),
+      workerChecks: spec.workerChecks,
     });
     payload = { completedAt: new Date().toISOString(), result, error: null };
   } catch (error) {

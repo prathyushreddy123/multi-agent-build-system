@@ -6,8 +6,11 @@
  * evidence that proved the contract is the same code that will implement it.
  */
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { exec, type ExecResult } from "../core/exec.ts";
+import type { GateSpec } from "../store/records.ts";
+import { CHECKS_SERVER_NAME, CHECKS_TOOL_PERMISSION, type ChecksSpec } from "../worker-tools/checks-mcp.ts";
 import { LiveLog, ProgressWriter, ProviderStreamParser, type StreamProgress } from "../telemetry/stream.ts";
 import { CODEX_MODEL, DISABLED_DELEGATION, type DelegationPolicy } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "./env.ts";
@@ -30,6 +33,13 @@ export interface LaunchOptions {
   /** Throttled live progress record; omitted for one-off probes. */
   progressPath?: string;
   liveLogBytes?: number;
+  /** Registered project checks the worker may run through the controller's check tool. */
+  workerChecks?: GateSpec[];
+}
+
+/** Where a Claude worker's check tool reads its registered checks; set only when there are checks. */
+export interface CheckServerLaunch {
+  specPath: string;
 }
 
 /**
@@ -76,6 +86,12 @@ const CLAUDE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 *)"
 /** Claude's native child-agent tool, under its current and legacy names. */
 const CLAUDE_DELEGATION_TOOLS = ["Agent", "Task"];
 const CLAUDE_EMPTY_MCP = JSON.stringify({ mcpServers: {} });
+const CHECKS_SERVER_ENTRY = fileURLToPath(new URL("../worker-tools/checks-mcp.ts", import.meta.url));
+
+/** The only MCP server a worker ever gets: the controller's registered-check runner. */
+export function checkServerMcpConfig(server: CheckServerLaunch): string {
+  return JSON.stringify({ mcpServers: { [CHECKS_SERVER_NAME]: { type: "stdio", command: process.execPath, args: [CHECKS_SERVER_ENTRY, server.specPath] } } });
+}
 
 function requireDisabledDelegation(policy: DelegationPolicy | undefined): void {
   if ((policy ?? DISABLED_DELEGATION).mode !== "disabled") {
@@ -123,7 +139,7 @@ export const PROBE_ROUTES = {
 } as const;
 
 /** Exact Claude argv for one attempt; pure so tests can assert it without a process. */
-export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "effort" | "delegation">): string[] {
+export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "effort" | "delegation">, checkServer: CheckServerLaunch | null = null): string[] {
   requireDisabledDelegation(options.delegation);
   const args = [
     "-p",
@@ -137,6 +153,9 @@ export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "ef
     "acceptEdits",
     "--allowedTools",
     ...CLAUDE_TOOLS,
+    // Exact-name permission: the worker can run registered checks without a
+    // shell pattern that the provider's command-safety check may still deny.
+    ...(checkServer ? [CHECKS_TOOL_PERMISSION] : []),
     "--disallowedTools",
     ...CLAUDE_DELEGATION_TOOLS,
     // Ignore user, project, and local settings files: their hooks, plugins,
@@ -147,7 +166,7 @@ export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "ef
     "",
     "--strict-mcp-config",
     "--mcp-config",
-    CLAUDE_EMPTY_MCP,
+    checkServer ? checkServerMcpConfig(checkServer) : CLAUDE_EMPTY_MCP,
   ];
   const route = requireExplicitRoute(options);
   args.push("--model", route.model, "--effort", route.effort);
@@ -255,7 +274,13 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
   const { env, removed } = buildWorkerEnv();
   assertNoPaidFallback(env);
   const provenance = await requireSubscriptionProvenance("claude", env);
-  const args = claudeArgs(options);
+  let checkServer: CheckServerLaunch | null = null;
+  if (options.workerChecks && options.workerChecks.length > 0) {
+    checkServer = { specPath: `${options.evidencePath}.checks.json` };
+    const spec: ChecksSpec = { cwd: options.cwd, checks: options.workerChecks, logPath: `${options.evidencePath}.checks.log` };
+    writeFileSync(checkServer.specPath, JSON.stringify(spec, null, 2), { mode: 0o600 });
+  }
+  const args = claudeArgs(options, checkServer);
   const { result, parser, telemetry } = await runStreaming("claude", args, options, env, removed);
 
   let finalMessage = "";
