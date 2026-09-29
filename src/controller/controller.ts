@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, copyFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, freemem, loadavg } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
@@ -113,6 +113,12 @@ export interface ControllerOptions {
   maxLoadPerCpu?: number;
   routingPolicy?: RoutingPolicy;
   capabilityRegistry?: CapabilityRegistry;
+  /**
+   * Where the registry's entitlement overlay lives and how to load it. When
+   * set, a verification recorded while the controller runs takes effect on the
+   * next tick instead of after a restart.
+   */
+  capabilityRegistrySource?: { path: string; load: (path: string) => CapabilityRegistry };
   /** `wait` keeps a busy preferred route rather than moving to a free fallback provider. */
   capacityFallback?: "allow" | "wait";
   controllerId?: string;
@@ -155,7 +161,9 @@ export class Controller {
   };
   readonly adapters: Map<string, WorkerAdapter>;
   readonly routingPolicy: RoutingPolicy;
-  readonly capabilityRegistry: CapabilityRegistry;
+  capabilityRegistry: CapabilityRegistry;
+  private registryMtimeMs: number | null = null;
+  private readonly registrySource: ControllerOptions["capabilityRegistrySource"];
   readonly telemetry: TelemetrySink;
   private readonly firstOutputSeen = new Set<string>();
   readonly adaptive: AdaptiveConcurrency | null;
@@ -205,6 +213,7 @@ export class Controller {
       launchMarkerGraceMs: options.launchMarkerGraceMs ?? 30_000,
     };
     this.capabilityRegistry = options.capabilityRegistry ?? DEFAULT_CAPABILITY_REGISTRY;
+    this.registrySource = options.capabilityRegistrySource;
     this.adapters = options.adapters ?? defaultAdapters(this.capabilityRegistry);
     this.routingPolicy = options.routingPolicy ?? DEFAULT_ROUTING_POLICY;
     this.telemetry = options.telemetry ?? new BoundedTelemetryQueue();
@@ -231,6 +240,7 @@ export class Controller {
     this.ticking = true;
     const loopDelayMs = Math.max(0, Date.now() - this.expectedTickAt);
     try {
+      this.refreshCapabilityRegistry();
       // Migration holds this lock from its drain check until the upgrade ends.
       assertNoMaintenance(this.records.store.path);
       if (!this.records.acquireControllerLease(this.options.controllerId, process.pid, this.options.leaseTimeoutMs)) {
@@ -1654,6 +1664,21 @@ export class Controller {
       taskId: task.id,
       data: { capacityAction, reason: selection.reason, revision: task.resultRevision },
     });
+    // The revision is finalized and checked; only its review is outstanding.
+    // Without this obligation a retry falls through to a fresh implementation
+    // on top of the finished result.
+    if (!pending) {
+      this.recordObligationOnce({
+        taskId: task.id,
+        kind: "requirement_evidence",
+        severity: "blocking",
+        blocking: true,
+        sourceKey: `review-recovery:${task.resultRevision ?? "unknown"}:blocked`,
+        summary: `Independent review has not run for this revision: ${selection.reason}`,
+        introducedRevision: task.resultRevision,
+        evidenceRefs: [],
+      });
+    }
     this.blockTask(task, this.providerBlockClass(selection), reason);
   }
 
@@ -2249,8 +2274,48 @@ export class Controller {
         this.records.markProjectDispatched(project.id);
         continue;
       }
+      const noReviewer = this.missingRequiredReviewer(task, project, selection.chosen.adapter);
+      if (noReviewer) {
+        this.blockTask(task, "CONFIG", noReviewer);
+        continue;
+      }
       if (await this.dispatchInitial(task, project, selection)) this.records.markProjectDispatched(project.id);
     }
+  }
+
+  /** Reload the registry when its entitlement overlay changed, for routing and for every adapter's launch check. */
+  private refreshCapabilityRegistry(): void {
+    const source = this.registrySource;
+    if (!source) return;
+    let mtimeMs = 0;
+    try { mtimeMs = statSync(source.path).mtimeMs; } catch { /* no verification recorded yet */ }
+    if (this.registryMtimeMs === null) { this.registryMtimeMs = mtimeMs; return; }
+    if (mtimeMs === this.registryMtimeMs) return;
+    this.registryMtimeMs = mtimeMs;
+    this.capabilityRegistry = source.load(source.path);
+    for (const adapter of this.adapters.values()) adapter.setCapabilityRegistry?.(this.capabilityRegistry);
+    this.records.recordEvent({ kind: "routing.registry_reloaded", data: { path: source.path, version: this.capabilityRegistry.version } });
+  }
+
+  /**
+   * Why a task whose policy requires review cannot be accepted even if it is
+   * implemented: no provider could ever review it. Checked before the first
+   * implementation so no worker is spent on a result that would only block.
+   * A reviewer that is merely busy or cooling down is not a reason to wait here.
+   */
+  private missingRequiredReviewer(task: Task, project: Project, implementerAdapter: string): string | null {
+    // Only where a missing review would end the task blocked. A `pending`
+    // policy waits instead, and resumes once a reviewer becomes eligible.
+    if (project.reviewPolicy.trigger !== "required" || project.reviewPolicy.capacityAction !== "blocked") return null;
+    const reviewer = this.selectReviewRoute(task, project.reviewPolicy.reviewerRoute, implementerAdapter);
+    if (reviewer.chosen || reviewer.deferred.length > 0) return null;
+    // Every other provider must be ineligible by capability or entitlement:
+    // a busy, cooling-down, or uninstalled reviewer is never a reason here.
+    const others = reviewer.rejected.filter((item) => item.candidate.adapter !== implementerAdapter);
+    if (others.length === 0 || !others.every((item) => item.reason.startsWith("capability ineligible"))) return null;
+    return `Required independent review has no eligible provider: ${reviewer.reason} ` +
+      `Ineligible reviewers: ${others.map((item) => `${item.candidate.adapter}:${item.candidate.model ?? "default"} (${item.reason})`).join("; ")}. ` +
+      "Nothing was launched. Verify another provider's entitlement (mabs routing verify-entitlement <provider> <model>) or change the project's review policy, then retry.";
   }
 
   private machineBackpressure(): string | null {

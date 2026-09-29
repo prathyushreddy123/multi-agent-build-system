@@ -85,12 +85,16 @@ function findProcessByArgument(argument: string): number | null {
 export class HarnessAdapter implements WorkerAdapter {
   readonly name: "claude" | "codex";
   readonly authMode: string;
-  readonly capabilityRegistry: CapabilityRegistry;
+  capabilityRegistry: CapabilityRegistry;
 
   constructor(name: "claude" | "codex", capabilityRegistry: CapabilityRegistry = DEFAULT_CAPABILITY_REGISTRY) {
     this.name = name;
     this.authMode = name === "claude" ? "claude.ai-subscription" : "chatgpt-subscription";
     this.capabilityRegistry = capabilityRegistry;
+  }
+
+  setCapabilityRegistry(registry: CapabilityRegistry): void {
+    this.capabilityRegistry = registry;
   }
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {

@@ -7,7 +7,7 @@ import { launchClaude, launchCodex, sameModel } from "./verify/launch.ts";
 import { bootstrapProject, resumeBootstrap } from "./bootstrap/service.ts";
 import { ADMISSION_PENDING_PREFIX, Controller, ControllerLeaseHeldError, REVIEW_PENDING_PREFIX } from "./controller/controller.ts";
 import { defaultAdapters } from "./adapters/harness.ts";
-import { findCapability, loadCapabilityRegistry, recordEntitlementVerification } from "./routing/capabilities.ts";
+import { entitlementOverlayPath, findCapability, loadCapabilityRegistry, recordEntitlementVerification } from "./routing/capabilities.ts";
 import { selectRoute } from "./routing/router.ts";
 import { SCHEDULING_POLICY_VERSION, canonicalRepoKey, collectActiveWork, evaluateAdmission } from "./scheduling/admission.ts";
 import {
@@ -1558,6 +1558,8 @@ async function main(): Promise<void> {
 
       const controller = new Controller(records, {
         capabilityRegistry: loadCapabilityRegistry(),
+        // `routing verify-entitlement` run beside a live controller takes effect on its next tick.
+        capabilityRegistrySource: { path: entitlementOverlayPath(), load: loadCapabilityRegistry },
         defaultAdapter: adapter as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
         defaultEffort: textOption(args, "effort") ?? null,

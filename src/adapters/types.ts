@@ -1,6 +1,6 @@
 import type { FailureClass } from "../core/failure.ts";
 import type { ValidationResult } from "../domain/contract.ts";
-import type { DelegationPolicy } from "../routing/capabilities.ts";
+import type { CapabilityRegistry, DelegationPolicy } from "../routing/capabilities.ts";
 import type { GateSpec } from "../store/records.ts";
 import type { LaunchResult, ResumeLaunch } from "../verify/launch.ts";
 
@@ -54,6 +54,8 @@ export interface WorkerAdapter {
    * recovered from the adapter's own launch marker. Absent means none.
    */
   recoverHandle?(handle: AdapterHandle): AdapterHandle;
+  /** Adopt a reloaded capability registry for the adapter's own last-line launch check. */
+  setCapabilityRegistry?(registry: CapabilityRegistry): void;
   cancel(handle: AdapterHandle): Promise<void>;
   collectResult(handle: AdapterHandle, cwd: string): Promise<CollectedResult>;
 }

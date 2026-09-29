@@ -11,6 +11,7 @@ import { validateWorkerOutput, type WorkerOutput } from "../src/domain/contract.
 import { reviewPreset, triageReviewOutput, type ReviewPolicy } from "../src/review/policy.ts";
 import { Store } from "../src/store/db.ts";
 import { Records } from "../src/store/records.ts";
+import { CODEX_MODEL, loadCapabilityRegistry, recordEntitlementVerification, type CapabilityRegistry } from "../src/routing/capabilities.ts";
 import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 const H1 = JSON.parse(readFileSync(new URL("../fixtures/execution-history/advisory-clarification-review.json", import.meta.url), "utf8")) as {
@@ -117,8 +118,9 @@ function setup(t: TestContext, options: {
   return { records, project, task };
 }
 
-async function run(records: Records, adapters: ScriptedAdapter[], taskId: string, until: (state: string) => boolean = (state) => ["DONE", "BLOCKED", "FAILED"].includes(state)) {
-  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+async function run(records: Records, adapters: ScriptedAdapter[], taskId: string, until: (state: string) => boolean = (state) => ["DONE", "BLOCKED", "FAILED"].includes(state),
+  capabilityRegistry: CapabilityRegistry = VERIFIED_REGISTRY) {
+  const controller = new Controller(records, { capabilityRegistry,
     adapters: new Map<string, WorkerAdapter>(adapters.map((adapter) => [adapter.name, adapter])),
     defaultAdapter: "codex", workerLimit: 1,
   });
@@ -316,4 +318,63 @@ test("REC-17: review evidence gathered under an older configuration is stale and
   assert.ok(records.listEvents(task.id).some((event) => event.kind === "review.evidence_stale"));
   assert.equal(claude.count("review"), 2, "the stale review was repeated, not reused");
   assert.equal(records.reviewsForTask(task.id).length, 1, "the stale result was never recorded as a review verdict");
+});
+
+test("RES-01: a required review that no provider is entitled to perform blocks before any implementation", async (t) => {
+  const { records, task } = setup(t, { projectType: "client" });
+  const codex = new ScriptedAdapter("codex");
+  const claude = new ScriptedAdapter("claude");
+  // The fresh-state deadlock: the only independent reviewer's entitlement was never verified.
+  const unverifiedClaude: CapabilityRegistry = { ...VERIFIED_REGISTRY,
+    entries: VERIFIED_REGISTRY.entries.map((entry) => entry.provider === "claude" ? { ...entry, entitlement: "unknown" } : entry) };
+  const final = await run(records, [codex, claude], task.id, undefined, unverifiedClaude);
+  assert.equal(final?.state, "BLOCKED");
+  assert.equal(final?.failureClass, "CONFIG");
+  assert.equal(codex.count("implement"), 0, "no worker was spent on a result that could never be accepted");
+  assert.match(final?.blockedReason ?? "", /Nothing was launched/);
+  assert.match(final?.blockedReason ?? "", /entitlement is unknown/);
+  assert.equal(claude.count("review"), 0);
+});
+
+test("RES-02: a reviewer that is only cooling down does not stop implementation, and a retry after the blocked review resumes at review", async (t) => {
+  const { records, task } = setup(t, { projectType: "client" });
+  const codex = new ScriptedAdapter("codex");
+  const claude = new ScriptedAdapter("claude", [{}]);
+  records.configureProvider("claude", 1);
+  records.noteProviderFailure("claude", "QUOTA", "usage limit reached", 60 * 60_000);
+  const blocked = await run(records, [codex, claude], task.id);
+  assert.equal(blocked?.state, "BLOCKED");
+  assert.equal(codex.count("implement"), 1, "a temporary reviewer outage is not a preflight refusal");
+  assert.ok(records.getContinuation(task.id).openObligations.some((item) => item.sourceKey.startsWith("review-recovery:")));
+
+  records.resetProvider("claude", "quota window reopened");
+  records.retryTask(task.id, (records.getTask(task.id) as { recordVersion: number }).recordVersion);
+  const final = await run(records, [codex, claude], task.id);
+  assert.equal(final?.state, "DONE", final?.blockedReason ?? "");
+  assert.equal(codex.count("implement"), 1, "the finished revision was reviewed, not re-implemented");
+  assert.equal(claude.count("review"), 1);
+  assert.deepEqual(records.listAttempts(task.id).map((attempt) => attempt.kind), ["initial", "review"]);
+  assert.equal(records.getContinuation(task.id).openObligations.filter((item) => item.sourceKey.startsWith("review-recovery:")).length, 0);
+});
+
+test("RES-03: an entitlement verified while the controller runs takes effect on the next tick", async (t) => {
+  const { records } = setup(t);
+  const overlay = join(process.env.MABS_STATE_DIR as string, "capability-entitlements.json");
+  const adopted: CapabilityRegistry[] = [];
+  const codex = Object.assign(new ScriptedAdapter("codex"), { setCapabilityRegistry: (registry: CapabilityRegistry) => { adopted.push(registry); } });
+  const controller = new Controller(records, {
+    capabilityRegistry: loadCapabilityRegistry(overlay),
+    capabilityRegistrySource: { path: overlay, load: loadCapabilityRegistry },
+    adapters: new Map<string, WorkerAdapter>([["codex", codex]]), defaultAdapter: "codex", workerLimit: 1,
+  });
+  const codexEntry = () => controller.capabilityRegistry.entries.find((entry) => entry.provider === "codex" && entry.model === CODEX_MODEL);
+  await controller.tick();
+  assert.equal(codexEntry()?.entitlement, "unknown");
+  recordEntitlementVerification({ provider: "codex", model: CODEX_MODEL, effort: "low", verifiedAt: new Date().toISOString(), evidencePath: "/probe.log" }, overlay);
+  await controller.tick();
+  assert.equal(codexEntry()?.entitlement, "verified");
+  assert.equal(adopted.length, 1, "the adapter's own launch check adopted the reloaded registry");
+  await controller.tick();
+  assert.equal(adopted.length, 1, "an unchanged overlay is not reloaded again");
+  await controller.stop();
 });
