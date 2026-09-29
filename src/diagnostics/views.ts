@@ -12,7 +12,11 @@ import { curatorRecommendations } from "../curator/service.ts";
 import { listExperiments } from "../optimization/experiments.ts";
 import { collectActiveWork, canonicalRepoKey, evaluateAdmission } from "../scheduling/admission.ts";
 import type { Records, Task } from "../store/records.ts";
-import { normalizeAttemptUsage } from "../usage/summary.ts";
+import { dirname, join } from "node:path";
+
+import { attemptHealth } from "../telemetry/health.ts";
+import { readProgress } from "../telemetry/stream.ts";
+import { normalizeAttemptUsage, subtotalOf } from "../usage/summary.ts";
 
 export const VIEWS_VERSION = "mabs.operator-views.v1";
 const UNKNOWN = "unknown (not reported by the provider)";
@@ -69,8 +73,11 @@ export function taskScorecard(records: Records, taskId: string) {
   const task = records.getTask(taskId);
   if (!task) throw new Error(`Unknown task ${taskId}`);
   const project = records.getProject(task.projectId);
-  const attempts = records.listAttempts(task.id).map((attempt) => {
-    const usage = normalizeAttemptUsage({ attemptId: attempt.id, adapter: attempt.adapter, raw: attempt.usage });
+  const normalized = records.listAttempts(task.id).map((attempt) => ({
+    attempt, usage: normalizeAttemptUsage({ attemptId: attempt.id, adapter: attempt.adapter, raw: attempt.usage }),
+  }));
+  const attempts = normalized.map(({ attempt, usage }) => {
+    const progress = attempt.state === "running" && attempt.outputPath ? readProgress(join(dirname(attempt.outputPath), "progress.json")) : null;
     return {
       id: attempt.id,
       kind: attempt.kind,
@@ -78,7 +85,13 @@ export function taskScorecard(records: Records, taskId: string) {
       adapter: attempt.adapter,
       model: { requested: attempt.requestedModel, configured: attempt.configuredModel ?? "provider default", reported: attempt.reportedModel ?? UNKNOWN },
       effort: { requested: attempt.requestedEffort, configured: attempt.configuredEffort ?? "provider default", reported: attempt.reportedEffort ?? UNKNOWN },
-      usage: { coverage: usage.coverage, knownInputEvents: usage.knownInputEvents, outputTokens: usage.outputTokens },
+      usage: {
+        coverage: usage.coverage, knownInputEvents: usage.knownInputEvents, outputTokens: usage.outputTokens,
+        cacheReadInputTokens: usage.cacheReadInputTokens, cacheWriteInputTokens: usage.cacheWriteInputTokens,
+        cachedInputTokens: usage.cachedInputTokens, reasoningOutputTokens: usage.reasoningOutputTokens,
+      },
+      health: attemptHealth({ state: attempt.state, startedAt: attempt.startedAt, lastEventAt: progress?.lastEventAt ?? attempt.lastProgressAt }),
+      resumedSession: attempt.parentSessionId !== null,
       durationMs: attempt.endedAt ? Date.parse(attempt.endedAt) - Date.parse(attempt.startedAt) : null,
       engineVersion: attempt.engineVersion ?? "unrecorded",
       promptVersion: attempt.promptVersion ?? "unrecorded",
@@ -97,6 +110,9 @@ export function taskScorecard(records: Records, taskId: string) {
     quality: task.resultRevision ? records.qualityCoverage(task.id, task.resultRevision) : null,
     attempts,
     usageCoverage: coverage,
+    // Per provider: Claude and Codex input events follow different semantics and are never added together.
+    usageByProvider: Object.fromEntries([...new Set(normalized.map(({ attempt }) => attempt.adapter))].map((adapter) => [adapter,
+      subtotalOf(normalized.filter(({ attempt }) => attempt.adapter === adapter).map(({ attempt, usage }) => ({ attemptId: attempt.id, usage })))])),
     obligations: {
       open: obligations.filter((item) => item.state === "open" || item.state === "addressed_pending_validation").length,
       blocking: obligations.filter((item) => item.blocking && (item.state === "open" || item.state === "addressed_pending_validation")).length,

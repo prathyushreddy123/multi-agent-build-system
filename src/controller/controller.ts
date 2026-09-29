@@ -51,7 +51,9 @@ import {
   type WorkKind,
 } from "../scheduling/admission.ts";
 import type { AdmissionExplanation } from "../scheduling/types.ts";
+import { attemptHealth } from "../telemetry/health.ts";
 import { readProgress, telemetryGap } from "../telemetry/stream.ts";
+import { normalizeSymptom } from "../incidents/projection.ts";
 import {
   DEFAULT_CAPABILITY_REGISTRY,
   DISABLED_DELEGATION,
@@ -171,6 +173,7 @@ export class Controller {
   private readonly registrySource: ControllerOptions["capabilityRegistrySource"];
   readonly telemetry: TelemetrySink;
   private readonly firstOutputSeen = new Set<string>();
+  private readonly stalledSeen = new Set<string>();
   readonly adaptive: AdaptiveConcurrency | null;
   /** Last admission decision per task, for `scheduler explain` and deduplicated events. */
   readonly admissionExplanations = new Map<string, AdmissionExplanation & { kind: WorkKind; at: string }>();
@@ -567,6 +570,27 @@ export class Controller {
     const ended = Date.parse(source.endedAt ?? "");
     if (!Number.isFinite(ended) || Date.now() - ended > RESUME_MAX_AGE_MS) return null;
     return { attemptId: source.id, sessionId: source.sessionId };
+  }
+
+  /**
+   * Two consecutive failures with the same route and the same failure mean a
+   * third identical launch cannot be expected to differ. Provider outages are
+   * excluded (they reroute), and an explicit operator retry after the second
+   * failure always gets its launch.
+   */
+  private repeatedFailure(task: Task, candidate: RouteCandidate): { failureClass: FailureClass; symptom: string } | null {
+    const [first, second] = this.records.listAttempts(task.id).filter((attempt) => attempt.kind !== "review").slice(-2);
+    if (!first || !second) return null;
+    const failed = (attempt: Attempt) => attempt.state === "failed" && attempt.failureClass !== null && !isProviderUnavailable(attempt.failureClass);
+    if (!failed(first) || !failed(second)) return null;
+    const signature = (attempt: Attempt) =>
+      `${attempt.adapter}|${attempt.model}|${attempt.effort}|${attempt.failureClass}|${normalizeSymptom(attempt.reason ?? "")}`;
+    if (signature(first) !== signature(second)) return null;
+    if (second.adapter !== candidate.adapter || second.model !== candidate.model || second.effort !== candidate.effort) return null;
+    const retried = this.records.listEventsOfKind(task.id, "task.retry_requested")
+      .some((event) => Date.parse(String(event.at)) >= Date.parse(second.endedAt ?? second.startedAt));
+    if (retried) return null;
+    return { failureClass: second.failureClass as FailureClass, symptom: normalizeSymptom(second.reason ?? "") };
   }
 
   /**
@@ -1597,6 +1621,16 @@ export class Controller {
         });
       }
     }
+    if (attemptHealth({ state: attempt.state, startedAt: attempt.startedAt, lastEventAt: progress.lastEventAt }) === "stalled" &&
+        !this.stalledSeen.has(attempt.id)) {
+      this.stalledSeen.add(attempt.id);
+      if (!this.records.listEventsOfKind(task.id, "attempt.stalled").some((event) => event.attempt_id === attempt.id)) {
+        this.records.recordEvent({
+          kind: "attempt.stalled", projectId: task.projectId, taskId: task.id, attemptId: attempt.id,
+          data: { lastEventAt: progress.lastEventAt, lastEventType: progress.lastEventType, hint: "No provider event recently; inspect the worker log or cancel the task." },
+        });
+      }
+    }
     if (progress.lastEventAt && this.records.recordAttemptProgress(attempt.id, progress.lastEventAt)) {
       this.telemetry.emit({
         kind: "attempt.progress", at: progress.lastEventAt, taskId: task.id, attemptId: attempt.id,
@@ -2491,6 +2525,14 @@ export class Controller {
     const trialRefusal = trialLaunchRefusal(this.records, task.id);
     if (trialRefusal) {
       this.blockTask(task, "CONFIG", `${trialRefusal} The trial ends interrupted.`);
+      return;
+    }
+    const repeated = kind === "review" ? null : this.repeatedFailure(task, candidate);
+    if (repeated) {
+      this.records.recordEvent({ kind: "attempt.repeat_refused", projectId: task.projectId, taskId: task.id, data: repeated });
+      this.blockTask(task, repeated.failureClass,
+        `The same failure occurred twice on ${candidate.adapter}:${candidate.model ?? "default"}; a third identical launch was not started: ${repeated.symptom}. ` +
+        "Change the task, environment, or route, then retry.");
       return;
     }
     // Every launch path, not only initial dispatch, passes the same admission.
