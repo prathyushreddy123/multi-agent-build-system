@@ -60,7 +60,8 @@ export interface WorkerInput {
   context: {
     packet_id: string;
     requirements: { id: string; text: string }[];
-    files: string[];
+    /** Absent from contract 1.3.0 prompts: file_context already names every file. */
+    files?: string[];
     file_context: {
       path: string;
       reason: string;

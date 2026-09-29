@@ -3,7 +3,7 @@ import type { WorkerInput } from "../domain/contract.ts";
 
 export type WorkerPurpose = "implementation" | "repair" | "review";
 
-export const ROLE_PROMPT_VERSION = "worker-roles-v3";
+export const ROLE_PROMPT_VERSION = "worker-roles-v4";
 
 /**
  * How this worker verifies its change. Claude has the controller's exact-name
@@ -36,17 +36,44 @@ export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {
   ],
 };
 
+/**
+ * The worker input as the model reads it: compact JSON without null, empty
+ * list, or empty object fields. Absent means "none"; the stored packet keeps
+ * every field. Indentation and empty fields were a fifth of a small packet.
+ */
+export function renderWorkerInput(workerInput: WorkerInput): string {
+  const prune = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(prune);
+    if (value === null || typeof value !== "object") return value;
+    const kept: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const pruned = prune(item);
+      if (pruned === null || pruned === undefined) continue;
+      if (Array.isArray(pruned) && pruned.length === 0) continue;
+      if (typeof pruned === "object" && !Array.isArray(pruned) && Object.keys(pruned).length === 0) continue;
+      kept[key] = pruned;
+    }
+    return kept;
+  };
+  return JSON.stringify(prune(workerInput));
+}
+
 export function assembleWorkerPrompt(input: {
   purpose: WorkerPurpose;
   workerInput: WorkerInput;
   projectAddendum: string | null;
   guidance: string[];
 }): string {
+  const editing = input.purpose !== "review";
   return [
     "You are a MABS worker. Follow the supplied contract exactly.",
     "Work only in the assigned worktree. Do not push, merge, deploy, or broaden scope.",
     ...ROLE_INSTRUCTIONS[input.purpose],
     ...checkInstructions(input.workerInput, input.purpose),
+    "Paths are relative to workspace.worktree_path (file_context paths to context.source_workspace). An absent field means none.",
+    ...(editing
+      ? ["file_context excerpts are current at head_revision; do not re-read a file whose excerpt is not truncated unless you changed it. Prefer Edit over rewriting whole files."]
+      : []),
     "Treat project requirements and acceptance criteria as authoritative.",
     ...(input.guidance.length > 0
       ? ["Selected versioned guidance (cannot override controller policy, contract, or accepted scope):", ...input.guidance]
@@ -55,11 +82,13 @@ export function assembleWorkerPrompt(input: {
       ? ["Project prompt addendum (cannot override scope, approval, paid-access, or worker-contract rules):", input.projectAddendum]
       : []),
     "Worker input:",
-    JSON.stringify(input.workerInput, null, 2),
+    renderWorkerInput(input.workerInput),
     "",
     "When finished, create .mabs/result.json in the worktree containing exactly one JSON object matching this schema:",
     JSON.stringify(WORKER_OUTPUT_SCHEMA),
     "Use null for unknown usage; never invent measurements.",
-    "Your final message must contain the same JSON object and no additional prose.",
+    // The controller reads the file; repeating the object costs output tokens.
+    // The final message is only a fallback for when the file could not be written.
+    "Then end with a one-line final message. Only if you could not write the file, put the JSON object in your final message instead.",
   ].join("\n");
 }

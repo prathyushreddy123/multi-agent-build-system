@@ -271,7 +271,7 @@ class ReviewAdapter implements WorkerAdapter {
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
     this.prompts.push(input.prompt);
-    const reviewing = input.prompt.includes('"role": "reviewer"');
+    const reviewing = input.prompt.includes('"role":"reviewer"');
     let result: WorkerOutput;
     if (reviewing) {
       this.reviews += 1;
@@ -432,7 +432,7 @@ class RepairThenPassAdapter implements WorkerAdapter {
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
     this.prompts.push(input.prompt);
-    const reviewing = input.prompt.includes('"role": "reviewer"');
+    const reviewing = input.prompt.includes('"role":"reviewer"');
     let result: WorkerOutput;
     if (reviewing) {
       this.reviews += 1;

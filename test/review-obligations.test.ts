@@ -47,7 +47,7 @@ class ScriptedAdapter implements WorkerAdapter {
   }
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
-    const reviewing = input.prompt.includes('"role": "reviewer"');
+    const reviewing = input.prompt.includes('"role":"reviewer"');
     this.prompts.push({ kind: reviewing ? "review" : "implement", prompt: input.prompt });
     let result: WorkerOutput;
     if (reviewing) {

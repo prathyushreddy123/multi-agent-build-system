@@ -263,7 +263,7 @@ class AdvisoryReviewAdapter implements WorkerAdapter {
   reviews = 0;
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
-    const reviewing = input.prompt.includes('"role": "reviewer"');
+    const reviewing = input.prompt.includes('"role":"reviewer"');
     let result: WorkerOutput;
     if (reviewing) {
       this.reviews += 1;

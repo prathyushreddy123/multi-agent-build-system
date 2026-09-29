@@ -1,6 +1,6 @@
 import type { Task } from "../store/records.ts";
 
-export const WORKER_PROMPT_VERSION = "worker-packet-v3+worker-roles-v2";
+export const WORKER_PROMPT_VERSION = "worker-packet-v4+worker-roles-v4";
 export const GUIDANCE_VERSIONS = {
   system: "mabs-boundaries-v1",
   automation: "automation-design-v1",
@@ -19,12 +19,15 @@ const GUIDANCE_TEXT: Record<string, string> = {
   [GUIDANCE_VERSIONS.review]: "Apply the resolved risk scope, inspect revision-bound evidence, preserve severity labels and prior findings, and treat missing checks, context drift, or unavailable review capacity as non-approval.",
 };
 
+/** Work whose design the automation guidance is about: schedulers, network adapters, delivery, retries. */
+const AUTOMATION_SIGNAL = /\b(automat\w*|schedul\w*|cron|webhooks?|queues?|retr(?:y|ies)|idempoten\w*|notif\w*|deliver\w*|integrations?|network\w*|https?|apis?|sync\w*|pipelines?|deploy\w*|adapters?)\b/i;
+
 /** Select only relevant guidance; policy remains enforced in code. */
 export function guidanceForAttempt(task: Task, kind: "initial" | "repair" | "review" | "reroute"): string[] {
   const versions: string[] = [GUIDANCE_VERSIONS.system];
   if (kind === "review") versions.push(GUIDANCE_VERSIONS.review);
   else {
-    versions.push(GUIDANCE_VERSIONS.automation);
+    if (AUTOMATION_SIGNAL.test(`${task.domain ?? ""} ${task.title} ${task.objective}`)) versions.push(GUIDANCE_VERSIONS.automation);
     if (kind === "repair") versions.push(GUIDANCE_VERSIONS.repair);
     const language = (task.language ?? "").toLowerCase();
     if (language.includes("python")) versions.push(GUIDANCE_VERSIONS.python);

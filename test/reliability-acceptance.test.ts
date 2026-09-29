@@ -128,8 +128,8 @@ class SoakAdapter implements WorkerAdapter {
   }
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
-    const reviewing = input.prompt.includes('"role": "reviewer"');
-    const taskId = /"task_id": "([^"]+)"/.exec(input.prompt)?.[1] ?? "unknown";
+    const reviewing = input.prompt.includes('"role":"reviewer"');
+    const taskId = /"task_id":"([^"]+)"/.exec(input.prompt)?.[1] ?? "unknown";
     const roll = this.rng();
     const forced = !reviewing && !this.shared.forcedQuota;
     if (forced) this.shared.forcedQuota = true;

@@ -238,9 +238,8 @@ export function buildContextPacket(input: {
       base_revision: input.workspace.baseRevision,
       head_revision: inspected,
       branch: input.workspace.branch,
-      allowed_scope: input.task.allowedScope.length > 0
-        ? input.task.allowedScope.map((scope) => join(input.workspace.path, scope))
-        : [input.workspace.path],
+      // Relative to worktree_path: the absolute root is stated once, not per path.
+      allowed_scope: input.task.allowedScope.length > 0 ? input.task.allowedScope : ["."],
       // Only what the worker can actually do: implementers get the registered-check
       // tool when checks exist; reviewers read the controller's gate evidence instead.
       allowed_actions: purpose === "review" ? ["read"] : input.project.checkCommands.length > 0 ? ["read", "edit", "run_checks"] : ["read", "edit"],
@@ -263,9 +262,10 @@ export function buildContextPacket(input: {
       packet_id: packetId,
       requirements: requirements.map(({ id, text }) => ({ id, text })),
       obligations,
-      files: files.map((file) => file.absolutePath),
+      // Relative to source_workspace. The packet record keeps the absolute
+      // manifest; the prompt does not repeat it as a separate list.
       file_context: files.map((file) => ({
-        path: file.absolutePath,
+        path: file.path,
         reason: file.reason,
         excerpt: file.excerpt,
         excerpt_truncated: file.excerptTruncated,

@@ -65,7 +65,7 @@ class ReviewLoopAdapter implements WorkerAdapter {
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
     this.prompts.push(input.prompt);
-    const reviewing = input.prompt.includes('"role": "reviewer"');
+    const reviewing = input.prompt.includes('"role":"reviewer"');
     let result: WorkerOutput;
     if (reviewing) {
       this.reviews += 1;
@@ -107,7 +107,7 @@ class ReviewLoopAdapter implements WorkerAdapter {
 class FailingGateAdapter extends ReviewLoopAdapter {
   override async start(input: AdapterLaunch): Promise<AdapterHandle> {
     const handle = await super.start(input);
-    if (!input.prompt.includes('"role": "reviewer"')) writeFileSync(join(input.cwd, "value.txt"), "gate failure\n");
+    if (!input.prompt.includes('"role":"reviewer"')) writeFileSync(join(input.cwd, "value.txt"), "gate failure\n");
     return handle;
   }
 }
@@ -165,7 +165,7 @@ test("substantive work passes gates, independent review, one review repair, and 
   assert.equal(records.gatesForTask(task.id).length, 2);
   assert.equal(readFileSync(join(final?.worktreePath as string, "value.txt"), "utf8"), "feature v2 reviewed\n");
 
-  const reviewPrompts = adapter.prompts.filter((prompt) => prompt.includes('"role": "reviewer"'));
+  const reviewPrompts = adapter.prompts.filter((prompt) => prompt.includes('"role":"reviewer"'));
   assert.equal(reviewPrompts.length, 2);
   assert.ok(reviewPrompts.every((prompt) => prompt.includes("read-only review")));
   const reviewPackets = records.packetsForTask(task.id).filter((packet) => {

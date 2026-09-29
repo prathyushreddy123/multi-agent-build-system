@@ -272,3 +272,27 @@ test("CTX-04: a repair launched by a failing gate receives the current change as
   const repairPacket = records.packetsForTask(task.id).at(-1);
   assert.equal(repairPacket?.purpose, "repair");
 });
+
+test("CTX-LEAN: the worker brief states the worktree root once and omits empty, duplicate, and pretty-print bytes", (t) => {
+  const { repo, records, project, task } = setup(t, undefined, [{ name: "test", required: true, command: ["npm", "run", "test"] }]);
+  const packet = packetFor(records, project, task, repo, "implementation");
+  const prompt = packet.prompt;
+  const input = prompt.slice(prompt.indexOf("Worker input:\n") + "Worker input:\n".length).split("\n")[0] as string;
+  const rendered = JSON.parse(input) as { workspace: Record<string, unknown>; context: Record<string, unknown> };
+
+  // worktree_path, plus source_workspace naming the checkout the excerpts came from.
+  assert.equal(occurrences(prompt, repo), 2, "absolute paths are not repeated per scope entry or file");
+  assert.deepEqual(rendered.workspace.allowed_scope, ["src"]);
+  assert.equal((rendered.context.file_context as { path: string }[])[0]?.path, "src/ledger.ts");
+  assert.equal(rendered.context.files, undefined, "file_context already names every file");
+  assert.equal(rendered.context.previous_findings, undefined, "empty lists are omitted");
+  assert.equal(rendered.context.checkpoint, undefined, "null fields are omitted");
+  assert.doesNotMatch(input, /\n {2}/, "the worker input is compact JSON");
+  assert.deepEqual(rendered.workspace.checks, [{ name: "test", command: "npm run test", required: true }]);
+  assert.doesNotMatch(prompt, /automation-design-v1/, "automation guidance is not selected for a plain code change");
+  assert.doesNotMatch(prompt, /final message must contain the same JSON/, "the result is written once, to the file");
+
+  // The stored packet keeps the complete input and the absolute manifest.
+  assert.deepEqual(packet.input.context.previous_findings, []);
+  assert.ok((records.packetsForTask(task.id).at(-1)?.files as string[]).every((path) => path.startsWith(repo)));
+});

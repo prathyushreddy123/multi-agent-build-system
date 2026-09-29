@@ -139,7 +139,7 @@ class HoldingAdapter implements WorkerAdapter {
   static sharedPeak = 0;
 
   async start(input: AdapterLaunch): Promise<AdapterHandle> {
-    const title = /"objective": "([^"]*)"/.exec(input.prompt)?.[1] ?? "";
+    const title = /"objective":"([^"]*)"/.exec(input.prompt)?.[1] ?? "";
     this.started.push({ attemptId: input.attemptId, taskTitle: title, cwd: input.cwd });
     this.edit(title, input.cwd);
     this.live.add(input.attemptId);

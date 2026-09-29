@@ -274,10 +274,16 @@ test("attempt records retain the exact prompt and selected guidance versions", (
     promptVersion: WORKER_PROMPT_VERSION, skillVersions: skills,
   });
   assert.equal(attempt.promptVersion, WORKER_PROMPT_VERSION);
-  assert.deepEqual(attempt.skillVersions, ["mabs-boundaries-v1", "automation-design-v1", "python-delivery-v1"]);
+  assert.deepEqual(attempt.skillVersions, ["mabs-boundaries-v1", "python-delivery-v1"]);
   const prompt = assembleWorkerPrompt({
     purpose: "implementation", workerInput: {} as never, projectAddendum: null, guidance: guidanceText(skills),
   });
   for (const version of skills) assert.match(prompt, new RegExp(version));
   assert.doesNotMatch(prompt, /risk-based-review-v1/, "irrelevant review guidance must not be loaded into an implementation attempt");
+  assert.doesNotMatch(prompt, /automation-design-v1/, "automation guidance is only for automation work");
+  const scheduler = records.createTask({
+    projectId: project.id, title: "Nightly sync", objective: "Schedule a nightly webhook delivery with retries", acceptanceCriteria: ["x"],
+  });
+  assert.ok(guidanceForAttempt(scheduler, "initial").includes("automation-design-v1"));
+  assert.ok(!guidanceForAttempt(scheduler, "review").includes("automation-design-v1"));
 });
