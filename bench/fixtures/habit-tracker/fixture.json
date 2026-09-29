@@ -1,0 +1,8 @@
+{
+  "title": "Habit tracker",
+  "objectiveFile": "idea.txt",
+  "accept": [],
+  "scope": [],
+  "taskClass": "small_implementation",
+  "rawPrompt": "Build it from scratch in this empty repository. Run your tests before finishing."
+}

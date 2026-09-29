@@ -1,0 +1,8 @@
+Start a MABS product-intake conversation. My product description is:
+I want a small command-line habit tracker written in plain Node.js with no npm dependencies. I should be able to add a habit, mark it done for a day (today by default, or a specific date with --date=YYYY-MM-DD), ask for its current streak, and list all my habits. The commands are `node src/cli.js add <name>`, `node src/cli.js done <name> [--date=YYYY-MM-DD]`, `node src/cli.js streak <name>` (prints just the number: the length of the most recent run of consecutive days on which the habit was done), and `node src/cli.js list` (prints a JSON array of {name, streak}). Keep the data in a JSON file whose path comes from the HABIT_FILE environment variable (default habits.json). Mistakes like unknown habits or bad dates should print an error to stderr and exit non-zero. Please include tests and a short README.
+
+Record this with mabs_create_brief before asking questions. Ask only questions whose answers change
+the plan, and persist each question and answer with the clarification tools. Do not invent answers.
+When material unknowns are answered or explicitly assumed, call mabs_propose_plan and present a concise
+plan. Do not call mabs_accept_plan until I agree in my own words; bind that decision to the exact
+proposal fingerprint. Distinguish planning from implementation and from any external release request.

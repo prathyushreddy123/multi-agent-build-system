@@ -28,7 +28,7 @@ type Harness = (typeof HARNESSES)[number];
 const MODES = { fast: "off", standard: "risk", verified: "required" } as const;
 type Mode = keyof typeof MODES;
 
-interface Fixture {
+export interface Fixture {
   name: string;
   dir: string;
   title: string;
@@ -36,6 +36,8 @@ interface Fixture {
   accept: string[];
   scope: string[];
   taskClass: string;
+  /** Idea-to-product fixtures: the direct prompt is the plain idea plus this one instruction, nothing more. */
+  rawPrompt: string | null;
 }
 
 export interface AttemptRow {
@@ -84,13 +86,14 @@ function option(name: string, fallback?: string): string {
   return value;
 }
 
-function loadFixture(name: string): Fixture {
+export function loadFixture(name: string): Fixture {
   const dir = join(HERE, "fixtures", name);
   const meta = JSON.parse(readFileSync(join(dir, "fixture.json"), "utf8")) as {
-    title: string; objectiveFile: string; acceptFile?: string; accept?: string[]; scope: string[]; taskClass: string;
+    title: string; objectiveFile: string; acceptFile?: string; accept?: string[]; scope: string[]; taskClass: string; rawPrompt?: string;
   };
   const accept = meta.accept ?? readFileSync(join(dir, meta.acceptFile ?? "accept.txt"), "utf8").trim().split(";").map((item) => item.trim()).filter(Boolean);
-  return { name, dir, title: meta.title, objective: readFileSync(join(dir, meta.objectiveFile), "utf8").trim(), accept, scope: meta.scope, taskClass: meta.taskClass };
+  return { name, dir, title: meta.title, objective: readFileSync(join(dir, meta.objectiveFile), "utf8").trim(), accept, scope: meta.scope, taskClass: meta.taskClass,
+    rawPrompt: meta.rawPrompt ?? null };
 }
 
 function git(cwd: string, ...args: string[]): string {
@@ -110,11 +113,12 @@ function prepareRepo(fixture: Fixture, root: string): string {
 
 /** The same task text a MABS task receives, as one prompt for a direct run. */
 function directPrompt(fixture: Fixture): string {
+  if (fixture.rawPrompt) return `${fixture.objective}\n\n${fixture.rawPrompt}`;
   return `${fixture.objective}\n\nAcceptance criteria:\n${fixture.accept.map((item) => `- ${item}`).join("\n")}\n\n` +
     `Work only in: ${fixture.scope.join(", ")}. Run the project's tests before finishing.`;
 }
 
-function evaluate(fixture: Fixture, repo: string): RunRow["hidden"] {
+export function evaluate(fixture: Fixture, repo: string): RunRow["hidden"] {
   if (!existsSync(repo)) return null;
   const result = spawnSync(process.execPath, [join(fixture.dir, "evaluate.mjs"), repo], { encoding: "utf8", timeout: 120_000 });
   const line = result.stdout.trim().split("\n").at(-1) ?? "";
@@ -141,7 +145,7 @@ function lastJsonLine(text: string, predicate: (value: Record<string, unknown>) 
 const CODEX_TOOL_ITEMS = new Set(["command_execution", "file_change", "mcp_tool_call", "web_search"]);
 
 /** Tool calls, denials, and cost observable in a provider's raw output. */
-function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" | "denied" | "costUsd"> {
+export function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" | "denied" | "costUsd"> {
   if (adapter === "claude") {
     const result = lastJsonLine(raw, (value) => value.type === "result") ?? (() => { try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; } })();
     return {
@@ -161,7 +165,7 @@ function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" | "deni
   return { turns, denied: null, costUsd: null };
 }
 
-function usageFields(attemptId: string, adapter: string, raw: unknown): Pick<AttemptRow, "inputEvents" | "cacheRead" | "cacheWrite" | "cachedInput" | "output" | "reasoning"> {
+export function usageFields(attemptId: string, adapter: string, raw: unknown): Pick<AttemptRow, "inputEvents" | "cacheRead" | "cacheWrite" | "cachedInput" | "output" | "reasoning"> {
   const usage = normalizeAttemptUsage({ attemptId, adapter, raw: raw ?? null });
   return {
     inputEvents: usage.knownInputEvents, cacheRead: usage.cacheReadInputTokens, cacheWrite: usage.cacheWriteInputTokens,
@@ -334,4 +338,5 @@ async function main(): Promise<void> {
     `${row.attempts.length} attempt(s), ${tokens} input events, hidden ${row.hidden?.passed}/${row.hidden?.total} (evidence: ${root})`);
 }
 
-await main();
+// Only as a script: the lifecycle benchmark imports the helpers above.
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) await main();
