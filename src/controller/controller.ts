@@ -32,6 +32,10 @@ import type { ReviewDecision, ReviewItem, ReviewerRoute } from "../review/policy
 import { assembleResumePrompt } from "../prompts/roles.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
 
+/** Task classes whose review depth may be sized down when risk and complexity are not high. */
+const SMALL_REVIEW_CLASSES = new Set(["mechanical", "small_implementation"]);
+const EFFORT_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
+
 /** A provider session older than this is not continued; provider-side retention and cache both fade. */
 const RESUME_MAX_AGE_MS = 60 * 60_000;
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
@@ -52,6 +56,7 @@ import {
   DEFAULT_CAPABILITY_REGISTRY,
   DISABLED_DELEGATION,
   evaluateCapability,
+  findCapability,
   quotaDomainsFor,
   type CapabilityRegistry,
 } from "../routing/capabilities.ts";
@@ -531,6 +536,7 @@ export class Controller {
     if (selection.chosen && route === "same_provider_fresh_context" && selection.chosen.adapter === implementerAdapter) {
       selection.reason += ` Explicit same-provider policy: fresh, separate review session on ${selection.chosen.adapter}.`;
     }
+    this.sizeReviewEffort(task, selection);
     return selection;
   }
 
@@ -561,6 +567,22 @@ export class Controller {
     const ended = Date.parse(source.endedAt ?? "");
     if (!Number.isFinite(ended) || Date.now() - ended > RESUME_MAX_AGE_MS) return null;
     return { attemptId: source.id, sessionId: source.sessionId };
+  }
+
+  /**
+   * Review depth follows the change, not the route table. A small change that
+   * is neither high-risk nor highly complex is reviewed at medium effort; the
+   * reviewer stays independent and every blocking rule still applies. An
+   * explicit project review route is never overridden.
+   */
+  private sizeReviewEffort(task: Task, selection: RouteSelection): void {
+    const chosen = selection.chosen;
+    if (!chosen || EFFORT_RANK[chosen.effort ?? ""] === undefined || (EFFORT_RANK[chosen.effort ?? ""] ?? 0) <= (EFFORT_RANK.medium ?? 0)) return;
+    if (this.records.getProject(task.projectId)?.routingOverrides.review) return;
+    if (!SMALL_REVIEW_CLASSES.has(task.taskClass) || task.changeRisk === "high" || task.complexity === "high") return;
+    if (!findCapability(this.capabilityRegistry, chosen.adapter, chosen.model)?.efforts.includes("medium")) return;
+    selection.chosen = { ...chosen, effort: "medium" };
+    selection.reason += ` Review effort sized to medium for a ${task.taskClass} change of ${task.changeRisk} risk and ${task.complexity} complexity.`;
   }
 
   private priorReviewFindings(task: Task): string[] {
@@ -2521,11 +2543,12 @@ export class Controller {
       const diffPath = join(dir, "review-diff.patch");
       writeFileSync(diffPath, await workspaceDiff(task.worktreePath, task.baseRevision, task.resultRevision), { mode: 0o600 });
       reviewArtifacts.push(diffPath);
-      // A re-review after a repair gets the repair delta as well, but only
-      // while the reviewed context still matches. After meaningful drift the
-      // full change is reviewed again instead of just the increment.
+      // A re-review after a repair focuses on the repair delta and the open
+      // obligations: the rest of the change was reviewed at the prior revision.
+      // Any scope qualifies, but only while the reviewed context still matches;
+      // after meaningful drift the full change is reviewed again.
       const prior = this.records.reviewsForTask(task.id).findLast((review) => review.revision !== task.resultRevision);
-      if (prior && project.reviewPolicy.scope === "change") {
+      if (prior) {
         const fingerprint = this.records.reviewContextFingerprint(task.id);
         if (prior.contextFingerprint === null || prior.contextFingerprint === fingerprint) {
           const deltaPath = join(dir, "review-delta.patch");

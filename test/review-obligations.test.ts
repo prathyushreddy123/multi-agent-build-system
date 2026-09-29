@@ -12,6 +12,7 @@ import { reviewPreset, triageReviewOutput, type ReviewPolicy } from "../src/revi
 import { Store } from "../src/store/db.ts";
 import { Records } from "../src/store/records.ts";
 import { CODEX_MODEL, loadCapabilityRegistry, recordEntitlementVerification, type CapabilityRegistry } from "../src/routing/capabilities.ts";
+import { resolveReviewChoice } from "../src/domain/project-policy.ts";
 import { VERIFIED_REGISTRY } from "./support/capabilities.ts";
 
 const H1 = JSON.parse(readFileSync(new URL("../fixtures/execution-history/advisory-clarification-review.json", import.meta.url), "utf8")) as {
@@ -377,4 +378,53 @@ test("RES-03: an entitlement verified while the controller runs takes effect on 
   await controller.tick();
   assert.equal(adopted.length, 1, "an unchanged overlay is not reloaded again");
   await controller.stop();
+});
+
+test("DEL-01: delivery modes are exactly the review choices, and a conflicting pair is refused", () => {
+  assert.equal(resolveReviewChoice("fast", undefined), "off");
+  assert.equal(resolveReviewChoice("standard", undefined), "risk");
+  assert.equal(resolveReviewChoice("verified", "required"), "required");
+  assert.equal(resolveReviewChoice(undefined, "risk"), "risk");
+  assert.equal(resolveReviewChoice(undefined, undefined), undefined);
+  assert.throws(() => resolveReviewChoice("fast", "required"), /conflicts/);
+  assert.throws(() => resolveReviewChoice("careful", undefined), /Unknown delivery mode/);
+});
+
+async function reviewEffortFor(t: TestContext, changeRisk: "medium" | "high"): Promise<string | null> {
+  const { records, project } = setup(t, { projectType: "client" });
+  const task = records.createTask({ projectId: project.id, title: `risk ${changeRisk}`, objective: "Change value.txt.", acceptanceCriteria: ["changed"],
+    taskClass: "small_implementation", changeRisk });
+  // Claude implements, so the independent reviewer is the Codex route, listed at high effort.
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["claude", new ScriptedAdapter("claude")], ["codex", new ScriptedAdapter("codex", [{}])]]),
+    defaultAdapter: "claude", workerLimit: 1 });
+  const deadline = Date.now() + 15_000;
+  while (!["DONE", "BLOCKED", "FAILED"].includes(records.getTask(task.id)?.state ?? "") && Date.now() < deadline) {
+    await controller.tick();
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 15));
+  }
+  await controller.stop();
+  return records.listAttempts(task.id).find((attempt) => attempt.kind === "review")?.effort ?? null;
+}
+
+test("DEL-02: a small, non-high-risk change is reviewed at medium effort; a high-risk one keeps the route's depth", async (t) => {
+  assert.equal(await reviewEffortFor(t, "medium"), "medium");
+  assert.equal(await reviewEffortFor(t, "high"), "high");
+});
+
+test("DEL-03: a verified re-review after a repair focuses on the delta and the open obligations", async (t) => {
+  const { records, task } = setup(t, { projectType: "client" });
+  const codex = new ScriptedAdapter("codex");
+  const claude = new ScriptedAdapter("claude", [
+    { follow_up: { unresolved: ["[major] value.txt must end with a newline marker"], decisions_requested: [], next_step: null } },
+    {},
+  ]);
+  const final = await run(records, [codex, claude], task.id);
+  assert.equal(final?.state, "DONE", final?.blockedReason ?? "");
+  const reviews = claude.prompts.filter((prompt) => prompt.kind === "review");
+  assert.equal(reviews.length, 2);
+  assert.doesNotMatch(reviews[0]?.prompt ?? "", /re-review after a repair/);
+  assert.match(reviews[1]?.prompt ?? "", /re-review after a repair/);
+  assert.match(reviews[1]?.prompt ?? "", /review-delta\.patch/);
+  assert.match(reviews[1]?.prompt ?? "", /review-diff\.patch/, "the whole change stays available");
 });

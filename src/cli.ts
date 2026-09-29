@@ -32,8 +32,8 @@ import {
   governanceNeedsInput,
   PROJECT_TYPES,
   REVIEW_CHOICES,
+  resolveReviewChoice,
   type ProjectType,
-  type ReviewChoice,
 } from "./domain/project-policy.ts";
 import { exec } from "./core/exec.ts";
 import { taskDiagnostics } from "./diagnostics/task.ts";
@@ -176,8 +176,9 @@ PRODUCTS AND PLANS
   plan list [--project=id] | plan show <id>
 
 PROJECTS AND TASKS
-  project add <name> <repo> [--type=personal|client|other] [--review=off|risk|required]
-  project governance <project> --type=... [--review=...] --version=N
+  project add <name> <repo> [--type=personal|client|other] [--delivery=fast|standard|verified]
+      [--review=off|risk|required]              Delivery is the review choice: fast=off, standard=risk, verified=required
+  project governance <project> --type=... [--delivery=...|--review=...] --version=N
   project list | project status <id|name> <active|paused|archived>
   project review <id|name> [required|substantive|none]
   project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
@@ -489,12 +490,11 @@ async function main(): Promise<void> {
     if (area === "project" && action === "add") {
       const args = parseArgs(rest);
       const [name, repoArg] = args.positionals;
-      if (!name || !repoArg) throw new Error("Usage: mabs project add <name> <repo> [--type=personal|client|other] [--review=off|risk|required]");
+      if (!name || !repoArg) throw new Error("Usage: mabs project add <name> <repo> [--type=personal|client|other] [--delivery=fast|standard|verified | --review=off|risk|required]");
       const repoPath = resolve(repoArg);
       const projectType = textOption(args, "type") as ProjectType | undefined;
-      const reviewChoice = textOption(args, "review") as ReviewChoice | undefined;
+      const reviewChoice = resolveReviewChoice(textOption(args, "delivery"), textOption(args, "review"));
       if (projectType !== undefined && !PROJECT_TYPES.includes(projectType)) throw new Error(`Unknown project type: ${projectType}`);
-      if (reviewChoice !== undefined && !REVIEW_CHOICES.includes(reviewChoice)) throw new Error(`Unknown review choice: ${reviewChoice}`);
       const project = records.createProject({
         name,
         repoPath,
@@ -517,11 +517,11 @@ async function main(): Promise<void> {
       const args = parseArgs(rest);
       const project = args.positionals[0] ? resolveProject(records, args.positionals[0] as string) : null;
       const projectType = textOption(args, "type") as ProjectType | undefined;
-      const suppliedReview = textOption(args, "review") as ReviewChoice | undefined;
+      const suppliedReview = resolveReviewChoice(textOption(args, "delivery"), textOption(args, "review"));
       const reviewChoice = projectType === "client" && suppliedReview === undefined ? "required" : suppliedReview;
       const version = Number(textOption(args, "version"));
       if (!project || !projectType || !reviewChoice || !Number.isSafeInteger(version)) {
-        throw new Error("Usage: mabs project governance <project> --type=personal|client|other --review=off|risk|required --version=N");
+        throw new Error("Usage: mabs project governance <project> --type=personal|client|other --delivery=fast|standard|verified | --review=off|risk|required --version=N");
       }
       if (!PROJECT_TYPES.includes(projectType) || !REVIEW_CHOICES.includes(reviewChoice)) throw new Error("Invalid project governance choice.");
       const decision = records.recordProjectDecision({

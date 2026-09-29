@@ -6,6 +6,30 @@ export type ProjectType = (typeof PROJECT_TYPES)[number];
 export const REVIEW_CHOICES = ["off", "risk", "required"] as const;
 export type ReviewChoice = (typeof REVIEW_CHOICES)[number];
 
+/**
+ * User-facing rigor. Each mode is exactly one review choice, so operators
+ * pick how careful a project is without reasoning about every policy
+ * dimension; no separate policy exists behind the name.
+ * fast: checks only. standard: checks plus risk-triggered review.
+ * verified: checks plus required independent review that blocks when no reviewer can run.
+ */
+export const DELIVERY_MODES = ["fast", "standard", "verified"] as const;
+export type DeliveryMode = (typeof DELIVERY_MODES)[number];
+export const DELIVERY_MODE_REVIEW: Record<DeliveryMode, ReviewChoice> = { fast: "off", standard: "risk", verified: "required" };
+
+/** The review choice named by --delivery or --review; both may be given only when they agree. */
+export function resolveReviewChoice(delivery: string | undefined, review: string | undefined): ReviewChoice | undefined {
+  if (delivery !== undefined && !(DELIVERY_MODES as readonly string[]).includes(delivery)) {
+    throw new Error(`Unknown delivery mode: ${delivery} (fast, standard, or verified)`);
+  }
+  if (review !== undefined && !(REVIEW_CHOICES as readonly string[]).includes(review)) throw new Error(`Unknown review choice: ${review}`);
+  const fromDelivery = delivery === undefined ? undefined : DELIVERY_MODE_REVIEW[delivery as DeliveryMode];
+  if (fromDelivery !== undefined && review !== undefined && fromDelivery !== review) {
+    throw new Error(`--delivery=${delivery} means --review=${fromDelivery}, which conflicts with --review=${review}`);
+  }
+  return fromDelivery ?? (review as ReviewChoice | undefined);
+}
+
 export interface ProjectGovernance {
   projectType: ProjectType | null;
   reviewChoice: ReviewChoice | null;

@@ -195,8 +195,10 @@ export function buildContextPacket(input: {
   const lessons = lessonsForTask(input.records, input.task, purpose)
     .map((lesson) => ({ incident_id: lesson.incidentId, status: lesson.status, text: lesson.text }));
   const dir = artifactDir(input.task.id, input.attemptId);
+  // The controller attaches a repair delta only while the reviewed context still matches.
+  const deltaReview = purpose === "review" && (input.additionalArtifacts ?? []).some((path) => path.endsWith("review-delta.patch"));
 
-  const composeInput = (files: RetrievedFile[], omitted: { path: string; reason: string }[], inspected: string | null,
+  const composeInput =(files: RetrievedFile[], omitted: { path: string; reason: string }[], inspected: string | null,
     sourceWorkspace: string, derivedEstimate: number): WorkerInput => ({
     identity: {
       project_id: input.project.id,
@@ -211,7 +213,12 @@ export function buildContextPacket(input: {
         : input.task.objective,
       acceptance_criteria: purpose === "review"
         ? [
-            "Inspect the actual diff, surrounding code, registered gate evidence, and authoritative requirements.",
+            ...(deltaReview
+              // The rest of the change was reviewed at the prior revision; its
+              // findings are the open obligations. The full diff stays available.
+              ? ["This is a re-review after a repair. Verify that each open obligation in context.obligations is resolved by review-delta.patch (the change since the reviewed revision), and check that delta for new defects.",
+                "Consult review-diff.patch (the whole change) only where the delta interacts with it; do not re-review code the prior review already covered."]
+              : ["Inspect the actual diff, surrounding code, registered gate evidence, and authoritative requirements."]),
             "Report every actionable finding in follow_up.unresolved with a [critical], [major], or [minor] prefix.",
             "Return outcome=completed when the review was performed, even when changes are requested; use blocked only when review evidence is unavailable.",
           ]

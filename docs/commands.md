@@ -79,6 +79,7 @@ Flags on `controller run` or `controller once`:
 | --- | --- |
 | `node src/cli.ts plan validate plan.json` | Validate a local execution-plan file; does not apply it |
 | `node src/cli.ts plan apply PROJECT plan.json` | Create plan/task records from a valid file; a running controller can dispatch them |
+| `node src/cli.ts project governance PROJECT --type=personal --delivery=standard --version=N` | Set the project's rigor: `fast` (checks only), `standard` (checks plus risk-triggered review), or `verified` (checks plus required independent review that blocks when no reviewer can run). Each is exactly `--review=off\|risk\|required`; `project add` accepts the same flag |
 | `node src/cli.ts review request TASK_ID` | Record a manual review request; does not itself prove review happened |
 | `node src/cli.ts product show BRIEF_ID` | Show the brief, pending decisions, work, and next actions |
 | `node src/cli.ts ops status PROJECT` | Inspect effective optional-operation settings |
@@ -92,6 +93,8 @@ Flags on `controller run` or `controller once`:
 | `node src/cli.ts curator recommend PROJECT` | Evidence-backed remedies for recurring incidents; proposal only |
 
 `ops prepare` also accepts `deployment`, `monitoring`, `scheduling`, `delivery`, and `costs`. None of these preparations executes an external action.
+
+A re-review after a repair checks the repair delta against the open findings rather than the whole change again, while the reviewed context is unchanged. Small changes that are neither high-risk nor highly complex are reviewed at medium effort; an explicit project review route is never overridden.
 
 Use the [curator guide](curator.md) for configuration proposal, approval, activation, and revert commands. Review changes can weaken safeguards: inspect the resolved policy and required acknowledgment rather than turning review off to clear a blocker.
 
