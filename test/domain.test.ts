@@ -74,6 +74,10 @@ test("approval policy and bindings fail closed on drift", () => {
 
 test("failure classes protect repair budget", () => {
   assert.equal(classifyFailure("HTTP 429 usage limit reached", 1), "QUOTA");
+  // Observed live during the v4 benchmark; it was classified INFRA and blocked the task.
+  assert.equal(classifyFailure("You've hit your session limit · resets 10am (America/New_York)", 1), "QUOTA");
+  assert.equal(classifyFailure("You've hit your weekly limit · resets Oct 3, 9am", 1), "QUOTA");
+  assert.equal(classifyFailure("off-by-one: limit check resets the counter", 1), "CODE", "a code message that mentions a limit is still code");
   assert.equal(classifyFailure("please run claude login", 1), "AUTH");
   assert.equal(classifyFailure("unknown model foo", 1), "CONFIG");
   assert.equal(classifyFailure("assertion failed", 1), "CODE");

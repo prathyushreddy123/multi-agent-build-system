@@ -32,6 +32,9 @@ const QUOTA_PATTERNS = [
   /rate.?limit/i,
   /quota/i,
   /usage limit/i,
+  // Claude subscription windows: "You've hit your session limit · resets 10am (...)".
+  // Observed live as INFRA, which blocked the task instead of cooling down.
+  /hit your (?:session|weekly|daily|usage|opus) limit/i,
   /too many requests/i,
   /\b429\b/,
   /overloaded/i,
