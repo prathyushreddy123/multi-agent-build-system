@@ -2,7 +2,7 @@ import type { FailureClass } from "../core/failure.ts";
 import type { ValidationResult } from "../domain/contract.ts";
 import type { DelegationPolicy } from "../routing/capabilities.ts";
 import type { GateSpec } from "../store/records.ts";
-import type { LaunchResult } from "../verify/launch.ts";
+import type { LaunchResult, ResumeLaunch } from "../verify/launch.ts";
 
 /**
  * - `launching`: a launch specification exists but the process has not yet
@@ -26,6 +26,8 @@ export interface AdapterLaunch {
   completionPath: string;
   /** Registered project checks the worker may run through the controller's check tool. */
   workerChecks?: GateSpec[];
+  /** Continue an earlier provider session with a short brief; `prompt` stays the cold fallback. */
+  resume?: ResumeLaunch;
 }
 
 export interface AdapterHandle {

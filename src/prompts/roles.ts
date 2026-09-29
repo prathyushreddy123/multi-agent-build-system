@@ -92,3 +92,28 @@ export function assembleWorkerPrompt(input: {
     "Then end with a one-line final message. Only if you could not write the file, put the JSON object in your final message instead.",
   ].join("\n");
 }
+
+/**
+ * The brief for a repair that continues the implementer's own session. The
+ * session already holds the task, contract, scope, schema, and the code it
+ * wrote, so the brief carries only what changed: the open obligations and
+ * findings, and the exit condition. The full packet is still recorded and is
+ * the cold fallback if the session cannot be resumed.
+ */
+export function assembleResumePrompt(workerInput: WorkerInput): string {
+  const obligations = workerInput.context.obligations ?? [];
+  const findings = workerInput.context.previous_findings.filter((finding) => !obligations.some((item) => finding.includes(item.summary)));
+  return [
+    `MABS targeted repair, attempt ${workerInput.identity.attempt_id}, of the change you made earlier in this session.`,
+    `The controller committed that change as ${workerInput.workspace.head_revision ?? "the current revision"}; its checks or independent review require the following before it can be accepted.`,
+    ...(obligations.length > 0
+      ? ["Open obligations (address each blocking one; name the IDs you addressed in your summary):",
+        ...obligations.map((item) => `- ${item.id} [${item.severity}${item.blocking ? ", blocking" : ""}] ${item.summary}`)]
+      : []),
+    ...(findings.length > 0 ? ["Findings:", ...findings.map((finding) => `- ${finding}`)] : []),
+    ...ROLE_INSTRUCTIONS.repair.slice(1),
+    ...checkInstructions(workerInput, "repair"),
+    "When finished, overwrite .mabs/result.json with a new result object using the same schema as before, then end with a one-line final message. " +
+      "Only if you could not write the file, put the JSON object in your final message instead.",
+  ].join("\n");
+}

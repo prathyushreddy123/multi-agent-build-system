@@ -242,8 +242,9 @@ test("N3: a Codex launch under rerouting managed configuration starts no provide
 
 test("RTE-06: a CLI that drops an isolation flag or feature is reported, and a refused provenance collects as CONFIG", async (t) => {
   const claude = "  --setting-sources <sources>\n  --strict-mcp-config\n  --mcp-config <configs...>\n  --disallowedTools, --disallowed-tools <tools...>\n" +
-    "  --allowedTools, --allowed-tools <tools...>\n  --effort <level>\n  --model <model>\n  --permission-mode <mode>\n";
-  const codexExec = "      --ignore-user-config\n      --json\n  -s, --sandbox <SANDBOX_MODE>\n  -c, --config <key=value>\n  -m, --model <MODEL>\n";
+    "  --allowedTools, --allowed-tools <tools...>\n  --effort <level>\n  --model <model>\n  --permission-mode <mode>\n" +
+    "  -r, --resume [value]\n  --fork-session\n";
+  const codexExec = "  resume  Resume a previous session\n      --ignore-user-config\n      --json\n  -s, --sandbox <SANDBOX_MODE>\n  -c, --config <key=value>\n  -m, --model <MODEL>\n";
   const codexFeatures = "multi_agent        stable  true\nmulti_agent_v2     experimental false\n";
   assert.deepEqual(missingCliSurface({ claude, codexExec, codexFeatures }), []);
   assert.deepEqual(missingCliSurface({ claude: claude.replace("--strict-mcp-config", "--other"), codexExec: codexExec.replace("--ignore-user-config", ""), codexFeatures: "multi_agent  stable true\n" }),

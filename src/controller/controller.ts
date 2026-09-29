@@ -29,7 +29,11 @@ import {
 import { preflightWorktree } from "../environment/preflight.ts";
 import { describeReviewPolicy, evaluateReviewPolicy, triageReviewOutput } from "../review/policy.ts";
 import type { ReviewDecision, ReviewItem, ReviewerRoute } from "../review/policy.ts";
+import { assembleResumePrompt } from "../prompts/roles.ts";
 import { WORKER_PROMPT_VERSION, guidanceForAttempt } from "../prompts/versions.ts";
+
+/** A provider session older than this is not continued; provider-side retention and cache both fade. */
+const RESUME_MAX_AGE_MS = 60 * 60_000;
 import { DEFAULT_ROUTING_POLICY, selectRoute } from "../routing/router.ts";
 import { BoundedTelemetryQueue, type TelemetrySink } from "../telemetry/sink.ts";
 import {
@@ -531,6 +535,22 @@ export class Controller {
       diffText: change.diffText,
       manualRequest: this.records.hasOpenManualReviewRequest(task.id),
     });
+  }
+
+  /**
+   * The implementer session a repair can continue, or null for a cold start.
+   * Only the same provider, model, and effort may continue it, only while the
+   * worktree is still at that attempt's committed result (so the session's
+   * view of the code is current), and only while the session is recent.
+   */
+  private resumableSession(task: Task, execution: ExecutionSelection): { attemptId: string; sessionId: string } | null {
+    const source = this.records.listAttempts(task.id).findLast((attempt) => attempt.kind !== "review");
+    if (!source || source.state !== "succeeded" || !source.sessionId) return null;
+    if (source.adapter !== execution.harness || source.model !== execution.model || source.effort !== execution.effort) return null;
+    if (!task.resultRevision || source.resultRevision !== task.resultRevision) return null;
+    const ended = Date.parse(source.endedAt ?? "");
+    if (!Number.isFinite(ended) || Date.now() - ended > RESUME_MAX_AGE_MS) return null;
+    return { attemptId: source.id, sessionId: source.sessionId };
   }
 
   private priorReviewFindings(task: Task): string[] {
@@ -1559,6 +1579,14 @@ export class Controller {
    */
   private recordLaunchObservations(task: Task, attempt: Attempt, launch: CollectedResult["launch"]): void {
     if (!launch) return;
+    // The wrapper runs detached, so the provider session is known only now.
+    if (launch.sessionId) this.records.setAttemptSession(attempt.id, launch.sessionId);
+    if (launch.resume) {
+      this.records.recordEvent({
+        kind: launch.resume.used ? "attempt.session_resumed" : "attempt.session_resume_fallback",
+        projectId: task.projectId, taskId: task.id, attemptId: attempt.id, data: launch.resume,
+      });
+    }
     const telemetry = launch.telemetry;
     if (telemetry) {
       const gaps = telemetryGap(telemetry);
@@ -2079,7 +2107,8 @@ export class Controller {
    * In-flight model work (a repair or reroute) that could not be admitted
    * waits here without losing its purpose or its repair allocation.
    */
-  private deferForAdmission(task: Task, kind: Attempt["kind"], explanation: AdmissionExplanation): void {
+  /** Park in-flight work until admission allows it; its findings travel with it so the resumed launch is the same work. */
+  private deferForAdmission(task: Task, kind: Attempt["kind"], explanation: AdmissionExplanation, findings: string[] = []): void {
     const current = this.records.getTask(task.id) ?? task;
     const reason = explanation.reasons.join("; ");
     if (kind === "review") {
@@ -2094,7 +2123,7 @@ export class Controller {
     }
     const failed = this.records.listAttempts(current.id).at(-1);
     this.records.recordEvent({ kind: "admission.deferred", projectId: current.projectId, taskId: current.id,
-      data: { attemptKind: kind, reasons: explanation.reasons } });
+      data: { attemptKind: kind, reasons: explanation.reasons, findings } });
     if (current.state !== "BLOCKED") {
       this.records.transition(current.id, "BLOCKED", {
         blocked_reason: `${ADMISSION_PENDING_PREFIX} ${kind}: ${reason}`,
@@ -2114,13 +2143,15 @@ export class Controller {
       const project = this.records.getProject(task.projectId);
       if (!project || project.status !== "active") continue;
       const deferred = this.records.listEventsOfKind(task.id, "admission.deferred").at(-1);
-      const kind = ((deferred ? JSON.parse(String(deferred.data)) : {}) as { attemptKind?: Attempt["kind"] }).attemptKind ?? "repair";
+      const parked = (deferred ? JSON.parse(String(deferred.data)) : {}) as { attemptKind?: Attempt["kind"]; findings?: unknown };
+      const kind = parked.attemptKind ?? "repair";
+      const findings = Array.isArray(parked.findings) ? parked.findings.filter((item): item is string => typeof item === "string") : [];
       const selection = this.selectTaskRoute(task);
       if (!selection.chosen) continue;
       if (!this.admit(task, "model", selection.chosen.adapter).admitted) continue;
       const resumed = this.records.transition(task.id, "RUNNING", { blocked_reason: null, claimed_by: null, claimed_at: null },
         { reason: "admission capacity available; resuming in-flight work", attemptKind: kind });
-      await this.launchAttempt(resumed, project, kind, [], ids.launch(), selection);
+      await this.launchAttempt(resumed, project, kind, findings, ids.launch(), selection);
     }
   }
 
@@ -2362,7 +2393,7 @@ export class Controller {
       // A provider at its concurrency limit is a capacity wait, not a fault:
       // the in-flight work waits for admission instead of failing the tick.
       if (selection.deferred.length > 0) {
-        this.deferForAdmission(task, kind, { admitted: false, reasons: [selection.reason], limits: {}, observed: {} });
+        this.deferForAdmission(task, kind, { admitted: false, reasons: [selection.reason], limits: {}, observed: {} }, previousFindings);
         return;
       }
       throw new Error(selection.reason);
@@ -2378,7 +2409,7 @@ export class Controller {
     // Every launch path, not only initial dispatch, passes the same admission.
     const admission = this.admit(task, "model", candidate.adapter);
     if (!admission.admitted) {
-      this.deferForAdmission(task, kind, admission);
+      this.deferForAdmission(task, kind, admission, previousFindings);
       return;
     }
     const adapter = this.requireAdapter(candidate.adapter);
@@ -2505,6 +2536,8 @@ export class Controller {
       this.blockTask(this.records.getTask(task.id) ?? task, "CONFIG", error.message);
       return;
     }
+    const resumable = executionStage === "repair" ? this.resumableSession(task, execution) : null;
+    const resume = resumable ? { sessionId: resumable.sessionId, prompt: assembleResumePrompt(packet.input) } : undefined;
     const attempt = this.records.startAttempt({
       id: attemptId,
       taskId: task.id,
@@ -2518,6 +2551,8 @@ export class Controller {
       baseRevision: kind === "review" ? task.resultRevision : task.baseRevision,
       packetId: packet.id,
       outputPath: completionPath,
+      parentAttemptId: resumable?.attemptId ?? null,
+      parentSessionId: resumable?.sessionId ?? null,
       promptVersion: WORKER_PROMPT_VERSION,
       skillVersions: packet.guidance,
       stageRunId: stage.id,
@@ -2574,6 +2609,7 @@ export class Controller {
         // Implementers verify their own change against the registered checks;
         // a reviewer already has the controller's gate evidence.
         workerChecks: kind === "review" ? [] : project.checkCommands,
+        resume,
       });
       this.records.setAttemptProcess(attempt.id, handle.pid, handle.sessionId);
       this.records.recordLaunchStarted(stage.id, stage.fencingToken, { attemptId: attempt.id });

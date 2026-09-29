@@ -2198,6 +2198,11 @@ export class Records {
     this.store.run("UPDATE attempts SET pid = ?, session_id = ? WHERE id = ?", pid, sessionId, id);
   }
 
+  /** The provider session an attempt ran in, learned only when its result is collected. */
+  setAttemptSession(id: string, sessionId: string): void {
+    this.store.run("UPDATE attempts SET session_id = ? WHERE id = ?", sessionId, id);
+  }
+
   /**
    * Record what the provider itself reported about the run. Absent values stay
    * NULL: a requested setting is never copied in as if it had been observed.

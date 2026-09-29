@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import type { DelegationPolicy } from "../routing/capabilities.ts";
 import type { GateSpec } from "../store/records.ts";
-import { launchClaude, launchCodex } from "../verify/launch.ts";
+import { launchClaude, launchCodex, type ResumeLaunch } from "../verify/launch.ts";
 import { selfIdentity } from "../core/process-identity.ts";
 import { ProvenanceError } from "../verify/provenance.ts";
 
@@ -20,6 +20,7 @@ interface ProcessSpec {
   evidencePath: string;
   completionPath: string;
   workerChecks?: GateSpec[];
+  resume?: ResumeLaunch;
 }
 
 async function main(): Promise<void> {
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
       evidencePath: spec.evidencePath,
       progressPath: join(dirname(spec.completionPath), "progress.json"),
       workerChecks: spec.workerChecks,
+      resume: spec.resume,
     });
     payload = { completedAt: new Date().toISOString(), result, error: null };
   } catch (error) {

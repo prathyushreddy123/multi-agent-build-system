@@ -5,7 +5,7 @@
  * start/status/cancel/collect_result. Keeping them in one place means the
  * evidence that proved the contract is the same code that will implement it.
  */
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { exec, type ExecResult } from "../core/exec.ts";
@@ -35,6 +35,17 @@ export interface LaunchOptions {
   liveLogBytes?: number;
   /** Registered project checks the worker may run through the controller's check tool. */
   workerChecks?: GateSpec[];
+  /**
+   * Continue an earlier provider session with a short brief instead of the
+   * full packet in `prompt`. If the session cannot be resumed before any model
+   * work happens, the same attempt falls back to `prompt` from a cold start.
+   */
+  resume?: ResumeLaunch;
+}
+
+export interface ResumeLaunch {
+  sessionId: string;
+  prompt: string;
 }
 
 /** Where a Claude worker's check tool reads its registered checks; set only when there are checks. */
@@ -80,6 +91,8 @@ export interface LaunchResult {
   provenance?: ProviderProvenance;
   /** Live-stream accounting, including any output that was not retained. */
   telemetry?: StreamProgress & { stdoutTruncated: boolean; stderrTruncated: boolean };
+  /** Whether a requested session resume was used, or why the attempt fell back to a cold start. */
+  resume?: { sessionId: string; used: boolean; fallbackReason: string | null };
 }
 
 const CLAUDE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash(python3 *)", "Bash(git *)", "Bash(mkdir *)"];
@@ -139,11 +152,18 @@ export const PROBE_ROUTES = {
 } as const;
 
 /** Exact Claude argv for one attempt; pure so tests can assert it without a process. */
-export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "effort" | "delegation">, checkServer: CheckServerLaunch | null = null): string[] {
+export function claudeArgs(
+  options: Pick<LaunchOptions, "prompt" | "model" | "effort" | "delegation">,
+  checkServer: CheckServerLaunch | null = null,
+  resumeSessionId: string | null = null,
+): string[] {
   requireDisabledDelegation(options.delegation);
   const args = [
     "-p",
     options.prompt,
+    // A fork continues the conversation under a new session ID, so the
+    // earlier attempt's transcript stays exactly as it was recorded.
+    ...(resumeSessionId ? ["--resume", resumeSessionId, "--fork-session"] : []),
     // stream-json emits events as they happen; its final `result` event is the
     // same envelope `json` returns at exit. --verbose is required with -p.
     "--output-format",
@@ -174,16 +194,19 @@ export function claudeArgs(options: Pick<LaunchOptions, "prompt" | "model" | "ef
 }
 
 /** Exact Codex argv for one attempt. `-c` overrides apply to this process only. */
-export function codexArgs(options: Pick<LaunchOptions, "cwd" | "prompt" | "model" | "effort" | "delegation">, lastMessagePath: string): string[] {
+export function codexArgs(
+  options: Pick<LaunchOptions, "cwd" | "prompt" | "model" | "effort" | "delegation">,
+  lastMessagePath: string,
+  resumeSessionId: string | null = null,
+): string[] {
   requireDisabledDelegation(options.delegation);
   const args = [
     "exec",
-    "--json",
-    "--skip-git-repo-check",
-    "-s",
-    "workspace-write",
-    "-C",
-    options.cwd,
+    // `exec resume` takes no -s or -C: the sandbox is pinned through config
+    // and the process already runs in the worktree.
+    ...(resumeSessionId
+      ? ["resume", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="workspace-write"']
+      : ["--json", "--skip-git-repo-check", "-s", "workspace-write", "-C", options.cwd]),
     "-o",
     lastMessagePath,
     "-c",
@@ -203,8 +226,39 @@ export function codexArgs(options: Pick<LaunchOptions, "cwd" | "prompt" | "model
   ];
   const route = requireExplicitRoute(options);
   args.push("-m", route.model, "-c", `model_reasoning_effort="${route.effort}"`);
+  if (resumeSessionId) args.push(resumeSessionId);
   args.push(options.prompt);
   return args;
+}
+
+/**
+ * Why a resumed session did no model work, or null when it did. Only a resume
+ * that failed before producing output falls back to a cold start; a resumed
+ * worker that ran and then failed is that attempt's real result.
+ */
+export function resumeFailure(result: Pick<LaunchResult, "exitCode" | "timedOut" | "usage" | "finalMessage" | "stderr">): string | null {
+  if (result.timedOut || result.exitCode === 0) return null;
+  const output = result.usage?.output_tokens;
+  if (typeof output === "number" && output > 0) return null;
+  return (result.stderr || result.finalMessage).trim().slice(0, 300) || `exit ${result.exitCode}`;
+}
+
+/** Keep a failed resume's evidence beside the cold run that replaces it. */
+function preserveFailedResume(evidencePath: string): void {
+  if (existsSync(evidencePath)) renameSync(evidencePath, `${evidencePath}.resume-failed`);
+}
+
+async function withResume(
+  options: LaunchOptions,
+  run: (prompt: string, resumeSessionId: string | null) => Promise<LaunchResult>,
+): Promise<LaunchResult> {
+  if (!options.resume) return run(options.prompt, null);
+  const resumed = await run(options.resume.prompt, options.resume.sessionId);
+  const failure = resumeFailure(resumed);
+  if (failure === null) return { ...resumed, resume: { sessionId: options.resume.sessionId, used: true, fallbackReason: null } };
+  preserveFailedResume(options.evidencePath);
+  const cold = await run(options.prompt, null);
+  return { ...cold, resume: { sessionId: options.resume.sessionId, used: false, fallbackReason: failure } };
 }
 
 /**
@@ -213,8 +267,8 @@ export function codexArgs(options: Pick<LaunchOptions, "cwd" | "prompt" | "model
  * instead of silently loading configuration again.
  */
 export const REQUIRED_CLI_SURFACE = {
-  claude: ["--setting-sources", "--strict-mcp-config", "--mcp-config", "--disallowedTools", "--allowedTools", "--effort", "--model", "--permission-mode"],
-  codexExec: ["--ignore-user-config", "--json", "--sandbox", "--config", "--model"],
+  claude: ["--setting-sources", "--strict-mcp-config", "--mcp-config", "--disallowedTools", "--allowedTools", "--effort", "--model", "--permission-mode", "--resume", "--fork-session"],
+  codexExec: ["--ignore-user-config", "--json", "--sandbox", "--config", "--model", "resume"],
   codexFeatures: ["multi_agent", "multi_agent_v2"],
 } as const;
 
@@ -280,7 +334,11 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
     const spec: ChecksSpec = { cwd: options.cwd, checks: options.workerChecks, logPath: `${options.evidencePath}.checks.log` };
     writeFileSync(checkServer.specPath, JSON.stringify(spec, null, 2), { mode: 0o600 });
   }
-  const args = claudeArgs(options, checkServer);
+  return withResume(options, (prompt, resumeSessionId) =>
+    runClaude({ ...options, prompt }, claudeArgs({ ...options, prompt }, checkServer, resumeSessionId), env, removed, provenance));
+}
+
+async function runClaude(options: LaunchOptions, args: string[], env: NodeJS.ProcessEnv, removed: string[], provenance: ProviderProvenance): Promise<LaunchResult> {
   const { result, parser, telemetry } = await runStreaming("claude", args, options, env, removed);
 
   let finalMessage = "";
@@ -337,7 +395,14 @@ export async function launchCodex(options: LaunchOptions): Promise<LaunchResult>
   assertNoPaidFallback(env);
   const provenance = await requireSubscriptionProvenance("codex", env);
   const lastMessagePath = `${options.evidencePath}.last.txt`;
-  const args = codexArgs(options, lastMessagePath);
+  return withResume(options, (prompt, resumeSessionId) =>
+    runCodex({ ...options, prompt }, codexArgs({ ...options, prompt }, lastMessagePath, resumeSessionId), lastMessagePath, env, removed, provenance));
+}
+
+async function runCodex(
+  options: LaunchOptions, args: string[], lastMessagePath: string, env: NodeJS.ProcessEnv, removed: string[], provenance: ProviderProvenance,
+): Promise<LaunchResult> {
+  rmSync(lastMessagePath, { force: true });
   const { result, parser, telemetry } = await runStreaming("codex", args, options, env, removed);
 
   const usage = parser.lastUsage;
