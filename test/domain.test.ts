@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyFailure, consumesRepairBudget, isProviderUnavailable } from "../src/core/failure.ts";
+import { classifyFailure, consumesRepairBudget, isEnvironmentFailure, isProviderUnavailable } from "../src/core/failure.ts";
 import { validateWorkerOutput } from "../src/domain/contract.ts";
 import { bindingMatches, describeStaleness, evaluate } from "../src/domain/policy.ts";
 import { assertTransition, canTransition, holdsSlot, isTerminal } from "../src/domain/states.ts";
@@ -84,6 +84,21 @@ test("failure classes protect repair budget", () => {
   assert.equal(consumesRepairBudget("CODE"), true);
   assert.equal(consumesRepairBudget("QUOTA"), false);
   assert.equal(isProviderUnavailable("AUTH"), true);
+});
+
+test("a broken local environment never spends the repair budget", () => {
+  const missingBinary = [
+    "Error: claude native binary not installed.",
+    "",
+    "Either postinstall did not run (--ignore-scripts, some pnpm configs)",
+    "or the platform-native optional dependency was not downloaded.",
+  ].join("\n");
+  assert.equal(isEnvironmentFailure(missingBinary), true);
+  assert.equal(classifyFailure(missingBinary, 1), "CONFIG");
+  assert.equal(classifyFailure("spawn codex ENOENT", 1), "CONFIG");
+  assert.equal(consumesRepairBudget(classifyFailure(missingBinary, 1)), false);
+  assert.equal(isEnvironmentFailure("assertion failed: expected 2 to equal 3"), false);
+  assert.equal(classifyFailure("assertion failed: expected 2 to equal 3", 1), "CODE");
 });
 
 test("worker environment removes paid API access and guard fails closed", () => {

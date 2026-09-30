@@ -71,6 +71,30 @@ const CONFIG_PATTERNS = [
   /executable (?:was )?not found/i,
 ];
 
+/**
+ * A broken local environment, not a coding mistake: a harness whose native
+ * binary was never installed, a missing executable, a postinstall that never
+ * ran. Observed live when the claude wrapper exited 1 with "native binary not
+ * installed": the classifier read it as CODE, so the controller spent the whole
+ * repair budget re-running an implementation against an environment the worker
+ * cannot repair. Re-running cannot install a binary.
+ */
+const ENVIRONMENT_PATTERNS = [
+  /native binary (?:is )?not installed/i,
+  /binary (?:is )?not installed/i,
+  /\bnot installed\b/i,
+  /postinstall did not run/i,
+  /spawn \S+ ENOENT/i,
+  /\bENOENT\b/,
+  /executable (?:was )?not found/i,
+  /is not recognized as an internal or external command/i,
+];
+
+/** True when failure text describes local tooling that is missing or unusable. */
+export function isEnvironmentFailure(text: string): boolean {
+  return ENVIRONMENT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 const INFRA_PATTERNS = [
   /ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ETIMEDOUT/,
   /network/i,
@@ -91,6 +115,7 @@ export function classifyFailure(text: string, exitCode: number | null): FailureC
   if (QUOTA_PATTERNS.some((p) => p.test(haystack))) return "QUOTA";
   if (AUTH_PATTERNS.some((p) => p.test(haystack))) return "AUTH";
   if (CONFIG_PATTERNS.some((p) => p.test(haystack))) return "CONFIG";
+  if (isEnvironmentFailure(haystack)) return "CONFIG";
   if (INFRA_PATTERNS.some((p) => p.test(haystack))) return "INFRA";
   if (exitCode === null) return "INFRA";
   if (exitCode === 126 || exitCode === 127) return "CONFIG";
