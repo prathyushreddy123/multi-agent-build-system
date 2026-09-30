@@ -39,5 +39,6 @@ You do not need these to get started. They preserve the reasons behind the desig
 - [Implementation history](implementation-status.md): original phases, extensions, documentation refresh, and evidence links.
 - [Reliability, efficiency, and adaptive execution plan](plans/mabs-reliability-efficiency-adaptive-execution.md): proposed implementation sequence, historical evidence, project-specific review decisions, database changes, and validation/rollout gates. Not an execution authorization.
 - [Why Pi is the interface, not the task worker](adr/0001-pi-and-worker-execution.md): the original design decision.
+- [Efficiency v4 benchmark](benchmarks/efficiency-v4.md): measured tokens, time, and quality for direct Claude, direct Codex, and MABS (single tasks and idea-to-product through Pi), with issues found, candidate solutions, and an over-engineering review.
 
 Need a command that is not in a guide? Run `node src/cli.ts help` from the MABS checkout.
