@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "20";
+export const SCHEMA_VERSION = "21";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -155,6 +155,11 @@ const MIGRATIONS: Migration[] = [
     version: 20,
     file: "migrations/020_worker_recipes.sql",
     columns: { projects: { worker_recipes: "TEXT NOT NULL DEFAULT '[]'" } },
+    indexes: [],
+  },  {
+    version: 21,
+    file: "migrations/021_standing_preferences.sql",
+    columns: {},
     indexes: [],
   },
 ];

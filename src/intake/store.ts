@@ -12,6 +12,7 @@ import { ids } from "../core/ids.ts";
 import type { ExecutionPlan } from "../domain/plan.ts";
 import { REVIEW_PRESETS, type ReviewPreset } from "../review/policy.ts";
 import { fromJson, nowIso, toJson, type Row } from "../store/db.ts";
+import { applyDeliveryPreference } from "../governance/standing.ts";
 import type { Records } from "../store/records.ts";
 import type { ProjectGovernance, ProjectType, ReviewChoice } from "../domain/project-policy.ts";
 import { evaluateProjectReadiness, PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES } from "../domain/project-policy.ts";
@@ -362,6 +363,9 @@ export function createBrief(records: Records, input: {
         actor: input.createdBy ?? "local",
         source: "brief-creation",
       }, 0);
+    } else {
+      // A known, eligible type with no review choice takes the standing delivery preference.
+      applyDeliveryPreference(records, { briefId: id });
     }
     syncGovernanceClarifications(records, id, input.createdBy ?? "local");
     return getBrief(records, id) as ProductBrief;
@@ -505,6 +509,8 @@ export function updateBrief(records: Records, input: {
           actor,
           source: "brief-update",
         }, current.governanceVersion);
+      } else if (currentType !== null && currentChoice === null && patch.reviewChoice === undefined) {
+        applyDeliveryPreference(records, { briefId: updated.id });
       }
     }
     syncGovernanceClarifications(records, input.briefId, actor);

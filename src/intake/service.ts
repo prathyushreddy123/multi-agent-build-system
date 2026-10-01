@@ -37,6 +37,7 @@ import {
 } from "./store.ts";
 import { insertIntakeRequest, matchIntakeRequest, requestHash } from "./requests.ts";
 import { IntakeError } from "./errors.ts";
+import { deliverySummary, type DeliverySummary } from "../governance/standing.ts";
 import type { AcceptanceBinding, BriefFieldPatch, ClarificationItem, ProductBrief, ProposalVersion } from "./types.ts";
 
 export interface ProposalInput {
@@ -55,6 +56,8 @@ export interface ProposalResult {
   errors: string[];
   warnings: string[];
   brief: ProductBrief;
+  /** The rigor this plan would run with, its source, and any offer to raise it. */
+  delivery?: DeliverySummary;
 }
 
 function requireBrief(records: Records, value: string): ProductBrief {
@@ -435,7 +438,7 @@ export function proposePlan(records: Records, input: ProposalInput & { brief: st
       actor,
     });
     const updated = setBriefState(records, brief.id, "PROPOSED", "A validated plan is waiting for the user's decision.", actor);
-    return { proposal, valid: true, errors: [], warnings, brief: updated };
+    return { proposal, valid: true, errors: [], warnings, brief: updated, delivery: deliverySummary(records, updated) };
   });
 }
 
@@ -576,6 +579,7 @@ export function submitAcceptedPlan(records: Records, input: {
 
 export interface ProductSummary {
   brief: ProductBrief;
+  delivery: DeliverySummary;
   governance: ReturnType<Records["readProjectReadiness"]>;
   resolvedReviewPolicy: string | null;
   openQuestions: { id: string; question: string; whyItMatters: string }[];
@@ -644,6 +648,7 @@ export function productSummary(records: Records, value: string): ProductSummary 
 
   return {
     brief,
+    delivery: deliverySummary(records, brief),
     governance,
     resolvedReviewPolicy: project ? normalizeReviewPolicy(project.reviewPolicy).preset : brief.qualitySettings.reviewPreset,
     openQuestions: open.map((item) => ({ id: item.id, question: item.question, whyItMatters: item.whyItMatters })),

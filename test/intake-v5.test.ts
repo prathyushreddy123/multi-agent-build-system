@@ -17,6 +17,7 @@ import { startAcceptedWork, type StartAcceptedWorkInput } from "../src/intake/st
 import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification, listBootstrapRuns } from "../src/intake/store.ts";
 import { projectConfigSnapshot, canonicalConfig } from "../src/domain/config.ts";
 import { runRecipe } from "../src/worker-tools/checks-mcp.ts";
+import { clearDeliveryPreference, deliveryPreference, setDeliveryPreference } from "../src/governance/standing.ts";
 import { Records } from "../src/store/records.ts";
 import { SCHEMA_VERSION, Store } from "../src/store/db.ts";
 
@@ -696,4 +697,86 @@ test("EXEC-01: schema 20 adds empty worker recipes to an existing schema 19 data
   t.after(() => upgraded.store.close());
   assert.equal(upgraded.store.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, SCHEMA_VERSION);
   assert.deepEqual(upgraded.listProjects()[0]?.workerRecipes, []);
+});
+
+// --- GOV-01: standing FAST preference ------------------------------------------
+
+const decisionOf = (records: Records, decisionId: string | null) =>
+  records.store.get("SELECT source, source_ref, actor, review_choice FROM project_policy_decisions WHERE id = ?", decisionId);
+const openGovernanceQuestions = (records: Records, briefId: string) =>
+  records.store.all("SELECT field FROM clarification_items WHERE brief_id = ? AND state = 'open' AND field LIKE 'governance:%'", briefId).map((row) => String(row.field));
+
+test("GOV-01: without a standing preference nothing changes", (t) => {
+  const { records } = setup(t);
+  const brief = createBrief(records, { title: "no-pref", objective: "x", projectType: "personal", createdBy: "prathyush" });
+  assert.equal(brief.reviewChoice, null);
+  assert.ok(openGovernanceQuestions(records, brief.id).some((field) => field.endsWith("review_choice")));
+});
+
+test("GOV-01: a FAST preference fills the review choice for an eligible new brief, with provenance", (t) => {
+  const { records } = setup(t);
+  const preference = setDeliveryPreference(records, { mode: "fast", setBy: "prathyush", reason: "Personal tools: checks only by default." });
+  const brief = createBrief(records, { title: "pref", objective: "x", projectType: "personal", createdBy: "pi-conversation" });
+  assert.equal(brief.reviewChoice, "off");
+  const decision = decisionOf(records, brief.governanceDecisionId);
+  assert.deepEqual([decision?.source, decision?.source_ref, decision?.actor], ["standing-preference", preference.id, "prathyush"]);
+  assert.deepEqual(openGovernanceQuestions(records, brief.id), [], "no review question is asked");
+});
+
+test("GOV-01: client, unknown type, explicit choices, and earlier decisions are never overridden", (t) => {
+  const { records } = setup(t);
+  const earlier = createBrief(records, { title: "earlier", objective: "x", projectType: "personal", createdBy: "prathyush" });
+  setDeliveryPreference(records, { mode: "fast", setBy: "prathyush", reason: "Default." });
+  assert.equal(getBrief(records, earlier.id)?.reviewChoice, null, "a preference never rewrites an existing brief");
+
+  const client = createBrief(records, { title: "client", objective: "x", projectType: "client", createdBy: "prathyush" });
+  assert.equal(client.reviewChoice, "required");
+  const explicit = createBrief(records, { title: "explicit", objective: "x", projectType: "personal", reviewChoice: "risk", createdBy: "prathyush" });
+  assert.equal(explicit.reviewChoice, "risk");
+  const other = createBrief(records, { title: "other", objective: "x", projectType: "other", createdBy: "prathyush" });
+  assert.equal(other.reviewChoice, null, "only the named eligible types take the preference");
+
+  const unknown = createBrief(records, { title: "unknown", objective: "x", createdBy: "prathyush" });
+  assert.equal(unknown.reviewChoice, null);
+  assert.ok(openGovernanceQuestions(records, unknown.id).some((field) => field.endsWith("project_type")), "an unknown type is still asked");
+  const typed = resolveIntake(records, {
+    brief: unknown.id, expectedVersion: unknown.version, requestId: "type", patch: { projectType: "personal" }, summary: "The user said personal.",
+  });
+  assert.equal(getBrief(records, typed.briefId)?.reviewChoice, "off", "once the type is known the preference applies");
+
+  assert.throws(() => setDeliveryPreference(records, { mode: "fast", projectTypes: ["client"], setBy: "prathyush", reason: "x" }), /Client projects always require/);
+  assert.throws(() => setDeliveryPreference(records, { mode: "fast", setBy: "agent", reason: "x" }), /set by the person/);
+  clearDeliveryPreference(records, "prathyush");
+  assert.equal(deliveryPreference(records), null);
+});
+
+test("GOV-01: the plan carries a one-line VERIFIED offer, and switching re-fingerprints the plan", (t) => {
+  const { records } = setup(t);
+  setDeliveryPreference(records, { mode: "fast", setBy: "prathyush", reason: "Default." });
+  const brief = createBrief(records, { title: "offer", objective: "x", projectType: "personal", createdBy: "prathyush" });
+  const proposed = proposePlan(records, { brief: brief.id, summary: "s", rationale: "r", scope: "s", requirements: [{ id: "REQ-1", text: "t" }], plan: smallPlan() });
+  assert.equal(proposed.delivery?.mode, "fast");
+  assert.equal(proposed.delivery?.preferenceSetBy, "prathyush");
+  assert.match(proposed.delivery?.offer ?? "", /FAST from prathyush's standing preference.*Say "verified"/);
+  assert.equal(proposeView(proposed).delivery?.offer, proposed.delivery?.offer, "the conversation view carries the offer");
+
+  const current = getBrief(records, brief.id)!;
+  resolveIntake(records, { brief: brief.id, expectedVersion: current.version, requestId: "verified", patch: { reviewChoice: "required" }, summary: "The user chose verified." });
+  assert.throws(() => acceptPlan(records, {
+    brief: brief.id, proposalId: proposed.proposal!.id, fingerprint: proposed.proposal!.fingerprint, acceptedBy: "prathyush",
+  }), /governance changed|brief version|invalidated/, "the FAST plan cannot be accepted after the switch");
+});
+
+test("GOV-01: project add applies the preference only when no review choice is given", (t) => {
+  const { root } = setup(t);
+  const { json } = cliFor(root);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  json("preferences", "set-delivery", "fast", "--by=prathyush", "--reason=Personal tools default to checks only.");
+  const added = json<{ governance: { reviewChoice: string } }>("project", "add", "pref-project", repo, "--type=personal", "--no-checks", "--base=main");
+  assert.equal(added.governance.reviewChoice, "off");
+  const shown = json<{ delivery: { mode: string }; history: unknown[] }>("preferences", "show");
+  assert.equal(shown.delivery.mode, "fast");
+  assert.equal(shown.history.length, 1);
 });

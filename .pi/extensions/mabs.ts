@@ -669,6 +669,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
       "Give every mabs_propose_plan task an execution mode and reason, and disjoint allowedScope values for parallel tasks.",
       "Prefer one cohesive mabs_propose_plan task: a small implementation includes its own tests and documentation. Add a task only for an independent deliverable, a step that needs another's accepted result, real parallel benefit, or context too large for one worker, and state that reason.",
       "Treat mabs_propose_plan 'Possible fragmentation' warnings as a prompt to merge tasks or justify the split; they never block a plan.",
+      "When mabs_propose_plan returns delivery.offer, include that one line in the plan summary; do not ask a separate question about it.",
       "If mabs_propose_plan reports validation errors, fix the plan and propose again; never present an invalid plan.",
     ],
     parameters: Type.Object({

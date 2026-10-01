@@ -54,6 +54,9 @@ import {
   wrongGovernanceSubject,
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
+import {
+  applyDeliveryPreference, clearDeliveryPreference, deliveryPreference, deliveryPreferenceHistory, setDeliveryPreference,
+} from "./governance/standing.ts";
 import { validateRecipes, type WorkerRecipe } from "./domain/recipes.ts";
 import { startAcceptedWork } from "./intake/start.ts";
 import {
@@ -195,6 +198,8 @@ PROJECTS AND TASKS
       [--review=off|risk|required]              Delivery is the review choice: fast=off, standard=risk, verified=required
   project governance <project> --type=... [--delivery=...|--review=...] --version=N
   project list | project status <id|name> <active|paused|archived>
+  preferences show | preferences set-delivery <fast|standard|verified> --by=<person> --reason=... [--types=personal]
+                                            Standing delivery mode for new eligible projects (never client); clear-delivery removes it
   project recipes <project> [--set='[...]' | --clear]
                                             Named commands workers may run to try the program (exploratory, never evidence)
   project review <id|name> [required|substantive|none]
@@ -531,7 +536,7 @@ async function main(): Promise<void> {
       const projectType = textOption(args, "type") as ProjectType | undefined;
       const reviewChoice = resolveReviewChoice(textOption(args, "delivery"), textOption(args, "review"));
       if (projectType !== undefined && !PROJECT_TYPES.includes(projectType)) throw new Error(`Unknown project type: ${projectType}`);
-      const project = records.createProject({
+      let project = records.createProject({
         name,
         repoPath,
         baseBranch: textOption(args, "base") ?? await baseBranch(repoPath),
@@ -542,6 +547,9 @@ async function main(): Promise<void> {
         governanceSource: "cli-project-add",
         checkCommands: args.options.has("no-checks") ? [] : discoverChecks(repoPath),
       });
+      if (reviewChoice === undefined && applyDeliveryPreference(records, { projectId: project.id })) {
+        project = records.getProject(project.id) as typeof project;
+      }
       console.log(JSON.stringify(
         governanceNeedsInput({ kind: "project", id: project.id }, project.governance, project.reviewPolicy) ?? project,
         null,
@@ -571,6 +579,29 @@ async function main(): Promise<void> {
       }, version);
       console.log(JSON.stringify({ decision, project: records.getProject(project.id) }, null, 2));
       return;
+    }
+    if (area === "preferences") {
+      const args = parseArgs(rest);
+      if (action === "set-delivery") {
+        const mode = args.positionals[0];
+        const setBy = textOption(args, "by");
+        if (!mode || !setBy) throw new Error("Usage: mabs preferences set-delivery <fast|standard|verified> --by=<person> --reason=... [--types=personal,other]");
+        console.log(JSON.stringify(setDeliveryPreference(records, {
+          mode, setBy, reason: textOption(args, "reason") ?? "",
+          projectTypes: textOption(args, "types")?.split(",").map((item) => item.trim()).filter(Boolean),
+        }), null, 2));
+        return;
+      }
+      if (action === "clear-delivery") {
+        const setBy = textOption(args, "by");
+        if (!setBy) throw new Error("Usage: mabs preferences clear-delivery --by=<person>");
+        clearDeliveryPreference(records, setBy);
+      }
+      if (action === "show" || action === "clear-delivery" || action === undefined) {
+        console.log(JSON.stringify({ delivery: deliveryPreference(records), history: deliveryPreferenceHistory(records) }, null, 2));
+        return;
+      }
+      throw new Error("Usage: mabs preferences show | set-delivery <mode> --by=<person> --reason=... [--types=...] | clear-delivery --by=<person>");
     }
     if (area === "project" && action === "recipes") {
       const args = parseArgs(rest);

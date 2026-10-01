@@ -47,6 +47,7 @@ export const ids = {
   conversation: () => newId("cnv"),
   operationRun: () => newId("opr"),
   policyDecision: () => newId("gvd"),
+  standingPreference: () => newId("spf"),
   episode: () => newId("eps"),
   stage: () => newId("stg"),
   obligation: () => newId("obl"),

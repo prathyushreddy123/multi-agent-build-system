@@ -83,6 +83,7 @@ export function proposeView(result: ProposalResult) {
     valid: result.valid,
     errors: result.errors,
     warnings: result.warnings,
+    ...(result.delivery ? { delivery: result.delivery } : {}),
     proposal: proposal
       ? {
           id: proposal.id, version: proposal.version, state: proposal.state, fingerprint: proposal.fingerprint,
@@ -119,6 +120,7 @@ export function productView(summary: ProductSummary) {
   const list = (items: string[], section: BriefSection) => page(items, VIEW_PAGE_SIZE.list, moreOf(briefId, section));
   return {
     brief: { id: briefId, title: summary.brief.title, state: summary.brief.state, version: summary.brief.version },
+    delivery: summary.delivery,
     governance: {
       ready: summary.governance.ready,
       missing: summary.governance.missing,
