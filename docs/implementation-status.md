@@ -107,6 +107,9 @@ Requirement ledger and evidence: [v5 implementation ledger](plans/mabs-efficienc
 | ROUTE-01 | `--pin-adapter` never substitutes a provider; `--adapter` stays a preference | [Routing](routing-policy-v1.md) |
 | PLAN-01 | One cohesive task preferred; fragmentation warnings; requirement ownership checked | [Ledger](plans/mabs-efficiency-implementation.md#phase-2) |
 | EXEC-01 | Worker recipes: run the program by name, no shell (schema 20) | [System overview](architecture/system-overview.md#what-a-worker-can-do) |
+| GOV-01 | Standing delivery preference with provenance (schema 21) | [Task execution](architecture/task-execution.md#where-review-fits) |
+| UX-01 | Model-free progress feed for the Pi status line | [Commands](commands.md#pi-conversational-and-control-commands) |
+| CTX-02 | Owned + global requirements per task; accepted dependency attempt only (schema 22) | [Ledger](plans/mabs-efficiency-implementation.md#phase-3) |
 
 ## Reading evidence correctly
 

@@ -7,7 +7,7 @@ Live progress: [mabs-efficiency-progress.md](mabs-efficiency-progress.md). Clean
 Status vocabulary: **needed**, **partial**, **satisfied**, **contradicted**, **done** (implemented on this branch), **unverified** (built, but live proof not run).
 
 ## Authorized scope (2026-10-01)
-- Phase 0 and Phase 1; then Phase 2 (approved the same day after the Phase 1 report). Stop with a report before Phase 3.
+- Phase 0 and Phase 1; then Phase 2 (approved the same day after the Phase 1 report); then the two Phase 2 live checks and Phase 3 (approved together). Stop with a report before Phase 4.
 - Offline validation only: no subscription-consuming worker or benchmark runs. A live envelope is proposed at the end of Phase 2.
 - ROUTE-01 decision: `--adapter` stays a *preference*, with any fallback recorded. A new strict `--pin-adapter` never substitutes a provider.
 - Uncommitted v4 docs alignment on main was reviewed and committed as `b89e7ce`.
@@ -51,9 +51,9 @@ BASE-03: historical rows in `bench/results/*.jsonl` are untouched. New fields ar
 | EXEC-01 | **done, live proof unverified** (`ee94831`) — was: needed | `src/worker-tools/checks-mcp.ts` serves registered checks only; no named recipes | 2 |
 | ROUTE-01 | **done, live proof unverified** (`791ce08`) — was: needed | `src/routing/router.ts:173` only sorts by `preferredAdapter`; there is no pinned mode | 2 |
 | CTX-01 | **done** (`cd71616`) — was: needed | `src/context/packet.ts:374` measures `workerInputBytes` on `JSON.stringify(…, null, 2)`, while the sent prompt is compact | 2 |
-| GOV-01 | needed | no standing delivery-mode preference with provenance | 3 |
-| UX-01 | partial | status bar exists (`mabs.ts:39`); no coalesced controller progress | 3 |
-| CTX-02 | needed | `packet.ts:113` loads every project requirement into each packet | 3 |
+| GOV-01 | **done** (`c860a58`) — was: needed | no standing delivery-mode preference with provenance | 3 |
+| UX-01 | **done** (`bfac07b`) — was: partial | status bar exists (`mabs.ts:39`); no coalesced controller progress | 3 |
+| CTX-02 | **done** (`2e1d72c`) — was: needed | `packet.ts:113` loads every project requirement into each packet | 3 |
 | CTX-03 | satisfied (repair resume) | `controller.resumableSession` (`controller.ts:565`) + `assembleResumePrompt`; cross-task reuse stays deferred | 3 (optional) |
 | REV-01..03 | needed | `review request` only records an event (`cli.ts` help: "Record an explicit manual review request"); the review packet replaces `acceptance_criteria` (`packet.ts:214`) | 4 |
 | DOC-01 correction | **satisfied** | `docs/architecture/task-execution.md` now matches `controller.selectReviewRoute` (`controller.ts:533-537`): no same-provider substitution under `independent_provider` (commit `b89e7ce`) | 0 |
@@ -172,3 +172,31 @@ A bounded, subscription-only plan. No paid API, no extra-usage activation, and h
 | 3 | One FAST parity pair on the habit-tracker fixture, MABS + Claude vs direct Claude, same spec/model/effort, no AI review | about 1 Pi planning session + 1–2 MABS worker attempts + 1 direct run | First comparable lifecycle usage after v5; reported as n=1, not a savings claim |
 
 Ceiling: at most 6 provider attempts in total, stopping at the first quota signal. Rows are added under new labels (`v5-smoke`, `v5-parity`).
+
+## Phase 3
+
+### GOV-01: standing FAST preference
+- Files: `src/governance/standing.ts`, `src/store/migrations/021_standing_preferences.sql` (schema 21), `src/intake/store.ts` (create/update hooks), `src/intake/service.ts` and `projection.ts` (delivery summary), `src/cli.ts` (`preferences …`, `project add` hook), `.pi/extensions/mabs.ts` (relay the offer), `docs/architecture/task-execution.md`, `docs/commands.md`.
+- Design: one active, person-owned preference per key with history. Agents cannot set it. It fills only a **missing** review choice on a **new** brief or project whose type is **explicitly** one of the eligible types (default `personal`; `client` is rejected). It records an ordinary governance decision (`source: standing-preference`, `source_ref`: preference ID, actor: the person), so existing decisions win, unknown types are still asked, and the proposal fingerprint covers it. Proposal and product results carry `delivery` with a one-line VERIFIED offer, and Pi includes it in the plan summary without a separate question. Switching to verified re-fingerprints the plan.
+- Not done on the live database: recording your own FAST preference (`preferences set-delivery fast --by=… --reason=…`) waits until after the merge and migration.
+- Validation: GOV-01 (5 tests).
+
+### UX-01: direct progress
+- Files: `src/operator/feed.ts`, `src/cli.ts` (`progress feed`), `.pi/extensions/mabs.ts` (poller), `docs/commands.md`.
+- Design: a bounded frame (unfinished tasks plus those changed in the last hour, at most 200) built from `buildProgressSnapshot`. `diffFeed` notifies only for done, blocked/failed, awaiting approval and controller-stopped-with-work, coalesced per poll, and never on the first frame. The extension polls every 15 s (`MABS_FEED_INTERVAL_MS`, `0` = off), uses Pi's `setStatus`/`notify`, stops on `session_shutdown`, and never calls `sendUserMessage`. The real-data frame on the live copy is 4.2 KB, read by the extension and not the model.
+- Validation: `test/operator/feed.test.ts` (5) plus an extension test that drives `session_start` twice and asserts the status lines, one coalesced notice and zero model messages.
+
+### CTX-02: scoped requirements and dependency evidence
+- Files: `src/context/packet.ts` (`scopedRequirements`, `acceptedDependencyEvidence`), `src/store/records.ts` (`scope`, `ownedRequirementIds`), `src/store/migrations/022_requirement_scope.sql` (schema 22), `src/domain/plan.ts`, `src/intake/service.ts`, Pi propose schema (`global`), automation-design skill.
+- Design: a task with ownership carries owned + global + unowned-mandatory requirements. Legacy tasks without ownership keep everything (all 30 live tasks are legacy, so their behaviour is unchanged). Dependencies contribute only the attempt behind the accepted revision, and superseded attempts are counted and named as retrievable. The review-context fingerprint gains a `global` marker only when set.
+- Validation: v5 CTX-02 (3 tests in `context-budget.test.ts` plus 1 in `intake-v5.test.ts`). The size effect is unmeasured; the brief calls it a larger-project optimization, not the cause of the small-benchmark gap.
+
+### CTX-03
+- Not started, by design: compatible repair resume already exists, and cross-task continuation stays deferred until evidence supports it.
+
+### Phase 3 migration rehearsal
+- A fresh copy of the live schema-18 database through `maintenance migrate`: 18 → 22, backup integrity ok, restore rehearsal at 22 with rows preserved. Config fingerprints are as before (the same single pre-existing difference).
+
+### Phase 3 summary
+- Tests 474/474, both typechecks clean.
+- Unverified live: V3-PARITY, V3-PLAN and V3-INTAKE (see the validation checklist).

@@ -12,7 +12,9 @@ Status: `pending`, `passed`, `failed`, `skipped` (with reason). Evidence lives i
 |---|---|---|
 | After Phase 2 | V2-ROUTE, V2-EXEC | ≤ 1 worker attempt (2026-10-01) |
 | After Phase 3 | V3-PARITY, V3-PLAN, V3-INTAKE | ≤ 5 attempts plus one Pi planning session; propose before running |
-| After Phase 4 | V4-REVIEW | propose before running |
+| After Phase 4 | V3-GOV | GOV-01 | After the merge and migration, set `preferences set-delivery fast`; start a personal idea in Pi | Pi never asks the review question; the plan summary includes the one-line VERIFIED offer | included in V3-PARITY | pending | | |
+| V3-FEED | UX-01 | During V3-PARITY, watch the Pi status line and notices while the controller runs | The status line updates without a model turn; one notice when the task finishes | 0 extra | pending | | |
+| V4-REVIEW | propose before running |
 
 ## Checks
 
