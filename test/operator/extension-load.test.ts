@@ -179,3 +179,47 @@ test("the presentation layer can be disabled without touching the MABS tools", {
     assert.ok(second.recorded.tools.length >= 13);
   });
 });
+
+test("UX-01: the MABS extension updates status and notices from the feed and never wakes the model", { skip: SKIP }, async () => {
+  await withState(async () => {
+    const factory = await loadExtension("mabs.ts");
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+    const frames = [
+      { version: "mabs.feed.v1", at: "t1", controller: { state: "running", reason: "" }, counts: { active: 1, waiting: 0, attention: 0, done: 0 },
+        tasks: [{ id: "tsk_a", title: "Greeter", project: "p", state: "RUNNING", reason: null }] },
+      { version: "mabs.feed.v1", at: "t2", controller: { state: "running", reason: "" }, counts: { active: 0, waiting: 0, attention: 0, done: 1 },
+        tasks: [{ id: "tsk_a", title: "Greeter", project: "p", state: "DONE", reason: null }] },
+    ];
+    const calls: string[][] = [];
+    let modelMessages = 0;
+    const pi = {
+      on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => { handlers.set(event, handler); return () => undefined; },
+      registerTool: () => undefined,
+      registerCommand: () => undefined,
+      exec: async (_bin: string, args: string[]) => {
+        calls.push(args.slice(1));
+        const frame = frames[Math.min(calls.filter((call) => call[0] === "progress").length - 1, frames.length - 1)];
+        return { code: 0, stdout: JSON.stringify(frame), stderr: "" };
+      },
+      sendUserMessage: () => { modelMessages += 1; },
+    };
+    const previous = process.env.MABS_FEED_INTERVAL_MS;
+    process.env.MABS_FEED_INTERVAL_MS = "0";
+    try {
+      factory(pi);
+    } finally {
+      if (previous === undefined) delete process.env.MABS_FEED_INTERVAL_MS; else process.env.MABS_FEED_INTERVAL_MS = previous;
+    }
+    const statuses: string[] = [];
+    const notices: string[] = [];
+    const ctx = { ui: { setStatus: (_key: string, text: string) => statuses.push(text), notify: (text: string) => notices.push(text), theme: { fg: (_c: string, text: string) => text } } };
+    await handlers.get("session_start")?.({}, ctx);
+    await handlers.get("session_start")?.({}, ctx);
+    assert.ok(calls.every((call) => call[0] === "progress" && call[1] === "feed"), "the feed is the only call");
+    assert.deepEqual(statuses, ["MABS 1 active · 0 attention", "MABS 0 active · 0 attention"]);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0] ?? "", /^Done: Greeter \(tsk_a\)/);
+    assert.equal(modelMessages, 0, "the feed never sends the model a message");
+    await handlers.get("session_shutdown")?.({}, ctx);
+  });
+});

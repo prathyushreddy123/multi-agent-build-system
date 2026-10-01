@@ -98,6 +98,7 @@ import { probeOperatorCapabilities, renderCapabilityReport } from "./operator/ca
 import { diffFile, openFile, taskChanges, taskFiles } from "./operator/code.ts";
 import { renderDashboard, reconcileView, INITIAL_VIEW, watchTasks } from "./operator/dashboard.ts";
 import { buildProgressSnapshot, controllerFreshness } from "./operator/progress.ts";
+import { feedFrame } from "./operator/feed.ts";
 import { controllerLiveness } from "./operator/liveness.ts";
 import { followLog, listEvidence, readChunk, readTail } from "./operator/logs.ts";
 import { closeWorkspace, openWorkspace, workspaceStatus } from "./operator/herdr.ts";
@@ -1491,6 +1492,11 @@ async function main(): Promise<void> {
       const provider = rest[0];
       if (!provider) throw new Error("Usage: mabs provider reset <name>");
       console.log(JSON.stringify(records.resetProvider(provider), null, 2));
+      return;
+    }
+    if (area === "progress" && action === "feed") {
+      // A bounded, model-free frame for the conversation's status line and notices.
+      console.log(JSON.stringify(feedFrame(buildProgressSnapshot(records))));
       return;
     }
     if (area === "status") {

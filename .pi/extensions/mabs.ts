@@ -7,6 +7,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { compactToolRegistrar } from "./mabs-ux.ts";
+import { diffFeed, type FeedFrame } from "../../src/operator/feed.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CLI = resolve(ROOT, "src/cli.ts");
@@ -69,15 +70,41 @@ export default function mabsExtension(pi: ExtensionAPI) {
   // tools and forwarded worker output follow the same rules as Pi's built-ins.
   const registerCompactTool = compactToolRegistrar(pi);
 
-  pi.on("session_start", async (_event, ctx) => {
+  // Progress between turns comes from a deterministic poll of `progress feed`:
+  // the status line and notices update without any model request. The model
+  // is never woken by the feed; the user decides whether to ask about a notice.
+  let feedTimer: ReturnType<typeof setInterval> | null = null;
+  let previousFrame: FeedFrame | null = null;
+  let polling = false;
+  const feedInterval = Number(process.env.MABS_FEED_INTERVAL_MS ?? 15_000);
+
+  async function pollFeed(ctx: { ui: { setStatus(key: string, text: string): void; notify(message: string, kind: "info" | "warning" | "error"): void; theme: { fg(color: string, text: string): string } } }): Promise<void> {
+    if (polling) return;
+    polling = true;
     try {
-      const status = JSON.parse(await run(["status"])) as { taskCounts?: Record<string, number>; pendingApprovals?: number; staleHeartbeatWorkers?: number };
-      const active = (status.taskCounts?.RUNNING ?? 0) + (status.taskCounts?.CHECKING ?? 0);
-      const attention = (status.taskCounts?.BLOCKED ?? 0) + (status.taskCounts?.FAILED ?? 0) + (status.pendingApprovals ?? 0) + (status.staleHeartbeatWorkers ?? 0);
-      ctx.ui.setStatus("mabs", ctx.ui.theme.fg(attention > 0 ? "warning" : "dim", `MABS ${active} active · ${attention} attention`));
+      const frame = JSON.parse(await run(["progress", "feed"])) as FeedFrame;
+      const { statusLine, notices } = diffFeed(previousFrame, frame);
+      previousFrame = frame;
+      ctx.ui.setStatus("mabs", ctx.ui.theme.fg(frame.counts.attention > 0 ? "warning" : "dim", statusLine));
+      for (const notice of notices) ctx.ui.notify(notice.text, notice.level);
     } catch {
       ctx.ui.setStatus("mabs", ctx.ui.theme.fg("warning", "MABS unavailable"));
+    } finally {
+      polling = false;
     }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    await pollFeed(ctx);
+    if (feedTimer === null && Number.isFinite(feedInterval) && feedInterval > 0) {
+      feedTimer = setInterval(() => { void pollFeed(ctx); }, Math.max(5_000, feedInterval));
+      feedTimer.unref?.();
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (feedTimer) clearInterval(feedTimer);
+    feedTimer = null;
   });
 
   pi.registerCommand("mabs-new", {
