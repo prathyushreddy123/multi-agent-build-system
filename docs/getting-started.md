@@ -13,14 +13,13 @@ You need Node.js 24+, Git, and an authenticated Claude Code or Codex CLI for mod
 ```bash
 git clone https://github.com/prathyushreddy123/multi-agent-build-system.git
 cd multi-agent-build-system
-git switch mabs-extension
 npm ci
 npm test
 npm run typecheck
 node src/cli.ts help
 ```
 
-Already have this checkout? Skip cloning and confirm you are on the intended branch. Successful tests and typechecking verify the local MABS code; they do not verify your provider login or target project.
+Already have this checkout? Skip cloning and confirm you are on `main`. Successful tests and typechecking verify the local MABS code; they do not verify your provider login or target project.
 
 Check the provider you plan to use:
 
@@ -31,6 +30,15 @@ codex login status
 # Or Claude Code: expect a first-party claude.ai session.
 claude auth status
 ```
+
+**Codex needs one extra step.** Every route names an exact model, and the Codex route (`gpt-5.6-sol`) stays ineligible until one real probe proves your subscription can use it. Until then, Codex-first routes fall back to Claude and the fallback is recorded. If Codex is your provider, run this once. It makes one small subscription call:
+
+```bash
+node src/cli.ts routing verify-entitlement codex gpt-5.6-sol
+node src/cli.ts routing capabilities   # entitlement for that route now reads "verified"
+```
+
+The Claude routes (`claude-sonnet-5`, `claude-opus-5`) are already verified.
 
 Do not add API keys to make a failed login work. MABS removes paid-API environment settings before worker launches and does not fall back to a paid model API.
 
@@ -59,6 +67,7 @@ These commands write local MABS records. If a controller is already running, it 
 
 ```bash
 node src/cli.ts project add demo "$PROJECT" \
+  --type=personal --delivery=standard \
   --goal="Learn the workflow with a small documentation task"
 
 node src/cli.ts requirement add demo REQ-1 \
@@ -71,7 +80,19 @@ node src/cli.ts task add demo "Document the test command" \
   --mode=single --mode-reason="One small first task."
 ```
 
-The registration output includes the project's `id`, `baseBranch`, `checkCommands`, and `reviewPolicy`. The base branch defaults to the target repository's current branch. Check these before dispatch; missing checks are not equivalent to passing tests.
+**Both governance flags are required before any task runs.** `--type` is `personal`, `client`, or `other`. `--delivery` sets how careful the project is:
+
+| Delivery | Same as | Meaning |
+| --- | --- | --- |
+| `fast` | `--review=off` | Checks only |
+| `standard` | `--review=risk` | Checks, plus review when a change is risky |
+| `verified` | `--review=required` | Checks, plus required independent review; the task blocks if no reviewer can run |
+
+A `client` project with no review choice defaults to `required`. MABS never picks the project type for you. If you leave a flag out, registration prints `"outcome": "needs_input"` with the open questions, and the controller dispatches nothing for that project. Answer later with `project governance demo --type=... --delivery=... --version=N`, and use `project readiness` to list the decisions that are still open.
+
+When governance is complete, the registration output includes the project's `id`, `baseBranch`, `checkCommands`, and `reviewPolicy`. The base branch defaults to the target repository's current branch (`--base=BRANCH` overrides it). Check these before dispatch; missing checks are not equivalent to passing tests.
+
+> `verified` with only one provider: independent review needs a *second* eligible provider. On a fresh install with Codex not yet verified, a `verified` project blocks with `CONFIG` before implementing, and names the ineligible reviewer. It launches nothing. Use `standard` for a first run, or verify the second provider first.
 
 Save the `id` printed by `task add`. Use a different project name if `demo` is already registered; do not repeat registration to inspect an existing project.
 
@@ -83,7 +104,9 @@ Save the `id` printed by `task add`. Use a different project name if `demo` is a
 node src/cli.ts controller run --adapter=codex --workers=1 --ui
 ```
 
-Use `--adapter=claude` if that is your authenticated provider. This flag is an explicit route override; omit it to use the routing policy. A review may use another eligible provider or a fresh review context on the same provider, depending on policy and availability.
+Use `--adapter=claude` if that is your authenticated provider. This flag reorders the routing policy's candidates; it cannot make an ineligible route usable. If Codex's entitlement is not verified (step 1), `--adapter=codex` still runs on Claude, and `task show` records the provider fallback. Omit the flag to use the routing policy. You can also set the preference with `MABS_ADAPTER=codex|claude`.
+
+A second `controller run` against the same state refuses to start while one is live, and exits 0. (`--force` overrides this; it is meant for recovery, not normal use.) When review is triggered, it runs on a different provider from the implementer. With only one eligible provider, a `standard` project's review waits as `Review pending:` until a second provider becomes eligible.
 
 Open **[http://127.0.0.1:4317](http://127.0.0.1:4317)**. The workbench shows projects, tasks, attempts, checks, reviews, and evidence. The normal path is:
 
@@ -142,7 +165,22 @@ This opens the existing workbench, not a static documentation site. Its mutation
 | Task records and artifacts | `~/.local/state/mabs` | `MABS_STATE_DIR` |
 | SQLite database | `~/.local/state/mabs/mabs.sqlite` | `MABS_DB_PATH` |
 | Task worktrees | `~/worktrees` | `MABS_WORKTREE_ROOT` |
+| Verified route entitlements | `~/.local/state/mabs/capability-entitlements.json` | follows `MABS_STATE_DIR` |
+| Operator workspace preferences | `~/.local/state/mabs/operator/preferences.json` | `MABS_OPERATOR_CONFIG` |
 
 If `XDG_STATE_HOME` is set, the default state directory is `$XDG_STATE_HOME/mabs`. Keep the same overrides across terminals and restarts. A different state path points to different records.
+
+Less common environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `MABS_ADAPTER` | Default for `controller run --adapter` (`claude` or `codex`) |
+| `MABS_VIEWER_COMMAND` | Viewer for the Code surface, used instead of nvim/vim/less; called as `COMMAND [LINE] FILE` |
+| `MABS_VSCODE_EXECUTABLE` | VS Code CLI for the Herdr popup's Code action ([popup setup](../plugins/herdr/README.md)) |
+| `MABS_PI_PACKAGE_DIR` | Location of the installed Pi package, used by `operator probe` |
+| `MABS_CLAUDE_MANAGED_SETTINGS_DIR` | An *extra* directory of managed Claude settings to inspect before launch. `/etc/claude-code` is always inspected too; this cannot switch the check off |
+| `MABS_CODEX_MANAGED_CONFIG_DIR` | An extra directory of managed Codex configuration to inspect, in addition to `/etc/codex` |
+
+Before every worker launch, MABS inspects system-managed Claude and Codex configuration. If a managed setting can change the provider, credential, endpoint, or model, the launch is refused, so a machine policy cannot silently redirect a subscription worker.
 
 **Next:** [follow a task visually](architecture/task-execution.md), [troubleshoot a blocker](troubleshooting.md), or [browse the documentation](index.md).

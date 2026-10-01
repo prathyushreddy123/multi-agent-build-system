@@ -20,7 +20,7 @@
  * Re-check these assumptions after an upgrade:
  *   node src/cli.ts operator probe
  * Turn the whole layer off without touching task data:
- *   /mabs-compact off
+ *   /mabs-display off
  */
 import {
   SettingsManager,

@@ -15,7 +15,7 @@ Select a file and inspect it in the Code surface while the agent keeps working. 
 | CLI | `node src/cli.ts dispatch 'mabs://open/PROJECT/TASK?path=...'` |
 | CLI | `node src/cli.ts viewer serve [--surface=code] [--viewer=vim]` |
 | CLI | `node src/cli.ts viewer status [--surface=code]` |
-| Pi | `/mabs-files`, `/mabs-changes`, `/mabs-open`, `/mabs-diff`, `/mabs-viewer` |
+| Pi | `/mabs-files`, `/mabs-changes`, `/mabs-open`, `/mabs-diff` (viewer ownership: `node src/cli.ts viewer status`) |
 
 `--view` sends the selection to the owned viewer. Without it the command prints the content and the link, which is what a headless or scripted caller wants.
 

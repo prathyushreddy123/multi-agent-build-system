@@ -13,6 +13,8 @@ MABS coordinates coding workers, runs your repository's checks, and keeps a reco
 - **Understand failures.** Inspect attempts, logs, review findings, and the reason a task is blocked.
 - **Continue after an interruption.** A restarted controller reconciles recorded workers rather than blindly starting them again.
 - **Coordinate multiple projects.** Bound concurrency by project and provider; keep paused projects without running workers.
+- **Choose how careful each project is.** `fast`, `standard`, or `verified` delivery sets the review rigor. Nothing runs until you choose; MABS never assumes it.
+- **Spend fewer tokens.** Workers run the project's checks through a dedicated tool, receive compact briefs, and resume their own session for repairs. Re-reviews check only the repair. Repeated identical failures stop instead of looping.
 - **Work in a terminal workspace.** Concise agent output, read-only code browsing bound to the right task worktree, live task progress, and the original evidence — see the [operator workspace](docs/operator/index.md).
 
 ## Is MABS for you?
@@ -50,8 +52,6 @@ You need **Node.js 24+**, **Git**, and an authenticated **Claude Code or Codex C
 ```bash
 git clone https://github.com/prathyushreddy123/multi-agent-build-system.git
 cd multi-agent-build-system
-# The extension features documented here are on this branch.
-git switch mabs-extension
 npm ci
 npm test
 npm run typecheck

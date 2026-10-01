@@ -21,9 +21,9 @@ flowchart TB
 | Stage | What matters |
 | --- | --- |
 | Submit | State the objective, acceptance criteria, allowed files, and dependency IDs. |
-| Become ready | Dependencies must be `DONE`; the project must be active. |
-| Run | Claim the task once, prepare its worktree, integrate dependency revisions, and launch the chosen route. |
-| Check | Validate the result format and edit scope. Bind checks to the resulting Git revision. |
+| Become ready | Dependencies must be `DONE`; the project must be active and its governance answered (type and delivery). A failed, cancelled, or stuck prerequisite blocks its dependents, with the reason, instead of leaving them silently `QUEUED`. |
+| Run | Claim the task once, prepare its worktree, integrate dependency revisions, and launch the chosen route. If the project requires independent review and no other provider could ever review it, the task blocks with `CONFIG` here, before any implementation is paid for. |
+| Check | Validate the result format and edit scope. Bind checks to the resulting Git revision. Checks run as detached jobs under their own concurrency cap (`--gate-limit`). |
 | Review | Use fresh review context and the resolved project policy. Required review cannot silently disappear when capacity is unavailable. |
 | Finish | Keep the result revision and evidence. `DONE` does not mean merged, released, or deployed. |
 
@@ -64,8 +64,22 @@ flowchart TB
 
 ## Where review fits
 
-Review depends on the resolved policy, task class, change risk, changed files, and any manual request. Fresh context is separate from the implementation conversation. The router prefers a different provider when requested by policy, but may use a fresh review context on the same provider when no second eligible provider is available.
+The project's **delivery mode** sets the review trigger:
 
-Blocking findings return work for a bounded repair. Advisory findings do not become blocking merely because they exist. A reviewer that changes the checked workspace triggers a contract failure.
+| Delivery | Review | Behavior |
+| --- | --- | --- |
+| `fast` | `off` | Checks only |
+| `standard` | `risk` | Review when the change risk, task class, or changed files call for it, or on a manual request |
+| `verified` | `required` | Independent review always; the task blocks rather than finishing unreviewed |
+
+A `client` project defaults to `required`. Review always runs in fresh context, separate from the implementation conversation. Whenever review runs (`standard` or `verified`), the reviewer must be on a **different provider** from the implementer, and MABS never substitutes a same-provider review. With no second eligible provider, `standard` waits (`Review pending:`) and `verified` blocks. Only an explicit custom review policy with `reviewerRoute: same_provider_fresh_context` reviews on the same provider, in a fresh session.
+
+**One right-sized reviewer per stage.** A small change (mechanical or small implementation, not high-risk, not highly complex) is reviewed at medium effort if the reviewer's route supports it. An explicit project review route is never overridden. After a repair, the re-review checks the open findings against the *repair delta* and looks for new defects in it, consulting the whole diff only where the delta touches it. If the reviewed context drifted, the full change is reviewed again.
+
+**Findings become obligations.** Each blocking finding or decision is stored as a durable obligation (`obligation list TASK_ID`), which repairs and re-reviews resolve by ID. A decision only a person can make waits for `obligation decide`, and resuming after it is a separate `task retry`. Blocking findings return work for a bounded repair. Advisory findings do not become blocking merely because they exist. A reviewer that changes the checked workspace triggers a contract failure.
+
+If review was blocked for lack of a reviewer, retrying the task resumes at review. It does not re-implement the finished, checked revision.
+
+`task scorecard TASK_ID` labels a not-required review as *not required* rather than as an approval, and reports quality coverage and usage.
 
 **Sources:** [Controller](../../src/controller/controller.ts) · [Worker completion](../../src/adapters/worker-process.ts) · [Quality coverage](../../src/gates/runner.ts) · [Review policy](../../src/review/policy.ts)

@@ -29,6 +29,12 @@ Run commands from the MABS checkout. This is a curated reference; `node src/cli.
 | `node src/cli.ts obligation list TASK_ID` | Durable findings and decisions with their lifecycle |
 | `node src/cli.ts improvements PROJECT` | Incidents, curator recommendations, experiments, and proposals |
 | `node src/cli.ts telemetry status` | Optional export state; disabled unless configured |
+| `node src/cli.ts plan list [--project=PROJECT_ID]` | Stored execution plans |
+| `node src/cli.ts incident list [--project=PROJECT_ID]`, `incident show INCIDENT_ID` | Recorded systemic incidents and their lifecycle |
+| `node src/cli.ts feedback list [--project=PROJECT_ID]` | Durable task and plan feedback |
+| `node src/cli.ts brief list`, `brief show BRIEF_ID` | Product briefs from conversational intake |
+| `node src/cli.ts ops runs PROJECT` | Recorded optional-operation attempts and recovery state |
+| `node src/cli.ts curator list [PROJECT]`, `curator history PROJECT` | Configuration proposals and version history |
 
 Inspection commands do not launch workers. Commands that open MABS records can initialize a new local database, but never migrate an existing one: a database behind this build's schema is refused with an instruction to run `maintenance migrate`. They are not a promise of zero filesystem writes.
 
@@ -41,8 +47,20 @@ Inspection commands do not launch workers. Commands that open MABS records can i
 | `node src/cli.ts controller run --workers=1 --ui` | Run the loop and workbench, using policy-based routing |
 | `node src/cli.ts controller run --adapter=codex --workers=1 --ui` | Prefer Codex through an explicit operator override |
 | `node src/cli.ts controller once` | Reconcile and dispatch one cycle; **not** a dry run |
+| `node src/cli.ts controller run --ui --port=4318` | Serve the workbench on another port |
+
+A second `controller run` or `controller once` refuses to start while a live controller holds the lease, and exits 0. `--force` overrides that check for recovery; the lease still allows only one controller to dispatch. `MABS_ADAPTER=claude|codex` sets the default for `--adapter`.
+
+| Command | Effect |
+| --- | --- |
 | `node src/cli.ts project status PROJECT paused` | Prevent new dispatch for this project; does not cancel existing workers |
 | `node src/cli.ts project status PROJECT active` | Allow the project to progress |
+| `node src/cli.ts project status PROJECT archived` | Archive a project |
+| `node src/cli.ts project base PROJECT BRANCH` | Change the target branch and invalidate open approvals |
+| `node src/cli.ts project preset PROJECT experiment\|personal\|client [--acknowledge-weakening]` | Apply a review preset; weakening review needs the acknowledgment flag |
+| `node src/cli.ts approval request TASK_ID ACTION TARGET --reason=...` | Request a revision-bound approval |
+| `node src/cli.ts approval approve\|reject APPROVAL_ID --by=NAME` | Decide an approval; approving does not execute anything |
+| `node src/cli.ts feedback add task\|plan ID KIND --body=... --version=N` | Record durable feedback; `feedback answer ID --response=...` answers it |
 | `node src/cli.ts task retry TASK_ID --version=N` | Retry a blocked/failed task using its latest record version; refused while a worker attempt is unresolved |
 | `node src/cli.ts task cancel TASK_ID --version=N` | Cancel the task and its worker process group |
 | `node src/cli.ts provider reset codex` | Clear recorded provider unavailability after fixing the cause |
@@ -50,8 +68,39 @@ Inspection commands do not launch workers. Commands that open MABS records can i
 | `node src/cli.ts obligation decide OBLIGATION_ID --answer=... --by=NAME` | Answer a blocking review decision; resuming is a separate `task retry` |
 | `node src/cli.ts incident import-history --dry-run` | Project systemic incidents from history; drop `--dry-run` to record them (idempotent) |
 | `node src/cli.ts incident verify INCIDENT_ID --cause=... --fix=REF --test=REF --by=NAME` | Mark a lesson verified; requires fix and test evidence |
+| `node src/cli.ts incident hypothesize INCIDENT_ID --text=... --confidence=low\|medium\|high --by=NAME` | Record a hypothesis about a cause |
+| `node src/cli.ts incident supersede INCIDENT_ID --reason=... --by=NAME` | Retire an incident in favor of a newer understanding |
 
-For submission, use the scoped example in [Getting started](getting-started.md#3-register-the-project-and-task). For retry/cancel decisions, use [Troubleshooting](troubleshooting.md#retry-or-cancel-deliberately).
+For submission, use the scoped example in [Getting started](getting-started.md#3-register-the-project-and-task).
+
+### Registration and submission flags
+
+`project add NAME REPO`:
+
+| Flag | Meaning |
+| --- | --- |
+| `--type=personal\|client\|other` | Required before dispatch; never defaulted |
+| `--delivery=fast\|standard\|verified` or `--review=off\|risk\|required` | Required before dispatch (a `client` project defaults to `required`); a conflicting pair is refused |
+| `--base=BRANCH` | Target branch; defaults to the repository's current branch |
+| `--goal=...` | Project goal recorded with the project |
+| `--no-checks` | Skip check discovery |
+| `--by=NAME` | Who made the governance decision (default `local-cli`) |
+
+`task add PROJECT TITLE --objective=...`:
+
+| Flag | Meaning |
+| --- | --- |
+| `--accept="A;B;C"` | Acceptance criteria, separated by `;` |
+| `--scope=a,b` | Allowed edit scope; edits outside it are a `CONTRACT` failure |
+| `--class=...` | `mechanical`, `small_implementation`, `complex_coding`, `diagnosis`, `planning`, `research`, `review`, `troubleshooting`, or `curation` |
+| `--complexity=`, `--ambiguity=`, `--risk=`, `--context-size=` | `low\|medium\|high`; high complexity, risk, or context escalates a small implementation to the complex-coding route |
+| `--depends=ID,ID` | Prerequisite task IDs; their results are integrated into this task's worktree |
+| `--tools=a,b` | Required tools; routes without them are rejected |
+| `--mode=single`, `--mode-reason=...` | Execution mode and why |
+| `--priority=N` | Dispatch priority (default 100) |
+| `--repair-limit=N` | Code-repair budget (default 2) |
+| `--language=`, `--domain=`, `--role=` | Recorded context; not used to claim provider expertise |
+ For retry/cancel decisions, use [Troubleshooting](troubleshooting.md#retry-or-cancel-deliberately).
 
 ### Concurrency controls
 
@@ -105,10 +154,11 @@ Use the [curator guide](curator.md) for configuration proposal, approval, activa
 | `node src/cli.ts maintenance policy` | Show retention defaults |
 | `node src/cli.ts maintenance backup` | Create a consistent SQLite copy of the database as it is, without migrating it; rotate old backups beyond the newest 14 |
 | `node src/cli.ts maintenance migrate` | With the controller stopped: take and verify a pre-migration backup, then upgrade the schema; prints the restore command |
-| `node src/cli.ts maintenance prune` | Preview eligible artifact deletion; dry-run by default |
-| `node src/cli.ts maintenance prune --apply` | **Delete** eligible artifact files after you have reviewed the preview |
+| `node src/cli.ts maintenance prune` | Preview eligible artifact **and task-worktree** deletion; dry-run by default |
+| `node src/cli.ts maintenance prune --only=artifacts\|worktrees` | Limit the preview (or `--apply`) to one kind |
+| `node src/cli.ts maintenance prune --apply` | **Delete** eligible artifact files and worktree directories after you have reviewed the preview |
 
-Database records are retained indefinitely. Attempt artifacts become eligible after 30 days for successful tasks or 90 days for failed/cancelled tasks. Active and blocked task artifacts are not eligible under this policy. A SQLite backup does not back up all artifact files or task worktrees.
+Database records are retained indefinitely. Attempt artifacts become eligible after 30 days for successful tasks or 90 days for failed/cancelled tasks. Task worktree directories follow the same 30/90-day ages. Active and blocked tasks are not eligible under this policy. A worktree is **refused**, and listed with the reason, if it has uncommitted changes; if it has no recorded result revision and its branch is not merged into the base branch; or if its project is no longer registered. Only the directory is removed: **branches are never deleted**, so every commit stays reachable, and the removal is recorded as a `worktree.pruned` event. A SQLite backup does not back up all artifact files or task worktrees.
 
 See [state locations and overrides](getting-started.md#where-things-live) and the [retention implementation](../src/maintenance/retention.ts).
 
@@ -126,19 +176,35 @@ These affect presentation only. None of them starts work, changes task state, or
 
 | Command | Effect |
 | --- | --- |
-| `/mabs-verbose on\|off` | Show original tool output instead of compact summaries; persists across sessions |
-| `/mabs-compact on\|off` | Enable or disable the operator presentation layer, then `/reload` |
+| `/mabs-display [status\|verbose\|compact\|on\|off]` | `verbose`/`compact`: original tool output or compact summaries. `on`/`off`: enable or disable the presentation layer, then `/reload`. Persists across sessions |
 | `/mabs-files [TASK]` | Browse every file in a task worktree |
 | `/mabs-changes [TASK]` | Changed files with their categories, renames, and deletions |
 | `/mabs-open TASK PATH --line=N` | Open a file in the Code surface |
 | `/mabs-diff TASK PATH` | Diff a file against the task's recorded base revision |
-| `/mabs-viewer` | Show whether a MABS viewer owns the Code surface |
 | `/mabs-progress` | Read-only task, attempt, and recorded-step view |
 | `/mabs-steps TASK` | Recorded implementation steps for one task |
 | `/mabs-logs TASK [--evidence=ID]` | List or open the original evidence for a task |
 | `/mabs-workspace [open\|status\|close]` | Create or recover the Agent, Code, Tasks, and Logs surfaces |
 
 Omitting the task opens a picker when more than one task is plausible; nothing is guessed.
+
+## Pi conversational and control commands
+
+The [Pi extension](../.pi/extensions/mabs.ts) also wraps the CLI. These **can** change records or start work, as their CLI equivalents do.
+
+| Command | Effect |
+| --- | --- |
+| `/mabs-new IDEA` | Start conversational intake: record a brief, ask material questions, propose a plan. Nothing is built until you accept |
+| `/mabs-assess IDEA` | Weigh an idea first (assumptions, prior art, cost of being wrong, cheapest disconfirming test). No verdict, and no brief is recorded |
+| `/mabs-product BRIEF`, `/mabs-brief ...`, `/mabs-bootstrap BRIEF TARGET` | `product show`, `brief ...`, `brief bootstrap` |
+| `/mabs-status` | `status` |
+| `/mabs-start [policy\|codex\|claude]` | Start a detached controller with the workbench, logging to `controller.log` in the checkout. Refuses if a controller is already live or wedged |
+| `/mabs-ui [PORT]` | Start the workbench (default 4317) and open it |
+| `/mabs-project`, `/mabs-task`, `/mabs-plan`, `/mabs-feedback`, `/mabs-approval`, `/mabs-provider`, `/mabs-ops` | The matching CLI command group, e.g. `/mabs-task list --state=BLOCKED` |
+| `/mabs-curate ...`, `/mabs-optimize ...` | `curator ...` and `optimization ...` |
+| `/mabs-backup` | `maintenance backup` |
+
+Model-facing tools the extension registers: `mabs_status`, `mabs_create_brief`, `mabs_update_brief`, `mabs_set_project_governance`, `mabs_ask_clarifications`, `mabs_answer_clarification`, `mabs_propose_plan`, `mabs_accept_plan`, `mabs_submit_plan`, `mabs_submit_task`, `mabs_bootstrap_project`, `mabs_get_product`, `mabs_get_operations`, and `mabs_prepare_operation`. Governance is never answered for you: the model must ask, and `mabs_accept_plan` binds your explicit acceptance to the exact proposal fingerprint.
 
 ### Code surface from the CLI
 
@@ -148,7 +214,7 @@ Read-only inspection of one task worktree. These do not start workers or change 
 | --- | --- |
 | `node src/cli.ts files [TASK] [--filter=src]` | Every file in the task worktree |
 | `node src/cli.ts changes [TASK] [--attempt=ID]` | Changed files, one entry per path, with categories |
-| `node src/cli.ts open TASK PATH [--line=N] [--view]` | One file, from the worktree or a recorded revision |
+| `node src/cli.ts open TASK PATH [--line=N] [--view] [--edit]` | One file, from the worktree or a recorded revision; `--edit` opens it in the viewer in edit mode instead of read-only |
 | `node src/cli.ts diff TASK PATH [--view]` | A diff against the task's recorded base revision |
 | `node src/cli.ts dispatch 'mabs://open/...'` | The same, from a link; other schemes are refused |
 | `node src/cli.ts viewer serve [--surface=code]` | Run the owned read-only viewer; Ctrl+C stops only the viewer |
@@ -185,6 +251,20 @@ Creates only missing surfaces and closes only what it owns. See [workspace autom
 | `node src/cli.ts workspace open [--project=PROJECT_ID] [--layout=tabs\|split] [--focus=code]` | Create or recover the four surfaces; safe to repeat |
 | `node src/cli.ts workspace status` | Which surfaces this feature still owns |
 | `node src/cli.ts workspace close` | Close only operator-owned panes; never the Agent pane, never a worker |
+| `node src/cli.ts workspace view --surface=tasks\|logs --workspace=ID` | One rail-free surface in its own tab. The popup launcher starts this; its scope arrives over the workspace's control file |
+
+### Herdr popup launcher
+
+A stock Herdr popup (default binding `prefix+m`) that opens Code in VS Code on the selected task's live worktree, and Tasks or Logs in separate reusable tabs. Activation is a manual operator step; see [Herdr popup setup](../plugins/herdr/README.md) and its [verification record](operator/popup-launcher-verification.md).
+
+| Command | Effect |
+| --- | --- |
+| `node src/cli.ts launcher` | Interactive selection screen (stable project and task IDs before any dispatch) |
+| `node src/cli.ts launcher --json` | The first selection screen as JSON, for non-interactive callers |
+| `node src/cli.ts launcher --action=code\|tasks\|logs --project=ID --task=ID [--attempt=ID] --dispatch` | Run one action directly |
+| `... --action=code --path=REL --line=N --column=N [--vscode=EXECUTABLE]` | Open a specific file and position; `MABS_VSCODE_EXECUTABLE` also sets the editor |
+
+Code never substitutes the project checkout or a snapshot when the live worktree is missing; it reports an error. Under WSL with a Windows-hosted VS Code, the launcher adds `--remote wsl+<distribution>`.
 
 ## Verification is not all the same
 

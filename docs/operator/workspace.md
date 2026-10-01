@@ -69,7 +69,7 @@ Workspace identity and preferences live in `~/.local/state/mabs/operator/prefere
 To roll the presentation layer back without touching task data:
 
 ```
-/mabs-compact off
+/mabs-display off
 /reload
 ```
 

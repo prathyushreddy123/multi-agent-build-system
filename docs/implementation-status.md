@@ -58,6 +58,39 @@ A Herdr and Pi workspace with Agent, Code, Tasks, and Logs surfaces, built on th
 
 The [release acceptance record](operator/release-acceptance.md) separates automated results, live results on the verification machine, and checks that remain unverified. The [progress note](operator/progress.md) is the resumable implementation record.
 
+## Operator popup launcher — 24 September 2026
+
+A stock Herdr popup that opens Code in VS Code on a task's live worktree, and Tasks or Logs in separate reusable tabs. See [Herdr popup setup](../plugins/herdr/README.md) and the [verification record](operator/popup-launcher-verification.md). Manual GUI acceptance has not been performed.
+
+## Reliability, efficiency, and adaptive execution — 26–28 September 2026
+
+Per-package implementation records, including what is implemented versus activated, are in the [plan](plans/mabs-reliability-efficiency-adaptive-execution.md). The current behavior is described in the guides linked below.
+
+| Package | Focus | Current guide |
+| --- | --- | --- |
+| Baseline, contracts, governance | Migration safety, durable schema, explicit project type and delivery | [Getting started](getting-started.md#3-register-the-project-and-task) |
+| Durable recovery | Detached check stages, start markers, PID identity | [Recovery](architecture/recovery-and-failures.md#controller-restart) |
+| T07 | Exact model/effort routes, capability registry, entitlement | [Routing](routing-policy-v1.md) |
+| T08–T09 | Complete-prompt budgets, continuation context, review obligations | [Task execution](architecture/task-execution.md#where-review-fits) |
+| T10–T11 | Live telemetry, shared admission scheduler | [System overview](architecture/system-overview.md#inside-the-controller) |
+| T12–T13 | Incident memory, bounded optimizer experiments | [Curator](curator.md#learn-from-recurring-incidents-first) |
+| T14–T15 | Operator views, optional export, upgrade rehearsal, soak | [Commands](commands.md) |
+
+## Efficiency v4 — 29 September 2026
+
+| Step | Change | Current guide |
+| --- | --- | --- |
+| 0 | Optimizer authorization epochs; managed Claude/Codex settings checks | [Getting started](getting-started.md#where-things-live) |
+| 1 | Workers run registered checks through `run_checks` | [System overview](architecture/system-overview.md#what-a-worker-can-do) |
+| 2 | Lean worker briefs | [System overview](architecture/system-overview.md#inside-the-controller) |
+| 3 | Repairs resume the implementer's session | [Recovery](architecture/recovery-and-failures.md#repair-after-a-failed-check-or-review) |
+| 4 | Review recovery without re-implementation; reviewer preflight | [Task execution](architecture/task-execution.md#where-review-fits) |
+| 5 | Right-sized review, delta re-review, delivery modes | [Task execution](architecture/task-execution.md#where-review-fits) |
+| 6 | Loop guard, zero-token attempt health, full usage scorecard | [Recovery](architecture/recovery-and-failures.md) |
+| 7 | Claude session-window limits classified as `QUOTA` | [Recovery](architecture/recovery-and-failures.md#provider-fallback-during-implementation) |
+
+Measured results are in the [Efficiency v4 benchmark](benchmarks/efficiency-v4.md).
+
 ## Reading evidence correctly
 
 - Paths under `~/.local/state/mabs` refer to the original verification machine. A fresh clone does not contain those private runtime artifacts.

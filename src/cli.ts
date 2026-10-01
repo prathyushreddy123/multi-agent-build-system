@@ -150,7 +150,8 @@ function printHelp(): void {
 
 EVERYDAY
   status                                    Queue, controller liveness, and health
-  controller run [--adapter=codex] [--ui]   Run the controller loop (refuses a second instance)
+  controller run [--adapter=codex] [--ui] [--port=4317] [--force]
+                                            Run the controller loop (refuses a second instance unless --force)
       [--model=...] [--effort=low|medium|high] [--capacity-fallback=allow|wait]
       [--workers=1] [--gate-limit=N] [--adaptive]   One model worker unless a pilot is approved
       [--export=file:/abs/path|https://collector]  Optional redacted telemetry export (off by default)
@@ -227,11 +228,14 @@ CODE AND EVIDENCE (read-only; closing a surface never stops a worker)
 
 MAINTENANCE
   maintenance policy                           Retention and backup defaults
-  maintenance backup                           Consistent SQLite backup
+  maintenance backup                           Consistent SQLite backup (never migrates the source)
+  maintenance migrate                          Controller stopped: verified backup, then schema upgrade
   maintenance prune [--only=artifacts|worktrees] [--apply]
                                                Preview or apply retention. Branches are never removed.
   provider list | provider reset <name>
   routing capabilities                         Versioned model/effort/quota-domain registry (local only)
+  routing verify-entitlement <claude|codex> <model>
+                                               One real provider call; records entitlement for that exact route
   routing explain <task>                       Recorded route decisions plus a dry, launch-free selection
   scheduler explain <task> [--workers=1] [--gate-limit=2]
                                                Why a task would or would not be admitted now (read-only)
@@ -257,7 +261,10 @@ OCCASIONAL — tuning and measurement
   optimization record <experiment> <baseline|candidate> <case> <measurement.json>
   optimization prepare-run <experiment> --dry-run   Trial manifest and budget; zero provider calls
   optimization authorize <experiment> --fingerprint=... --by=<person>
+  optimization start-trial <experiment> <variant> <case> [--repeat=N]
+                                                Create the next manifest slot's pinned trial task
   optimization record-trial <experiment> <variant> <case> <task> [--repeat=N]
+  optimization budget <experiment>              Elapsed time, usage, and attempts against the authorized budget
   optimization routing [project]
   ops status <project>                          Effective disabled/manual operational capabilities
   ops configure <project> --version=N --payload='{...}' --reason=... [--dry-run|--request-approval]

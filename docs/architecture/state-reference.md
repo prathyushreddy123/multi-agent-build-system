@@ -16,7 +16,7 @@ For the normal path, read [Task execution](task-execution.md) instead of tracing
 | `CHECKING` | Quality checks are being applied to a revision. |
 | `REVIEWING` | The revision is being independently reviewed. |
 | `AWAITING_APPROVAL` | Waiting for a decision at an approval boundary. |
-| `BLOCKED` | Cannot proceed; inspect the recorded reason. Some pending reviews resume automatically. |
+| `BLOCKED` | Cannot proceed; inspect the recorded reason. Reasons starting `Admission pending:`, `Review pending:`, or `Review recovery pending:` mark in-flight work that keeps its allocation and resumes by itself. |
 | `DONE` | This task's completion path finished. Not a merge or deployment. |
 | `FAILED` | The run failed, for example after exhausting its repair budget. |
 | `CANCELLED` | The task was cancelled. |

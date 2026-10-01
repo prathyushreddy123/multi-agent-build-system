@@ -15,7 +15,7 @@ flowchart TB
     C --> H["Record new configuration version"]
 ```
 
-**In words:** the curator uses observed evidence to suggest a configuration change. A proposal is a complete snapshot committed on an isolated local branch. Evaluation checks safety before approval is requested. An approved, still-current proposal can activate when the project has no task in `RUNNING`, `CHECKING`, or `REVIEWING`. Activation consumes the approval and records who changed what and why.
+**In words:** the curator uses observed evidence to suggest a configuration change. A proposal is a complete snapshot committed on an isolated local branch. Evaluation checks safety before approval is requested. An approved, still-current proposal can activate only at a safe checkpoint: no project task in `RUNNING`, `CHECKING`, or `REVIEWING`; none parked as `Admission pending:` or waiting for review; and no running attempt, active check stage, or admission lease. Revert waits for the same checkpoint. Activation consumes the approval and records who changed what and why.
 
 This is the successful path. Unsafe proposals, denied approval, changed bindings, or active tasks prevent activation. The diagram does not imply that every proposal will be approved.
 

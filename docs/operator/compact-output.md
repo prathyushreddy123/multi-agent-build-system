@@ -19,13 +19,15 @@ Failed: typecheck returned 3 errors in 0.9s    [expand for details]
 
 | Command | Effect |
 | --- | --- |
-| `/mabs-verbose` | Report the current setting |
-| `/mabs-verbose on` | Always show original output; also sets Pi's own expansion state |
-| `/mabs-verbose off` | Show compact summaries; expand a row for the original |
-| `/mabs-compact off` | Disable the whole presentation layer, then `/reload` |
-| `/mabs-compact on` | Re-enable it, then `/reload` |
+| `/mabs-display` or `/mabs-display status` | Report whether the layer is on and whether output is verbose or compact |
+| `/mabs-display verbose` | Always show original output; also sets Pi's own expansion state |
+| `/mabs-display compact` | Show compact summaries; expand a row for the original |
+| `/mabs-display off` | Disable the whole presentation layer, then `/reload` |
+| `/mabs-display on` | Re-enable it, then `/reload` |
 
-`ctrl+e` still toggles Pi's expansion, and the compact view honours it. The `/mabs-verbose` setting persists across sessions in `~/.local/state/mabs/operator/preferences.json`; nothing about it reaches the task store.
+`/mabs-display` replaced the earlier separate `/mabs-verbose` and `/mabs-compact` commands, which no longer exist.
+
+`ctrl+e` still toggles Pi's expansion, and the compact view honours it. Both settings persist across sessions in `~/.local/state/mabs/operator/preferences.json`; nothing about it reaches the task store.
 
 ## What a summary is allowed to say
 
@@ -74,7 +76,7 @@ Covered tools: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`, and all th
 ## Turning it off
 
 ```
-/mabs-compact off
+/mabs-display off
 /reload
 ```
 

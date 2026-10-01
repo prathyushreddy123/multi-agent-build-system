@@ -28,6 +28,20 @@ The target branch stays unchanged. Unknown fields, unsupported routes, unsafe co
 
 Alternatively, `curator suggest PROJECT --title="Describe the suggestion"` derives a candidate when existing evidence matches a supported rule. It may decline to propose anything; that is better than inventing an improvement.
 
+### Learn from recurring incidents first
+
+MABS turns systemic failures from attempts, checks, and controller stages into **incidents**. They are deterministic and keyed by source, so re-importing never duplicates them.
+
+```bash
+node src/cli.ts incident import-history --project=PROJECT_ID --dry-run   # preview; drop --dry-run to record
+node src/cli.ts incident list --project=PROJECT_ID
+node src/cli.ts curator recommend PROJECT
+```
+
+`curator recommend` lists each symptom that recurred at least twice, the mechanism that addresses its cause, and its evidence. It is **proposal-only**: it changes no configuration. Environment incidents are not turned into longer prompts.
+
+An incident's lesson starts as a hypothesis (`incident hypothesize`). It becomes *verified* only with a confirmed cause plus fix and test references (`incident verify`), and it reopens if the symptom recurs. Workers receive up to three relevant lessons, each labeled verified or hypothesis, so a guess is never presented as fact. Use `incident supersede` to retire one. `node src/cli.ts improvements PROJECT` shows incidents, recommendations, experiments, and proposals together.
+
 ## 2. Evaluate and inspect
 
 ```bash
@@ -69,7 +83,7 @@ node src/cli.ts curator activate PROPOSAL_ID APPROVAL_ID \
   --reason="Activation note" --by=PERSON
 ```
 
-Activation requires a current proposal, passing evaluation, and matching approval. The project must have no tasks in `RUNNING`, `CHECKING`, or `REVIEWING`. If those conditions changed, stop and resolve the mismatch rather than reusing stale approval.
+Activation requires a current proposal, passing evaluation, and matching approval. The project must have no tasks in `RUNNING`, `CHECKING`, or `REVIEWING`, and no in-flight work: nothing parked as `Admission pending:` or waiting for review, and no running attempt, active check stage, or admission lease. Revert waits for the same checkpoint. If those conditions changed, stop and resolve the mismatch rather than reusing stale approval.
 
 Successful activation consumes the approval and records a new active configuration with actor, reason, and history. See the [approval guide](architecture/approvals-and-config.md) for the full boundary.
 

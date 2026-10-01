@@ -21,10 +21,17 @@ node src/cli.ts task show "$TASK_ID"
 
 | Symptom | Check | Next step |
 | --- | --- | --- |
-| Task stays `QUEUED` | Project status and dependency states | Activate the intended project or resolve its dependencies. Failed/cancelled dependencies can block a task. |
-| Task stays `READY` | Worker/provider limits, overlapping scopes, machine pressure | Wait for capacity or deliberately adjust limits. More workers do not bypass provider limits. |
+| Task stays `QUEUED` or `READY` and nothing dispatches | `node src/cli.ts project readiness` | The project's governance is unanswered. Run the `project governance` command it prints; MABS never defaults the project type or review choice. |
+| Task stays `QUEUED` | Project status and dependency states | Activate the intended project or resolve its dependencies. A failed, cancelled, or stuck dependency blocks its dependents with a `Dependency …` reason. |
+| Task stays `READY` | `node src/cli.ts queue explain` and `scheduler explain TASK_ID` | Wait for capacity or deliberately adjust limits. More workers do not bypass provider limits. |
+| `BLOCKED` with `Admission pending:`, `Review pending:`, or `Review recovery pending:` | Nothing to fix | In-flight work waiting for capacity; it resumes by itself. Do not retry it. |
+| Ran on Claude although you passed `--adapter=codex` | `routing explain TASK_ID` shows `codex … entitlement is unknown` | Run `routing verify-entitlement codex gpt-5.6-sol` once. See [routing](routing-policy-v1.md#the-capability-registry-decides-what-may-launch). |
+| `CONFIG`: "Required independent review has no eligible provider" | Project delivery mode, `routing capabilities` | A `verified` project needs a second eligible provider. Verify its entitlement, or deliberately change the delivery mode; then retry. Nothing was launched. |
+| `BLOCKED`: "a third identical launch was not started" | The last two attempts' evidence | The same failure happened twice on the same route. Fix the cause, then `task retry`; an explicit retry always launches. |
+| `attempt.stalled` event | `task scorecard TASK_ID` health, the attempt's logs | No provider event for 10 minutes. MABS does not cancel it; decide whether to `task cancel`. |
 | `AUTH` or `QUOTA` | Provider status and login | Follow [provider recovery](#provider-recovery). Do not add API keys. |
-| `CONFIG` | Installed tools, selected model, declared checks | Fix the named configuration problem; repeating the same attempt will not fix an invalid model or missing tool. |
+| `CONFIG` | Installed tools, selected model, declared checks, managed provider settings | Fix the named configuration problem; repeating the same attempt will not fix an invalid model, a missing tool, a broken harness install, or a managed setting that redirects the provider. |
+| Command refuses: database is behind this build's schema | `node src/cli.ts maintenance migrate` | Stop the controller, then migrate. It backs up and verifies first, and prints the restore command. |
 | `CODE` or failed gates | Check logs and the checked revision | Fix the actual code/test issue. Repairs are bounded, not unlimited. |
 | Review pending | Review reason, provider availability | Under pending-capacity policy, the controller resumes review when capacity returns. Pending is not approved. |
 | `CONTRACT` | Result format, allowed edit scope, reviewer edits | Inspect the attempt and diff. Do not relabel malformed or out-of-scope output as success. |
@@ -57,7 +64,7 @@ VERSION=replace-with-current-record-version
 node src/cli.ts task retry "$TASK_ID" --version="$VERSION"
 ```
 
-CLI retry accepts `BLOCKED` or `FAILED` and moves the task to `READY`. It does not reset the recorded repair count. A running controller may dispatch it immediately. If state changed, read it again; do not keep guessing versions.
+CLI retry accepts `BLOCKED` or `FAILED` and moves the task to `READY`. It is refused while any worker attempt for the task is still unresolved. It does not reset the recorded repair count. If the task blocked on a review-only problem, the retry resumes at review rather than re-implementing. A running controller may dispatch it immediately. If state changed, read it again; do not keep guessing versions.
 
 To cancel instead, fetch the current version and run:
 

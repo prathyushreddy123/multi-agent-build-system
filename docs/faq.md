@@ -8,7 +8,9 @@ You can, and that is simpler for one informal task. MABS adds a durable queue, t
 
 ## Do I need both subscriptions?
 
-One authenticated supported subscription CLI can run model tasks. A second eligible provider makes cross-provider fallback and review possible. A review can use fresh context on the same provider when no second provider is eligible. Both providers are tested by `verify --quick`, so that combined check can fail on a one-provider installation.
+One authenticated supported subscription CLI can run model tasks. A second eligible provider makes cross-provider fallback and independent review possible. Every delivery mode that reviews uses an *independent* provider; MABS does not substitute a same-provider review. With only one eligible provider, a `standard` project's risk-triggered review waits as `Review pending:`, and a `verified` project blocks with `CONFIG` before implementing. `fast` never reviews, so it works with one provider. Same-provider review in a fresh context is possible only through an explicit custom review policy (`reviewerRoute: same_provider_fresh_context`, set through the [curator](curator.md)). Both providers are tested by `verify --quick`, so that combined check can fail on a one-provider installation.
+
+Codex counts as eligible only after `routing verify-entitlement codex gpt-5.6-sol` has recorded one successful probe. Until then, MABS treats a fresh install as Claude-only. See [routing](routing-policy-v1.md#the-capability-registry-decides-what-may-launch).
 
 ## Is it free to run?
 
