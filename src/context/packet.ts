@@ -98,6 +98,37 @@ function roleOf(value: string): WorkerRole {
   return value as WorkerRole;
 }
 
+/**
+ * The requirements a task's context carries. A task without recorded ownership
+ * (legacy) keeps broad coverage: every requirement. A task with ownership gets
+ * what it owns, every global invariant, and any mandatory requirement no task
+ * owns, so mandatory content is never dropped because another task exists.
+ */
+export function scopedRequirements<R extends { id: string; mandatory: boolean; global: boolean }>(
+  records: Records, projectId: string, taskId: string, requirements: R[],
+): R[] {
+  const ownership = records.requirementOwnership(taskId);
+  if (ownership === null) return requirements;
+  const mine = new Set(ownership.requirementIds);
+  const ownedByAnyone = records.ownedRequirementIds(projectId);
+  return requirements.filter((requirement) =>
+    mine.has(requirement.id) || requirement.global || (requirement.mandatory && !ownedByAnyone.has(requirement.id)));
+}
+
+/** A dependency's accepted outcome, and how much superseded history sits behind it. */
+export function acceptedDependencyEvidence(records: Records, task: Task): { outputPath: string | null; summary: string } {
+  const attempts = records.listAttempts(task.id).filter((attempt) => attempt.kind !== "review");
+  const accepted = (task.resultRevision ? attempts.findLast((attempt) => attempt.resultRevision === task.resultRevision) : undefined)
+    ?? attempts.findLast((attempt) => attempt.state === "succeeded");
+  const superseded = attempts.filter((attempt) => attempt !== accepted).length;
+  const revision = task.resultRevision ? ` at ${task.resultRevision.slice(0, 12)}` : "";
+  const history = superseded > 0 ? ` (${superseded} earlier attempt(s) superseded; task show ${task.id})` : "";
+  return {
+    outputPath: accepted?.outputPath ?? null,
+    summary: `${task.id} ${task.state}${revision}: ${task.resultSummary ?? "no recorded summary"}${history}`,
+  };
+}
+
 /** Build a deterministic, project-owned handoff rather than relying on provider chat history. */
 export function buildContextPacket(input: {
   records: Records;
@@ -115,7 +146,8 @@ export function buildContextPacket(input: {
   operationalFailure?: string | null;
 }): ContextPacket {
   const packetId = ids.packet();
-  const requirements = input.records.listRequirements(input.project.id);
+  const allRequirements = input.records.listRequirements(input.project.id);
+  const requirements = scopedRequirements(input.records, input.project.id, input.task.id, allRequirements);
   const dependencyTasks = input.records.dependenciesOf(input.task.id)
     .map((id) => input.records.getTask(id))
     .filter((task): task is Task => task !== null);
@@ -125,10 +157,11 @@ export function buildContextPacket(input: {
     : input.task.role === "researcher"
       ? input.project.promptProfile.researchAddendum
       : input.project.promptProfile.implementationAddendum;
+  // A dependency contributes the attempt behind its accepted revision. Earlier
+  // attempts are superseded history: counted and retrievable, never presented as current.
+  const dependencyEvidence = dependencyTasks.map((task) => acceptedDependencyEvidence(input.records, task));
   const artifacts = [
-    ...dependencyTasks.flatMap((task) =>
-      input.records.listAttempts(task.id).map((attempt) => attempt.outputPath).filter((path): path is string => path !== null),
-    ),
+    ...dependencyEvidence.flatMap((evidence) => evidence.outputPath ? [evidence.outputPath] : []),
     ...(input.additionalArtifacts ?? []),
   ];
   const checkpoint = progressCheckpoint(input.records.checkpointsForTask(input.task.id));
@@ -160,7 +193,7 @@ export function buildContextPacket(input: {
   for (const finding of [
     ...decisions,
     ...(input.previousFindings ?? []),
-    ...dependencyTasks.map((task) => `${task.id}: ${task.resultSummary ?? `state=${task.state}`}`),
+    ...dependencyEvidence.map((evidence) => evidence.summary),
     ...(checkpoint ? checkpoint.findings : []),
   ]) {
     const key = normalizedText(finding);
@@ -169,7 +202,7 @@ export function buildContextPacket(input: {
     previousFindings.push(finding);
   }
   const warnings: string[] = [];
-  if (requirements.filter((requirement) => requirement.mandatory).length === 0) {
+  if (allRequirements.filter((requirement) => requirement.mandatory).length === 0) {
     warnings.push("Project has no mandatory requirements with stable IDs.");
   }
   const checkpointContext = checkpoint ? {

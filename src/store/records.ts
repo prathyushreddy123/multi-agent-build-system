@@ -1150,22 +1150,33 @@ export class Records {
 
   // --- requirements -------------------------------------------------------
 
-  addRequirement(projectId: string, id: string, text: string, mandatory = true): void {
+  /** `global` marks an invariant every task carries; omitted keeps a legacy, unclassified requirement. */
+  addRequirement(projectId: string, id: string, text: string, mandatory = true, global?: boolean): void {
     this.store.run(
-      "INSERT INTO requirements(id, project_id, text, mandatory, created_at) VALUES(?,?,?,?,?) " +
-        "ON CONFLICT(project_id, id) DO UPDATE SET text = excluded.text, mandatory = excluded.mandatory",
+      "INSERT INTO requirements(id, project_id, text, mandatory, scope, created_at) VALUES(?,?,?,?,?,?) " +
+        "ON CONFLICT(project_id, id) DO UPDATE SET text = excluded.text, mandatory = excluded.mandatory, scope = excluded.scope",
       id,
       projectId,
       text,
       mandatory ? 1 : 0,
+      global === undefined ? null : global ? "global" : "task",
       nowIso(),
     );
   }
 
-  listRequirements(projectId: string): { id: string; text: string; mandatory: boolean }[] {
+  listRequirements(projectId: string): { id: string; text: string; mandatory: boolean; global: boolean }[] {
     return this.store
-      .all("SELECT id, text, mandatory FROM requirements WHERE project_id = ? ORDER BY id", projectId)
-      .map((row) => ({ id: row.id as string, text: row.text as string, mandatory: Number(row.mandatory) === 1 }));
+      .all("SELECT id, text, mandatory, scope FROM requirements WHERE project_id = ? ORDER BY id", projectId)
+      .map((row) => ({ id: row.id as string, text: row.text as string, mandatory: Number(row.mandatory) === 1, global: row.scope === "global" }));
+  }
+
+  /** Requirement IDs owned by any task in the project under the current mapping version. */
+  ownedRequirementIds(projectId: string): Set<string> {
+    return new Set(this.store.all(
+      `SELECT DISTINCT o.requirement_id FROM task_requirement_ownership o JOIN tasks t ON t.id = o.task_id
+       WHERE t.project_id = ? AND o.mapping_version = ?`,
+      projectId, REQUIREMENT_OWNERSHIP_VERSION,
+    ).map((row) => String(row.requirement_id)));
   }
 
   // --- governance --------------------------------------------------------
@@ -2610,7 +2621,9 @@ export class Records {
       configVersion: project.configVersion,
       reviewPolicy: normalizeReviewPolicy(project.reviewPolicy),
       checkCommands: project.checkCommands.map((spec) => [spec.name, spec.command.join(" "), spec.required]),
-      requirements: this.listRequirements(project.id).map((requirement) => [requirement.id, requirement.text, requirement.mandatory]),
+      // The global marker is appended only when set, so earlier fingerprints are unchanged.
+      requirements: this.listRequirements(project.id).map((requirement) =>
+        [requirement.id, requirement.text, requirement.mandatory, ...(requirement.global ? ["global"] : [])]),
       dependencies: this.dependenciesOf(taskId).map((id) => [id, this.getTask(id)?.resultRevision ?? null]),
       acceptanceCriteria: task.acceptanceCriteria,
     };

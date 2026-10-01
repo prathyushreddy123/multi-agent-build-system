@@ -24,7 +24,7 @@ test("project, task, transition, and event state are stored together", (t) => {
 
   assert.equal(task.state, "QUEUED");
   assert.deepEqual(db.listRequirements(project.id), [
-    { id: "REQ-1", text: "The result must be durable.", mandatory: true },
+    { id: "REQ-1", text: "The result must be durable.", mandatory: true, global: false },
   ]);
 
   const ready = db.transition(task.id, "READY");

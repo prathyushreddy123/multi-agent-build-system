@@ -45,7 +45,8 @@ export interface ProposalInput {
   rationale: string;
   scope: string;
   outOfScope?: string[];
-  requirements: { id: string; text: string; mandatory?: boolean }[];
+  /** `global` marks an invariant every task's context carries, whichever task owns what. */
+  requirements: { id: string; text: string; mandatory?: boolean; global?: boolean }[];
   milestones?: string[];
   plan: ExecutionPlan;
 }
@@ -376,6 +377,7 @@ export function proposePlan(records: Records, input: ProposalInput & { brief: st
     id: requirement.id,
     text: requirement.text,
     mandatory: requirement.mandatory ?? true,
+    ...(requirement.global === true ? { global: true } : {}),
   }));
   if (requirements.length === 0) errors.push("The proposal needs at least one requirement with a stable ID.");
   for (const requirement of requirements) {
@@ -555,7 +557,8 @@ export function submitAcceptedPlan(records: Records, input: {
   return records.store.tx(() => {
     if (brief.projectId !== project.id) linkBriefProject(records, brief.id, project.id);
     for (const requirement of proposal.requirements) {
-      records.addRequirement(project.id, requirement.id, requirement.text, requirement.mandatory);
+      records.addRequirement(project.id, requirement.id, requirement.text, requirement.mandatory,
+        (requirement as { global?: boolean }).global === true ? true : undefined);
     }
     const tasks = applyExecutionPlan(records, project.id, proposal.plan);
     const planId = records.listExecutionPlans(project.id).at(-1)?.id ?? null;

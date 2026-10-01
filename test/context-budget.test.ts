@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import type { AdapterHandle, AdapterLaunch, CollectedResult, WorkerAdapter } from "../src/adapters/types.ts";
-import { ContextBudgetExceededError, buildContextPacket, type PacketPurpose } from "../src/context/packet.ts";
+import { ContextBudgetExceededError, acceptedDependencyEvidence, buildContextPacket, type PacketPurpose } from "../src/context/packet.ts";
 import { relevantExcerpt } from "../src/context/retrieval.ts";
 import { Controller } from "../src/controller/controller.ts";
 import { validateWorkerOutput } from "../src/domain/contract.ts";
@@ -306,4 +306,53 @@ test("CTX-LEAN: the worker brief states the worktree root once and omits empty, 
   // The stored packet keeps the complete input and the absolute manifest.
   assert.deepEqual(packet.input.context.previous_findings, []);
   assert.ok((records.packetsForTask(task.id).at(-1)?.files as string[]).every((path) => path.startsWith(repo)));
+});
+
+// --- Efficiency v5 CTX-02: scoped requirements and dependency evidence -------
+
+function ownershipProject(records: Records, project: Project) {
+  records.addRequirement(project.id, "REQ-A", "Task A behaviour.", true);
+  records.addRequirement(project.id, "REQ-B", "Task B behaviour.", true);
+  records.addRequirement(project.id, "REQ-G", "Runs offline; no network.", true, true);
+  records.addRequirement(project.id, "REQ-U", "Mandatory, owned by nobody.", true);
+  records.addRequirement(project.id, "REQ-O", "Optional nicety.", false);
+}
+
+test("v5 CTX-02: a task with ownership carries its own, global, and unowned mandatory requirements only", (t) => {
+  const { repo, records, project } = setup(t);
+  ownershipProject(records, project);
+  const make = (title: string, owned?: string[]) => records.createTask({
+    projectId: project.id, title, objective: title, acceptanceCriteria: ["works"], ...(owned ? { ownedRequirements: owned } : {}),
+  });
+  const a = make("A", ["REQ-A"]);
+  make("B", ["REQ-B"]);
+  const legacy = make("legacy");
+  const ids = (task: Task) => packetFor(records, project, task, repo, "implementation").input.context.requirements.map((item) => item.id).sort();
+  assert.deepEqual(ids(a), ["REQ-A", "REQ-G", "REQ-U"], "another task's requirement and unowned optional ones are left out");
+  assert.deepEqual(ids(legacy), ["REQ-A", "REQ-B", "REQ-G", "REQ-O", "REQ-U"], "legacy tasks keep broad coverage");
+});
+
+test("v5 CTX-02: dependency context names the accepted attempt and labels superseded ones", () => {
+  const attempts = [
+    { id: "att_1", kind: "initial", state: "failed", resultRevision: null, outputPath: "/e/att_1/worker.log" },
+    { id: "att_2", kind: "repair", state: "succeeded", resultRevision: "aaaaaaaaaaaaaaaa", outputPath: "/e/att_2/worker.log" },
+    { id: "att_3", kind: "review", state: "succeeded", resultRevision: null, outputPath: "/e/att_3/worker.log" },
+  ];
+  const records = { listAttempts: () => attempts } as unknown as Records;
+  const task = { id: "tsk_dep", state: "DONE", resultRevision: "aaaaaaaaaaaaaaaa", resultSummary: "Store layer done." } as Task;
+  const evidence = acceptedDependencyEvidence(records, task);
+  assert.equal(evidence.outputPath, "/e/att_2/worker.log", "only the accepted attempt's output is offered");
+  assert.equal(evidence.summary, "tsk_dep DONE at aaaaaaaaaaaa: Store layer done. (1 earlier attempt(s) superseded; task show tsk_dep)");
+  const single = acceptedDependencyEvidence({ listAttempts: () => [attempts[1]] } as unknown as Records, task);
+  assert.doesNotMatch(single.summary, /superseded/);
+});
+
+test("v5 CTX-02: marking a requirement global changes the review context fingerprint; unmarked ones keep it", (t) => {
+  const { records, project, task } = setup(t);
+  records.addRequirement(project.id, "REQ-X", "Something.", true);
+  const before = records.reviewContextFingerprint(task.id);
+  records.addRequirement(project.id, "REQ-X", "Something.", true, false);
+  assert.equal(records.reviewContextFingerprint(task.id), before, "a task-scoped marker does not disturb existing evidence");
+  records.addRequirement(project.id, "REQ-X", "Something.", true, true);
+  assert.notEqual(records.reviewContextFingerprint(task.id), before, "a scope change invalidates review context bound to the old one");
 });

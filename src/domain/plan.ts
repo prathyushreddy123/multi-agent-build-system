@@ -236,7 +236,7 @@ export function fragmentationWarnings(plan: ExecutionPlan, dependencies: Map<str
  * leave no mandatory requirement without an owner. A plan that declares none
  * keeps legacy broad coverage.
  */
-export function requirementOwnershipErrors(plan: ExecutionPlan, requirements: { id: string; mandatory?: boolean }[]): string[] {
+export function requirementOwnershipErrors(plan: ExecutionPlan, requirements: { id: string; mandatory?: boolean; global?: boolean }[]): string[] {
   const declaring = (plan.tasks ?? []).filter((task) => Array.isArray(task.requirements));
   if (declaring.length === 0) return [];
   const known = new Set(requirements.map((requirement) => requirement.id));
@@ -246,9 +246,9 @@ export function requirementOwnershipErrors(plan: ExecutionPlan, requirements: { 
     if (unknown.length > 0) errors.push(`${task.key}: owns unknown requirement(s) ${unknown.join(", ")}.`);
   }
   const owned = new Set(declaring.flatMap((task) => task.requirements ?? []));
-  const orphaned = requirements.filter((requirement) => requirement.mandatory !== false && !owned.has(requirement.id)).map((item) => item.id);
+  const orphaned = requirements.filter((requirement) => requirement.mandatory !== false && requirement.global !== true && !owned.has(requirement.id)).map((item) => item.id);
   if (orphaned.length > 0) {
-    errors.push(`Mandatory requirement(s) ${orphaned.join(", ")} have no owning task; assign each to a task, or declare no ownership for broad coverage.`);
+    errors.push(`Mandatory requirement(s) ${orphaned.join(", ")} have no owning task; assign each to a task, mark it global, or declare no ownership for broad coverage.`);
   }
   return errors;
 }

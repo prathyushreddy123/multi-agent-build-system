@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "21";
+export const SCHEMA_VERSION = "22";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -160,6 +160,12 @@ const MIGRATIONS: Migration[] = [
     version: 21,
     file: "migrations/021_standing_preferences.sql",
     columns: {},
+    indexes: [],
+  },
+  {
+    version: 22,
+    file: "migrations/022_requirement_scope.sql",
+    columns: { requirements: { scope: "TEXT CHECK(scope IS NULL OR scope IN ('task', 'global'))" } },
     indexes: [],
   },
 ];

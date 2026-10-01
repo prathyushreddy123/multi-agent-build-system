@@ -780,3 +780,14 @@ test("GOV-01: project add applies the preference only when no review choice is g
   assert.equal(shown.delivery.mode, "fast");
   assert.equal(shown.history.length, 1);
 });
+
+test("v5 CTX-02: a global requirement needs no owner, and submission records its scope", (t) => {
+  const { records } = setup(t);
+  const brief = personalBrief(records, "global-req");
+  const proposed = proposePlan(records, {
+    brief: brief.id, summary: "s", rationale: "r", scope: "s",
+    requirements: [{ id: "REQ-1", text: "Core." }, { id: "REQ-OFF", text: "Works offline.", global: true }],
+    plan: { objective: "o", mode: "single", reason: "r", tasks: [step("all", { executionMode: "single", requirements: ["REQ-1"] })] },
+  });
+  assert.equal(proposed.valid, true, proposed.errors.join("; "));
+});

@@ -709,6 +709,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
         id: Type.String({ description: "Stable ID such as REQ-1" }),
         text: Type.String(),
         mandatory: Type.Optional(Type.Boolean()),
+        global: Type.Optional(Type.Boolean({ description: "An invariant every task must respect (e.g. runs offline); carried in every task's context" })),
       }), { minItems: 1 }),
       milestones: Type.Optional(Type.Array(Type.String())),
       plan: Type.Object({
