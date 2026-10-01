@@ -11,7 +11,8 @@ import test, { type TestContext } from "node:test";
 
 import { IntakeError } from "../src/intake/errors.ts";
 import type { ExecutionPlan } from "../src/domain/plan.ts";
-import { acceptPlan, answerClarification, askClarifications, proposePlan, resolveIntake } from "../src/intake/service.ts";
+import { acceptPlan, answerClarification, askClarifications, productSummary, proposePlan, resolveIntake } from "../src/intake/service.ts";
+import { askView, briefSection, productView, proposeView, resolveView } from "../src/intake/projection.ts";
 import { startAcceptedWork, type StartAcceptedWorkInput } from "../src/intake/start.ts";
 import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification, listBootstrapRuns } from "../src/intake/store.ts";
 import { Records } from "../src/store/records.ts";
@@ -490,4 +491,104 @@ test("INT-04: the CLI start command reports a completed start", (t) => {
   );
   assert.equal(started.status, "completed");
   assert.equal(started.tasks.length, 1);
+});
+
+// --- OUT-01 ------------------------------------------------------------------
+
+const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/** A brief with a long history: many open questions and a many-task proposal. */
+function longHistory(records: Records, questions: number, tasks: number) {
+  const brief = personalBrief(records, `history-${questions}-${tasks}`);
+  askClarifications(records, {
+    brief: brief.id,
+    questions: Array.from({ length: questions }, (_, i) => ({
+      question: `Material question ${i} about the scope and behaviour of the product?`,
+      whyItMatters: `Answer ${i} changes the architecture.`, field: `f${i}`,
+    })),
+  });
+  const plan: ExecutionPlan = {
+    objective: "Many parts.", mode: "sequential", reason: "Ordered parts.",
+    tasks: Array.from({ length: tasks }, (_, i) => ({
+      key: `t${i}`, title: `Part ${i}`, objective: `Implement part ${i} with its tests.`,
+      acceptanceCriteria: [`Part ${i} works`], executionMode: "sequential" as const, executionReason: "Ordered.",
+      allowedScope: [`src/p${i}`], ...(i > 0 ? { dependsOn: [`t${i - 1}`] } : {}),
+    })),
+  };
+  const proposed = proposePlan(records, {
+    brief: brief.id, summary: "Many parts.", rationale: "r", scope: "s",
+    requirements: [{ id: "REQ-1", text: "Every part works." }], plan,
+  });
+  return { brief: getBrief(records, brief.id)!, proposed };
+}
+
+test("OUT-01: conversation views stay bounded as history grows and keep every decision field", (t) => {
+  const { records } = setup(t);
+  const sizes = (questions: number, tasks: number) => {
+    const { brief, proposed } = longHistory(records, questions, tasks);
+    const asked = askClarifications(records, { brief: brief.id, questions: [{ question: "One more?", whyItMatters: "Scope." }] });
+    const resolved = resolveIntake(records, {
+      brief: brief.id, expectedVersion: asked.briefVersion, requestId: `r-${questions}`,
+      resolutions: [{ clarificationId: asked.requested[0]!.id, answer: "Yes." }],
+    });
+    const views = {
+      ask: askView(asked), resolve: resolveView(resolved), propose: proposeView(proposed),
+      product: productView(productSummary(records, brief.id)),
+    };
+    // Required identifiers survive projection.
+    assert.equal(views.ask.requested[0]?.id, asked.requested[0]?.id);
+    assert.equal(views.propose.proposal?.fingerprint, proposed.proposal?.fingerprint);
+    assert.equal(views.propose.proposal?.id, proposed.proposal?.id);
+    assert.equal(views.product.proposal?.fingerprint, proposed.proposal?.fingerprint);
+    assert.equal(views.resolve.resolved[0]?.id, asked.requested[0]?.id);
+    // Omissions are disclosed with the command that reads them.
+    assert.equal(views.ask.otherOpenQuestions.total, questions);
+    assert.equal(views.ask.otherOpenQuestions.omitted, Math.max(0, questions - 10));
+    if (questions > 10) assert.match(views.ask.otherOpenQuestions.more ?? "", /--section=open-questions --page=2$/);
+    assert.equal(views.propose.proposal?.tasks.total, tasks);
+    return Object.fromEntries(Object.entries(views).map(([key, view]) => [key, bytes(view)])) as Record<keyof typeof views, number>;
+  };
+  const small = sizes(20, 5);
+  const large = sizes(200, 50);
+  for (const key of ["ask", "resolve", "propose", "product"] as const) {
+    // Ceilings come from measured views (about 1.5-3 KB); they guard against unbounded growth, not quality.
+    assert.ok(large[key] < 4096, `${key} view is ${large[key]} bytes with a long history`);
+    assert.ok(large[key] < small[key] * 2, `${key} view grew from ${small[key]} to ${large[key]} bytes`);
+  }
+});
+
+test("OUT-01: omitted items are retrievable page by page, and the full JSON is unchanged", (t) => {
+  const { records } = setup(t);
+  const { brief, proposed } = longHistory(records, 25, 3);
+  const pages = [1, 2, 3].map((index) => briefSection(records, brief.id, "open-questions", index));
+  assert.deepEqual(pages.map((entry) => entry.shown.length), [10, 10, 5]);
+  assert.equal(pages[2]?.more, null);
+  const ids = pages.flatMap((entry) => (entry.shown as { id: string }[]).map((item) => item.id));
+  assert.equal(new Set(ids).size, 25, "every open question appears exactly once across pages");
+  assert.ok(proposed.proposal?.plan.tasks.length === 3, "the service result still carries the whole plan");
+  assert.throws(() => briefSection(records, brief.id, "bogus" as never, 1), /Unknown section/);
+});
+
+test("OUT-01: the CLI prints the full record by default and the bounded view on request", (t) => {
+  const { root } = setup(t);
+  const dbPath = join(root, "cli.sqlite");
+  const seeded = new Records(new Store(dbPath));
+  const { brief, proposal } = acceptedForStart(seeded, "cli-view");
+  seeded.store.close();
+  const { run, json } = cliFor(root);
+  const full = json<{ brief: { id: string }; work: unknown }>("product", "show", brief.id);
+  assert.ok(full.brief.id && "work" in full);
+  const viewOut = run("product", "show", brief.id, "--view=conversation");
+  assert.equal(viewOut.status, 0);
+  assert.equal(viewOut.stdout.trim().split("\n").length, 1, "the conversation view is compact JSON");
+  const view = JSON.parse(viewOut.stdout) as { brief: { id: string }; proposal: { fingerprint: string } };
+  assert.equal(view.brief.id, brief.id);
+  assert.equal(view.proposal.fingerprint, proposal.fingerprint);
+  const started = json<{ tasks: { shown: { id: string }[]; total: number } }>(
+    "brief", "start", brief.id, proposal.id, `--fingerprint=${proposal.fingerprint}`, "--request=view-start",
+    `--target=${join(root, "view-product")}`, "--profile=python", "--view=conversation", "--by=prathyush",
+  );
+  assert.equal(started.tasks.total, 1);
+  assert.ok(started.tasks.shown[0]?.id);
+  assert.equal(run("product", "show", brief.id, "--view=bogus").status, 1);
 });

@@ -388,8 +388,12 @@ export function proposePlan(records: Records, input: ProposalInput & { brief: st
   const openQuestions = listClarifications(records, brief.id, "open");
   const warnings = [...validation.warnings];
   if (openQuestions.length > 0) {
+    // Name a few; the rest are listed, with ids, by `brief show <brief> --section=open-questions`.
+    const named = openQuestions.slice(0, 5).map((item) => `${item.question} (${item.id})`);
+    const more = openQuestions.length - named.length;
     warnings.push(
-      `${openQuestions.length} material question(s) are still unanswered: ${openQuestions.map((item) => item.question).join(" | ")}. ` +
+      `${openQuestions.length} material question(s) are still unanswered: ${named.join(" | ")}` +
+      `${more > 0 ? ` | and ${more} more (brief show ${brief.id} --section=open-questions)` : ""}. ` +
       "Answer them, or record an explicit assumption, before this plan is executed.",
     );
   }

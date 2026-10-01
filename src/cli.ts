@@ -55,6 +55,9 @@ import {
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
 import { startAcceptedWork } from "./intake/start.ts";
+import {
+  acceptView, askView, briefSection, productView, proposeView, resolveView, startView, type BriefSection,
+} from "./intake/projection.ts";
 import { briefGovernance, createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
 import {
   DEFAULT_SKIP_TASK_CLASSES,
@@ -290,6 +293,19 @@ DIAGNOSTIC — when something is wrong or unproven
 
 function resolveProject(records: ReturnType<typeof openRecords>, value: string) {
   return records.getProject(value) ?? records.findProjectByName(value);
+}
+
+/**
+ * Print a result as full JSON (the default), or as its conversation view when
+ * `--view=conversation` asks for the bounded projection the Pi tools use.
+ */
+function emitView<T>(args: ReturnType<typeof parseArgs>, value: T, view: (value: T) => unknown, wrap?: Record<string, unknown> & { key: string }): void {
+  const mode = textOption(args, "view", "full");
+  if (mode !== "full" && mode !== "conversation") throw new Error("--view must be full or conversation.");
+  const body = mode === "conversation" ? view(value) : value;
+  const { key, ...pending } = wrap ?? { key: "" };
+  const output = wrap ? { ...pending, [key]: body } : body;
+  console.log(mode === "conversation" ? JSON.stringify(output) : JSON.stringify(output, null, 2));
 }
 
 async function waitForSignal(stop: () => Promise<void> | void): Promise<void> {
@@ -874,7 +890,7 @@ async function main(): Promise<void> {
       if (area === "product") {
         const value = args.positionals[0];
         if (!value) throw new Error("Usage: mabs product show <brief>");
-        console.log(JSON.stringify(productSummary(records, value), null, 2));
+        emitView(args, productSummary(records, value), productView);
         return;
       }
       if (action === "create") {
@@ -891,7 +907,13 @@ async function main(): Promise<void> {
       }
       if (action === "show") {
         const value = args.positionals[0];
-        if (!value) throw new Error("Usage: mabs brief show <brief>");
+        if (!value) throw new Error("Usage: mabs brief show <brief> [--section=open-questions|proposal-tasks|tasks|outputs|assumptions --page=N]");
+        const section = textOption(args, "section");
+        if (section) {
+          const size = textOption(args, "page-size");
+          console.log(JSON.stringify(briefSection(records, value, section as BriefSection, Number(textOption(args, "page", "1")), size ? Number(size) : undefined), null, 2));
+          return;
+        }
         console.log(JSON.stringify(briefDetail(records, value), null, 2));
         return;
       }
@@ -913,9 +935,9 @@ async function main(): Promise<void> {
       if (action === "ask") {
         const value = args.positionals[0];
         if (!value) throw new Error("Usage: mabs brief ask <brief> --payload='{\"questions\":[...]}'");
-        console.log(JSON.stringify(askClarifications(records, {
+        emitView(args, askClarifications(records, {
           brief: value, questions: (payload.questions ?? []) as never, actor,
-        }), null, 2));
+        }), askView);
         return;
       }
       if (action === "answer") {
@@ -942,7 +964,7 @@ async function main(): Promise<void> {
         });
         const brief = resolveBrief(records, result.briefId);
         const pending = brief ? governanceNeedsInput({ kind: "brief", id: brief.id }, briefGovernance(brief)) : null;
-        console.log(JSON.stringify(pending ? { ...pending, resolution: result } : result, null, 2));
+        emitView(args, result, resolveView, pending ? { ...pending, key: "resolution" } : undefined);
         return;
       }
       if (action === "start") {
@@ -966,7 +988,7 @@ async function main(): Promise<void> {
           runtime: textOption(args, "runtime"),
           projectName: textOption(args, "name"),
         });
-        console.log(JSON.stringify(result, null, 2));
+        emitView(args, result, startView);
         if (result.status !== "completed") process.exitCode = 1;
         return;
       }
@@ -977,7 +999,7 @@ async function main(): Promise<void> {
           brief: value, actor, ...(payload as Record<string, never>),
         } as Parameters<typeof proposePlan>[1]);
         const pending = governanceNeedsInput({ kind: "brief", id: result.brief.id }, briefGovernance(result.brief));
-        console.log(JSON.stringify(pending ? { ...pending, proposal: result } : result, null, 2));
+        emitView(args, result, proposeView, pending ? { ...pending, key: "proposal" } : undefined);
         if (!result.valid) process.exitCode = 1;
         return;
       }
@@ -988,9 +1010,9 @@ async function main(): Promise<void> {
         if (!value || !proposalId || !fingerprint || !acceptedBy) {
           throw new Error("Usage: mabs brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]");
         }
-        console.log(JSON.stringify(acceptPlan(records, {
+        emitView(args, acceptPlan(records, {
           brief: value, proposalId, fingerprint, acceptedBy, note: textOption(args, "note"),
-        }), null, 2));
+        }), acceptView);
         return;
       }
       if (action === "submit") {

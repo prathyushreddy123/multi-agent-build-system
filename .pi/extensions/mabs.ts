@@ -19,9 +19,15 @@ function words(value: string): string[] {
   }) ?? [];
 }
 
+/**
+ * Last-resort guard for tools without a bounded conversation view. Intake and
+ * product tools request `--view=conversation`, which pages long lists instead
+ * of being cut here; anything that still exceeds the limit says so plainly.
+ */
 function compact(text: string): string {
   if (text.length <= MAX_OUTPUT) return text;
-  return `${text.slice(0, MAX_OUTPUT)}\n[truncated; use the MABS workbench for full details]`;
+  return `${text.slice(0, MAX_OUTPUT)}\n[output truncated at ${MAX_OUTPUT} of ${text.length} characters; ` +
+    "the record above may be incomplete. Use the MABS workbench or the CLI for full details]";
 }
 
 /** Brief fields the conversation may set explicitly; shared by update and resolve. */
@@ -576,7 +582,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal) {
       const output = await run([
-        "brief", "ask", params.brief,
+        "brief", "ask", params.brief, "--view=conversation",
         `--payload=${JSON.stringify({ questions: params.questions })}`,
         "--by=pi-conversation",
       ], signal);
@@ -637,7 +643,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     }),
     async execute(toolCallId, params, signal) {
       const output = await run([
-        "brief", "resolve", params.brief,
+        "brief", "resolve", params.brief, "--view=conversation",
         `--version=${String(params.expectedVersion)}`,
         `--request=${params.requestId ?? `pi-${toolCallId}`}`,
         `--payload=${JSON.stringify({
@@ -683,7 +689,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal) {
       const { brief, ...proposal } = params;
-      const output = await run(["brief", "propose", brief, `--payload=${JSON.stringify(proposal)}`, "--by=pi-conversation"], signal);
+      const output = await run(["brief", "propose", brief, "--view=conversation", `--payload=${JSON.stringify(proposal)}`, "--by=pi-conversation"], signal);
       return { content: [{ type: "text", text: output }], details: { output } };
     },
   });
@@ -707,7 +713,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal) {
       const output = await run([
-        "brief", "accept", params.brief, params.proposalId,
+        "brief", "accept", params.brief, params.proposalId, "--view=conversation",
         `--fingerprint=${params.fingerprint}`,
         `--by=${params.acceptedBy}`,
         ...(params.note ? [`--note=${params.note}`] : []),
@@ -777,7 +783,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
         throw new Error("mabs_start_work needs exactly one destination: targetPath or project.");
       }
       const output = await run([
-        "brief", "start", params.brief, params.proposalId,
+        "brief", "start", params.brief, params.proposalId, "--view=conversation",
         `--fingerprint=${params.fingerprint}`,
         `--request=${params.requestId ?? `pi-${toolCallId}`}`,
         ...(params.targetPath ? [`--target=${params.targetPath}`] : []),
@@ -856,7 +862,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     promptSnippet: "Read the current state of a MABS product",
     parameters: Type.Object({ brief: Type.String({ description: "Brief ID or title" }) }),
     async execute(_toolCallId, params, signal) {
-      const output = await run(["product", "show", params.brief], signal);
+      const output = await run(["product", "show", params.brief, "--view=conversation"], signal);
       return { content: [{ type: "text", text: output }], details: { output } };
     },
   });
