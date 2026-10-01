@@ -1,0 +1,24 @@
+{
+  "check": "V3-PARITY / V3-PLAN / V3-INTAKE / V3-GOV / V3-FEED",
+  "date": "2026-10-01",
+  "commits": { "run": "8dd8b3d → 6fca9f0 (scope fix mid-run)", "liveDbSchema": 22 },
+  "setup": "Isolated state; habit-tracker fixture; Pi claude-bridge claude-sonnet-5 medium via bench/pi-turn.ts with the v4 scripted replies, except turn 2 omits 'use fast delivery with review off' and a FAST standing preference (personal) is set; workers claude-sonnet-5 medium; no AI review on either side.",
+  "pi": { "modelCalls": 11, "toolErrors": 0, "cacheInclusiveInput": 220752, "output": 6660, "v4": { "modelCalls": 16, "cacheInclusiveInput": 405373, "failedCalls": 9 } },
+  "workers": [
+    { "task": "implement", "state": "failed", "reason": "CONTRACT: allowedScope src/** treated as a literal prefix (bug, fixed in 6fca9f0)", "turns": 15, "denied": 0, "cacheInclusiveInput": 293565 },
+    { "task": "implement (after fix, clean worktree)", "state": "succeeded", "turns": 19, "denied": 0, "cacheInclusiveInput": 334770 },
+    { "task": "tests", "state": "succeeded", "turns": 7, "denied": 0, "cacheInclusiveInput": 241867 },
+    { "task": "README (mechanical)", "state": "DONE without a model; README left as the bootstrap stub", "providerCalls": 0 }
+  ],
+  "lifecycleCacheInclusiveInput": { "all": 1090954, "excludingScopeBugAttempt": 797389, "v4": 1184577 },
+  "direct": { "v5": { "cacheInclusiveInput": 531076, "output": 8881, "wallMs": 99861, "denied": 3, "hidden": "18/18" }, "v4": { "cacheInclusiveInput": 631659, "hidden": "17/18" } },
+  "hidden": { "mabs": "17/18 (corrupt data file crashes instead of being refused)", "direct": "18/18" },
+  "ratioToDirect": { "v5All": 2.05, "v5ExcludingBug": 1.50, "v4": 1.88 },
+  "caveats": [
+    "n=1 per side; the direct run alone moved 632K -> 531K between v4 and v5, so differences of this size are within run-to-run variation.",
+    "Cache-inclusive provider-reported input, not subscription allowance consumption.",
+    "Turn 2 wording differs from v4 to exercise the standing preference.",
+    "The MABS plan had 3 tasks; one ran without a model, so the worker figure covers 2 model tasks (v4: 2)."
+  ],
+  "rows": "bench/results/v5-parity.jsonl rows 0-2 are MABS (0: scope-bug failure, 1: aborted retry on the dirty worktree, 2: completed lifecycle including all attempts); row 3 is direct Claude"
+}
