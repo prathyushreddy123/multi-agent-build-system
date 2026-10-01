@@ -749,6 +749,51 @@ export default function mabsExtension(pi: ExtensionAPI) {
   });
 
   registerCompactTool({
+    name: "mabs_start_work",
+    label: "Start Accepted MABS Work",
+    description: "Start the user's accepted plan in one resumable step: bootstrap a new local directory and link the plan, or submit it to a registered project. Never accepts a plan. Retrying with the same requestId continues from recorded progress instead of scaffolding again.",
+    promptSnippet: "Start accepted work in a new directory or a registered project",
+    promptGuidelines: [
+      "Use mabs_start_work only after mabs_accept_plan recorded the user's acceptance, with the exact proposalId and fingerprint that were accepted.",
+      "Give mabs_start_work exactly one destination the user chose: targetPath for a new directory, or project for a registered project.",
+      "If mabs_start_work returns status interrupted, explain the error and retry with the same requestId after it is fixed; do not bootstrap again by hand.",
+      "If mabs_start_work returns stale_start, present the current proposal again instead of retrying.",
+    ],
+    parameters: Type.Object({
+      brief: Type.String(),
+      proposalId: Type.String({ description: "The accepted proposal ID" }),
+      fingerprint: Type.String({ description: "The accepted proposal fingerprint" }),
+      targetPath: Type.Optional(Type.String({ description: "New local product directory explicitly selected by the user" })),
+      project: Type.Optional(Type.String({ description: "Registered project ID or name explicitly selected by the user" })),
+      requestId: Type.Optional(Type.String({ description: "Reuse the same id when retrying this start" })),
+      profile: Type.Optional(Type.String({ description: "auto, python, or javascript-typescript" })),
+      packageManager: Type.Optional(Type.String({ description: "python, uv, poetry, pipenv, npm, pnpm, yarn, or bun" })),
+      language: Type.Optional(Type.String()),
+      runtime: Type.Optional(Type.String()),
+      projectName: Type.Optional(Type.String()),
+    }),
+    async execute(toolCallId, params, signal) {
+      if (Boolean(params.targetPath) === Boolean(params.project)) {
+        throw new Error("mabs_start_work needs exactly one destination: targetPath or project.");
+      }
+      const output = await run([
+        "brief", "start", params.brief, params.proposalId,
+        `--fingerprint=${params.fingerprint}`,
+        `--request=${params.requestId ?? `pi-${toolCallId}`}`,
+        ...(params.targetPath ? [`--target=${params.targetPath}`] : []),
+        ...(params.project ? [`--project=${params.project}`] : []),
+        ...(params.profile ? [`--profile=${params.profile}`] : []),
+        ...(params.packageManager ? [`--package-manager=${params.packageManager}`] : []),
+        ...(params.language ? [`--language=${params.language}`] : []),
+        ...(params.runtime ? [`--runtime=${params.runtime}`] : []),
+        ...(params.projectName ? [`--name=${params.projectName}`] : []),
+        "--by=pi-conversation",
+      ], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  registerCompactTool({
     name: "mabs_bootstrap_project",
     label: "Bootstrap MABS Project",
     description: "Safely scaffold an accepted product in a user-selected local directory. Refuses unrelated non-empty directories, records every step, and resumes by bootstrap ID without duplicate projects.",

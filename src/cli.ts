@@ -54,6 +54,7 @@ import {
   wrongGovernanceSubject,
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
+import { startAcceptedWork } from "./intake/start.ts";
 import { briefGovernance, createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
 import {
   DEFAULT_SKIP_TASK_CLASSES,
@@ -175,6 +176,8 @@ PRODUCTS AND PLANS
                                                 Several answers and a brief change, all or nothing; retry-safe
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
+  brief start <brief> <proposal> --fingerprint=... --request=<id> --target=<new dir> | --project=<id>
+                                                Start accepted work in one resumable step (bootstrap + submit)
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
   brief bootstrap <brief> <target> [--profile=auto|python|javascript-typescript]
   product show <brief>                          Brief, pending decisions, work, outputs, next actions
@@ -940,6 +943,31 @@ async function main(): Promise<void> {
         const brief = resolveBrief(records, result.briefId);
         const pending = brief ? governanceNeedsInput({ kind: "brief", id: brief.id }, briefGovernance(brief)) : null;
         console.log(JSON.stringify(pending ? { ...pending, resolution: result } : result, null, 2));
+        return;
+      }
+      if (action === "start") {
+        const [value, proposalId] = args.positionals;
+        const fingerprint = textOption(args, "fingerprint");
+        const requestId = textOption(args, "request");
+        const targetPath = textOption(args, "target");
+        const projectValue = textOption(args, "project");
+        if (!value || !proposalId || !fingerprint || !requestId || Boolean(targetPath) === Boolean(projectValue)) {
+          throw new Error(
+            "Usage: mabs brief start <brief> <proposal> --fingerprint=... --request=<id> (--target=<new dir> | --project=<registered project>) " +
+            "[--profile=auto|python|javascript-typescript] [--package-manager=...] [--language=...] [--runtime=...] [--name=...]",
+          );
+        }
+        const result = startAcceptedWork(records, {
+          brief: value, proposalId, fingerprint, requestId, actor,
+          destination: targetPath ? { kind: "new_directory", targetPath } : { kind: "registered_project", project: projectValue as string },
+          profile: textOption(args, "profile", "auto") as Parameters<typeof startAcceptedWork>[1]["profile"],
+          packageManager: textOption(args, "package-manager") as Parameters<typeof startAcceptedWork>[1]["packageManager"],
+          language: textOption(args, "language"),
+          runtime: textOption(args, "runtime"),
+          projectName: textOption(args, "name"),
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.status !== "completed") process.exitCode = 1;
         return;
       }
       if (action === "propose") {

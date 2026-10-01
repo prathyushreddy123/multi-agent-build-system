@@ -136,7 +136,7 @@ test("the MABS tool extension keeps its tools and routes them through the compac
       "mabs_prepare_operation", "mabs_bootstrap_project", "mabs_submit_plan", "mabs_get_product",
       "mabs_submit_task",
       // Efficiency v5 intake operations.
-      "mabs_resolve_intake",
+      "mabs_resolve_intake", "mabs_start_work",
     ]) {
       assert.ok(names.includes(expected), `${expected} is no longer registered`);
     }

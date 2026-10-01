@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -12,7 +12,8 @@ import test, { type TestContext } from "node:test";
 import { IntakeError } from "../src/intake/errors.ts";
 import type { ExecutionPlan } from "../src/domain/plan.ts";
 import { acceptPlan, answerClarification, askClarifications, proposePlan, resolveIntake } from "../src/intake/service.ts";
-import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification } from "../src/intake/store.ts";
+import { startAcceptedWork, type StartAcceptedWorkInput } from "../src/intake/start.ts";
+import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification, listBootstrapRuns } from "../src/intake/store.ts";
 import { Records } from "../src/store/records.ts";
 import { SCHEMA_VERSION, Store } from "../src/store/db.ts";
 
@@ -350,4 +351,143 @@ test("INT-03: project governance on a brief names the brief operation and versio
   const missing = JSON.parse(unknown.stderr) as { error: string; subject: string };
   assert.equal(missing.error, "wrong_subject");
   assert.equal(missing.subject, "unknown");
+});
+
+// --- INT-04 ------------------------------------------------------------------
+
+function acceptedForStart(records: Records, title = "start-tool") {
+  const brief = personalBrief(records, title);
+  const proposal = proposeAndAccept(records, brief.id);
+  return { brief, proposal };
+}
+
+function startInput(briefId: string, proposal: { id: string; fingerprint: string }, targetPath: string, requestId = "start-1"): StartAcceptedWorkInput {
+  return {
+    brief: briefId, proposalId: proposal.id, fingerprint: proposal.fingerprint, requestId, actor: "prathyush",
+    destination: { kind: "new_directory", targetPath }, profile: "python", packageManager: "python",
+  };
+}
+
+function oneProjectOneTaskSet(records: Records) {
+  assert.equal(records.listProjects().length, 1, "exactly one project");
+  const project = records.listProjects()[0]!;
+  assert.equal(records.listTasks({ projectId: project.id }).length, 1, "exactly one task set");
+  return project;
+}
+
+test("INT-04: accepted work starts in one call and an identical retry replays it", (t) => {
+  const { root, records } = setup(t);
+  const { brief, proposal } = acceptedForStart(records);
+  const target = join(root, "product");
+  const started = startAcceptedWork(records, startInput(brief.id, proposal, target));
+  assert.equal(started.status, "completed", started.error ?? "");
+  assert.equal(started.briefState, "REGISTERED");
+  assert.equal(started.tasks.length, 1);
+  assert.ok(started.bootstrapId && started.projectId && started.planId);
+  oneProjectOneTaskSet(records);
+
+  const replay = startAcceptedWork(records, startInput(brief.id, proposal, target));
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.projectId, started.projectId);
+  oneProjectOneTaskSet(records);
+  assert.throws(
+    () => startAcceptedWork(records, startInput(brief.id, proposal, join(root, "elsewhere"))),
+    refusal("request_conflict"), "a different destination under the same request id is a different request",
+  );
+});
+
+for (const [label, interruptAt] of [
+  ["before bootstrap", "validated"],
+  ["during bootstrap, before plan submission", { bootstrapStep: "check_registration" }],
+  ["after bootstrap", "bootstrapped"],
+] as const) {
+  test(`INT-04: an interruption ${label} resumes to exactly one project and one task set`, (t) => {
+    const { root, records } = setup(t);
+    const { brief, proposal } = acceptedForStart(records);
+    const target = join(root, "product");
+    const first = startAcceptedWork(records, { ...startInput(brief.id, proposal, target), interruptAt });
+    assert.equal(first.status, "interrupted");
+    assert.equal(first.resumable, true);
+    assert.match(first.error ?? "", /Injected interruption/);
+    if (interruptAt !== "validated") {
+      assert.ok(first.bootstrapId, "the recorded bootstrap is named for inspection");
+      writeFileSync(join(target, "user-note.txt"), "keep me\n");
+    }
+
+    const resumed = startAcceptedWork(records, startInput(brief.id, proposal, target));
+    assert.equal(resumed.status, "completed", resumed.error ?? "");
+    assert.equal(resumed.replayed, false);
+    oneProjectOneTaskSet(records);
+    assert.equal(listBootstrapRuns(records, brief.id).length, 1, "the original bootstrap was resumed, not repeated");
+    if (interruptAt !== "validated") assert.equal(readFileSync(join(target, "user-note.txt"), "utf8"), "keep me\n");
+  });
+}
+
+test("INT-04: starting refuses a plan that is not the accepted one, and never accepts implicitly", (t) => {
+  const { root, records } = setup(t);
+  const unaccepted = personalBrief(records, "unaccepted");
+  const proposed = proposePlan(records, {
+    brief: unaccepted.id, summary: "s", rationale: "r", scope: "s",
+    requirements: [{ id: "REQ-1", text: "t" }], plan: smallPlan(),
+  });
+  const draft = proposed.proposal!;
+  assert.throws(() => startAcceptedWork(records, startInput(unaccepted.id, draft, join(root, "a"), "u-1")), refusal("stale_start"));
+  assert.equal(activeAcceptance(records, unaccepted.id), null, "start did not accept the plan");
+
+  const { brief, proposal } = acceptedForStart(records, "accepted");
+  assert.throws(
+    () => startAcceptedWork(records, startInput(brief.id, { ...proposal, fingerprint: "0".repeat(64) }, join(root, "b"), "u-2")),
+    refusal("stale_start"),
+  );
+  assert.equal(existsSync(join(root, "b")), false, "nothing was scaffolded for a stale start");
+});
+
+test("INT-04: a governance change after an interrupted start refuses the stale retry", (t) => {
+  const { root, records } = setup(t);
+  const { brief, proposal } = acceptedForStart(records);
+  const target = join(root, "product");
+  const first = startAcceptedWork(records, { ...startInput(brief.id, proposal, target), interruptAt: "validated" });
+  assert.equal(first.status, "interrupted");
+  const current = getBrief(records, brief.id)!;
+  resolveIntake(records, {
+    brief: brief.id, expectedVersion: current.version, requestId: "gov-change",
+    patch: { reviewChoice: "required" }, summary: "The user now wants independent review.",
+  });
+  assert.throws(() => startAcceptedWork(records, startInput(brief.id, proposal, target)), refusal("stale_start"));
+  assert.equal(records.listProjects().length, 0);
+});
+
+test("INT-04: accepted work can start in an already registered project", (t) => {
+  const { root, records } = setup(t);
+  const repo = join(root, "existing");
+  mkdirSync(repo, { recursive: true });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  const project = records.createProject({
+    name: "existing", repoPath: repo, baseBranch: "main", checkCommands: [],
+    projectType: "personal", reviewChoice: "off", governanceActor: "prathyush", governanceSource: "test",
+  });
+  const { brief, proposal } = acceptedForStart(records);
+  const input: StartAcceptedWorkInput = { ...startInput(brief.id, proposal, ""), destination: { kind: "registered_project", project: project.id } };
+  const started = startAcceptedWork(records, input);
+  assert.equal(started.status, "completed", started.error ?? "");
+  assert.equal(started.projectId, project.id);
+  assert.equal(started.bootstrapId, null);
+  oneProjectOneTaskSet(records);
+  assert.equal(startAcceptedWork(records, input).replayed, true);
+  oneProjectOneTaskSet(records);
+});
+
+test("INT-04: the CLI start command reports a completed start", (t) => {
+  const { root } = setup(t);
+  const dbPath = join(root, "cli.sqlite");
+  const seeded = new Records(new Store(dbPath));
+  const { brief, proposal } = acceptedForStart(seeded);
+  seeded.store.close();
+  const { json } = cliFor(root);
+  const started = json<{ status: string; tasks: unknown[] }>(
+    "brief", "start", brief.id, proposal.id, `--fingerprint=${proposal.fingerprint}`, "--request=cli-start",
+    `--target=${join(root, "cli-product")}`, "--profile=python", "--package-manager=python", "--by=prathyush",
+  );
+  assert.equal(started.status, "completed");
+  assert.equal(started.tasks.length, 1);
 });

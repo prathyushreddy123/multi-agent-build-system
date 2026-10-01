@@ -49,11 +49,12 @@ Assessment output does not substitute for this step: an assumption you recorded 
 
 A question is material only if its answer can change scope, architecture, acceptance criteria, risk/review policy, target directory, or delivery behavior.
 
-1. Record material questions with `mabs_ask_clarifications`, including why each matters.
+1. Record material questions with `mabs_ask_clarifications`, including why each matters. It returns each question's `id` in `requested`; keep those ids.
 2. Ask the user concisely, grouping related questions when practical.
-3. Record their words with `mabs_answer_clarification`.
-4. If the user cannot answer and wishes to continue, record an explicitly labeled assumption. Never silently infer proficiency, credentials, destinations, schedules, budgets, or release authority.
-5. Use `mabs_update_brief` with the version last read when an answer changes brief fields. On a version conflict, read current product state and merge deliberately.
+3. Record all of their answers in one `mabs_resolve_intake` call: one resolution per question id, with the user's words as `answer`. When an answer changes brief fields, put your explicit interpretation in `patch` with a one-line `summary` in the same call. For a single answer, `mabs_answer_clarification` remains available.
+4. If the user cannot answer and wishes to continue, record an explicitly labeled `assumption` instead of an answer, and tell the user. Never silently infer proficiency, credentials, destinations, schedules, budgets, or release authority.
+5. Pass the brief version you last read. On `stale_version`, read current product state and merge deliberately. On `already_resolved`, ask the user before replacing an earlier answer with `revise`.
+6. A brief's project type and review choice are brief fields (`patch.projectType`, `patch.reviewChoice`). `mabs_set_project_governance` is only for a registered project.
 
 ## Propose a plan
 
@@ -82,8 +83,8 @@ Any substantive brief revision after acceptance invalidates stale consent. Prese
 
 After acceptance:
 
-- use `mabs_bootstrap_project` when available to prepare the user-selected local directory safely;
-- use `mabs_submit_plan` to apply the stored validated plan without asking the user to author JSON;
+- use `mabs_start_work` once, with the accepted proposal id and fingerprint and the destination the user chose (a new directory, or a registered project). It prepares the directory safely and applies the stored validated plan without asking the user to author JSON;
+- if `mabs_start_work` reports `interrupted`, explain the error, and once it is fixed retry with the same `requestId`; recorded steps are not repeated. `mabs_bootstrap_project` and `mabs_submit_plan` remain for diagnosis;
 - use `mabs_get_product` to report pending decisions, work, outputs, and next actions;
 - resolve any structured governance `needs_input` response with the user and persist it before bootstrap or submission;
 - do not repeatedly ask permission for routine actions already inside the accepted local implementation boundary;
