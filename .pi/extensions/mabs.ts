@@ -559,6 +559,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use mabs_ask_clarifications before asking material product questions, and do not record cosmetic or non-blocking questions.",
       "Explain why every mabs_ask_clarifications question changes scope, architecture, acceptance, or delivery.",
+      "mabs_ask_clarifications returns each question's id in `requested`; answer with those ids, never with a guessed id.",
     ],
     parameters: Type.Object({
       brief: Type.String(),
@@ -588,13 +589,15 @@ export default function mabsExtension(pi: ExtensionAPI) {
       "Use mabs_answer_clarification with assumption when proceeding without an answer, and disclose the assumption to the user.",
     ],
     parameters: Type.Object({
-      clarificationId: Type.String(),
+      clarificationId: Type.String({ description: "An id from mabs_ask_clarifications `requested` or `openQuestions`" }),
+      brief: Type.Optional(Type.String({ description: "The brief the question belongs to; refuses a question from another brief" })),
       answer: Type.Optional(Type.String()),
       assumption: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params, signal) {
       const output = await run([
         "brief", "answer", params.clarificationId,
+        ...(params.brief ? [`--brief=${params.brief}`] : []),
         ...(params.answer ? [`--answer=${params.answer}`] : []),
         ...(params.assumption ? [`--assumption=${params.assumption}`] : []),
         "--by=pi-conversation",

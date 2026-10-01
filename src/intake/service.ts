@@ -16,6 +16,7 @@ import {
   briefGovernance,
   conversationFor,
   getBrief,
+  getClarification,
   getProposal,
   insertProposal,
   latestProposal,
@@ -33,7 +34,8 @@ import {
   setBriefState,
   syncGovernanceClarifications,
 } from "./store.ts";
-import type { ProductBrief, ProposalVersion } from "./types.ts";
+import { IntakeError } from "./errors.ts";
+import type { ClarificationItem, ProductBrief, ProposalVersion } from "./types.ts";
 
 export interface ProposalInput {
   summary: string;
@@ -91,29 +93,95 @@ function fingerprintForBrief(brief: ProductBrief, proposal: Pick<ProposalVersion
   });
 }
 
+/** What the conversation needs to answer a question: no timestamps or resolution fields. */
+export interface ClarificationRecord {
+  id: string;
+  field: string | null;
+  question: string;
+  whyItMatters: string;
+  state: ClarificationItem["state"];
+  /** True when this call matched an open question already recorded for the same field. */
+  reused?: boolean;
+}
+
+export function clarificationRecord(item: ClarificationItem, reused?: boolean): ClarificationRecord {
+  return {
+    id: item.id, field: item.field, question: item.question, whyItMatters: item.whyItMatters, state: item.state,
+    ...(reused === undefined ? {} : { reused }),
+  };
+}
+
+export interface AskClarificationsResult {
+  brief: ProductBrief;
+  briefId: string;
+  briefVersion: number;
+  /** Count of open questions on the brief, kept for older callers. */
+  open: number;
+  /** The records for exactly the questions in this call, in order, without duplicates. */
+  requested: ClarificationRecord[];
+  /** Every open question on the brief, including ones asked earlier. */
+  openQuestions: ClarificationRecord[];
+}
+
 /** Ask only material questions, and record why each one matters. */
 export function askClarifications(records: Records, input: {
   brief: string;
   questions: { question: string; whyItMatters: string; field?: string | null }[];
   actor?: string;
-}): { brief: ProductBrief; open: number } {
+}): AskClarificationsResult {
   const brief = requireBrief(records, input.brief);
   if (input.questions.length === 0) throw new Error("Provide at least one question.");
   return records.store.tx(() => {
+    const openBefore = new Set(listClarifications(records, brief.id, "open").map((item) => item.id));
+    const requested = new Map<string, ClarificationRecord>();
     for (const question of input.questions) {
-      addClarification(records, { briefId: brief.id, ...question, actor: input.actor });
+      const item = addClarification(records, { briefId: brief.id, ...question, actor: input.actor });
+      if (!requested.has(item.id)) requested.set(item.id, clarificationRecord(item, openBefore.has(item.id)));
     }
     const updated = setBriefState(records, brief.id, "CLARIFYING", "Material unknowns were raised with the user.", input.actor ?? "agent");
-    return { brief: updated, open: listClarifications(records, brief.id, "open").length };
+    const openQuestions = listClarifications(records, brief.id, "open").map((item) => clarificationRecord(item));
+    return {
+      brief: updated, briefId: updated.id, briefVersion: updated.version,
+      open: openQuestions.length, requested: [...requested.values()], openQuestions,
+    };
   });
+}
+
+/**
+ * Find a clarification for an answer, refusing an unknown ID or one that
+ * belongs to a different brief with the IDs that would have been valid.
+ */
+export function requireClarification(records: Records, id: string, briefValue?: string | null): ClarificationItem {
+  const brief = briefValue ? requireBrief(records, briefValue) : null;
+  const openIds = (briefId: string) => listClarifications(records, briefId, "open").map((item) => item.id);
+  const item = getClarification(records, id);
+  if (!item) {
+    throw new IntakeError(
+      "unknown_clarification",
+      brief
+        ? `Unknown clarification ${id} for brief ${brief.id}; answer one of its open questions instead.`
+        : `Unknown clarification ${id}; use the id returned by mabs_ask_clarifications, or list them with brief show <brief>.`,
+      { clarificationId: id, ...(brief ? { briefId: brief.id, openClarificationIds: openIds(brief.id) } : {}) },
+    );
+  }
+  if (brief && item.briefId !== brief.id) {
+    throw new IntakeError(
+      "clarification_brief_mismatch",
+      `Clarification ${id} belongs to brief ${item.briefId}, not ${brief.id}.`,
+      { clarificationId: id, briefId: brief.id, clarificationBriefId: item.briefId, openClarificationIds: openIds(brief.id) },
+    );
+  }
+  return item;
 }
 
 export function answerClarification(records: Records, input: {
   id: string;
+  brief?: string | null;
   answer?: string;
   assumption?: string;
   actor?: string;
 }) {
+  requireClarification(records, input.id, input.brief);
   return resolveClarification(records, input);
 }
 

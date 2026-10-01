@@ -51,6 +51,7 @@ import {
   proposePlan,
   submitAcceptedPlan,
 } from "./intake/service.ts";
+import { IntakeError } from "./intake/errors.ts";
 import { briefGovernance, createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
 import {
   DEFAULT_SKIP_TASK_CLASSES,
@@ -167,7 +168,7 @@ PRODUCTS AND PLANS
   brief list | brief show <brief>
   brief update <brief> --version=N --summary=... --payload='{...}'
   brief ask <brief> --payload='{"questions":[...]}'
-  brief answer <clarification> --answer=... | --assumption=...
+  brief answer <clarification> --answer=... | --assumption=... [--brief=<brief>]
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
@@ -910,9 +911,9 @@ async function main(): Promise<void> {
       }
       if (action === "answer") {
         const id = args.positionals[0];
-        if (!id) throw new Error("Usage: mabs brief answer <clarification> --answer=... | --assumption=...");
+        if (!id) throw new Error("Usage: mabs brief answer <clarification> --answer=... | --assumption=... [--brief=<brief>]");
         console.log(JSON.stringify(answerClarification(records, {
-          id, answer: textOption(args, "answer"), assumption: textOption(args, "assumption"), actor,
+          id, brief: textOption(args, "brief"), answer: textOption(args, "answer"), assumption: textOption(args, "assumption"), actor,
         }), null, 2));
         return;
       }
@@ -1657,6 +1658,11 @@ async function main(): Promise<void> {
 main().catch((error) => {
   if (error instanceof GovernanceNeedsInputError) {
     console.log(JSON.stringify(error.result, null, 2));
+    return;
+  }
+  if (error instanceof IntakeError) {
+    console.error(JSON.stringify(error, null, 2));
+    process.exitCode = 1;
     return;
   }
   console.error(error instanceof Error ? error.message : String(error));
