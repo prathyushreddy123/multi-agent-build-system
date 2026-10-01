@@ -183,7 +183,7 @@ Ceiling: at most 6 provider attempts in total, stopping at the first quota signa
 
 ### UX-01: direct progress
 - Files: `src/operator/feed.ts`, `src/cli.ts` (`progress feed`), `.pi/extensions/mabs.ts` (poller), `docs/commands.md`.
-- Design: a bounded frame (unfinished tasks plus those changed in the last hour, at most 200) built from `buildProgressSnapshot`. `diffFeed` notifies only for done, blocked/failed, awaiting approval and controller-stopped-with-work, coalesced per poll, and never on the first frame. The extension polls every 15 s (`MABS_FEED_INTERVAL_MS`, `0` = off), uses Pi's `setStatus`/`notify`, stops on `session_shutdown`, and never calls `sendUserMessage`. The real-data frame on the live copy is 4.2 KB, read by the extension and not the model.
+- Design: a bounded frame (unfinished tasks plus those changed in the last hour, at most 200) built from `buildProgressSnapshot`. `diffFeed` notifies only for done, blocked/failed, awaiting approval and controller-stopped-with-work, coalesced per poll, and never on the first frame. The extension polls every 15 s (`MABS_FEED_INTERVAL_MS`, `0` = off), uses Pi's `setStatus`/`notify`, stops on `session_shutdown`, and never calls `sendUserMessage`. The real-data frame on the live copy is 2.5 KB (2,493 bytes), read by the extension and not the model.
 - Validation: `test/operator/feed.test.ts` (5) plus an extension test that drives `session_start` twice and asserts the status lines, one coalesced notice and zero model messages.
 
 ### CTX-02: scoped requirements and dependency evidence
