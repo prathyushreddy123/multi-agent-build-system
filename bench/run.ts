@@ -55,7 +55,16 @@ export interface AttemptRow {
   cachedInput: number | null;
   output: number | null;
   reasoning: number | null;
+  /**
+   * Legacy mixed-semantics count, kept so historical rows stay readable: Claude
+   * `num_turns` for Claude attempts, completed Codex tool items for Codex.
+   * New code reads the two explicit fields below instead.
+   */
   turns: number | null;
+  /** Claude's reported `num_turns`; null for other adapters or when absent. */
+  claudeNumTurns?: number | null;
+  /** Completed Codex tool items (commands, file changes, MCP, web search); null for other adapters. */
+  codexToolItems?: number | null;
   denied: number | null;
   costUsd: number | null;
 }
@@ -145,11 +154,14 @@ function lastJsonLine(text: string, predicate: (value: Record<string, unknown>) 
 const CODEX_TOOL_ITEMS = new Set(["command_execution", "file_change", "mcp_tool_call", "web_search"]);
 
 /** Tool calls, denials, and cost observable in a provider's raw output. */
-export function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" | "denied" | "costUsd"> {
+export function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" | "claudeNumTurns" | "codexToolItems" | "denied" | "costUsd"> {
   if (adapter === "claude") {
     const result = lastJsonLine(raw, (value) => value.type === "result") ?? (() => { try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; } })();
+    const numTurns = typeof result?.num_turns === "number" ? result.num_turns : null;
     return {
-      turns: typeof result?.num_turns === "number" ? result.num_turns : null,
+      turns: numTurns,
+      claudeNumTurns: numTurns,
+      codexToolItems: null,
       denied: Array.isArray(result?.permission_denials) ? result.permission_denials.length : null,
       costUsd: typeof result?.total_cost_usd === "number" ? result.total_cost_usd : null,
     };
@@ -162,8 +174,17 @@ export function observe(adapter: string, raw: string): Pick<AttemptRow, "turns" 
       if (CODEX_TOOL_ITEMS.has(event.item?.type ?? "")) turns += 1;
     } catch { /* partial line */ }
   }
-  return { turns, denied: null, costUsd: null };
+  return { turns, claudeNumTurns: null, codexToolItems: turns, denied: null, costUsd: null };
 }
+
+/**
+ * The two observations the legacy `turns` field mixed. Rows recorded before the
+ * split carry only `turns`, whose meaning followed the attempt's adapter.
+ */
+export const claudeNumTurns = (attempt: AttemptRow | undefined): number | null =>
+  attempt?.claudeNumTurns !== undefined ? attempt.claudeNumTurns : attempt?.adapter === "claude" ? attempt.turns : null;
+export const codexToolItems = (attempt: AttemptRow | undefined): number | null =>
+  attempt?.codexToolItems !== undefined ? attempt.codexToolItems : attempt?.adapter === "codex" ? attempt.turns : null;
 
 export function usageFields(attemptId: string, adapter: string, raw: unknown): Pick<AttemptRow, "inputEvents" | "cacheRead" | "cacheWrite" | "cachedInput" | "output" | "reasoning"> {
   const usage = normalizeAttemptUsage({ attemptId, adapter, raw: raw ?? null });
