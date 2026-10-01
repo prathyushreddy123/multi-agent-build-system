@@ -624,7 +624,19 @@ export function productSummary(records: Records, value: string): ProductSummary 
   if (acceptance && project && tasks.length === 0) nextActions.push("Submit the accepted plan to the registered project.");
   if (bootstrap && bootstrap.state === "failed") nextActions.push(`Resume bootstrap ${bootstrap.id}: ${bootstrap.error ?? "see recorded steps"}.`);
   const blocked = tasks.filter((task) => task.state === "BLOCKED" || task.state === "FAILED");
-  if (blocked.length > 0) nextActions.push(`${blocked.length} task(s) need attention: ${blocked.map((task) => `${task.id} (${task.blockedReason ?? task.state})`).join("; ")}`);
+  if (blocked.length > 0) {
+    // A summary line, not the record: the first line of each reason; `task show` has the rest.
+    const reason = (task: Task) => {
+      const first = (task.blockedReason ?? task.state).split("\n")[0] as string;
+      return first.length > 160 ? `${first.slice(0, 157)}...` : first;
+    };
+    const named = blocked.slice(0, 5).map((task) => `${task.id} (${reason(task)})`);
+    const more = blocked.length - named.length;
+    nextActions.push(
+      `${blocked.length} task(s) need attention: ${named.join("; ")}${more > 0 ? `; and ${more} more` : ""}. ` +
+      "Use task show <task> for the full reason.",
+    );
+  }
   const queued = tasks.filter((task) => task.state === "QUEUED" || task.state === "READY");
   if (queued.length > 0) nextActions.push(`${queued.length} accepted task(s) are queued for controller execution.`);
   if (nextActions.length === 0) nextActions.push("No outstanding intake decisions or queued work.");
