@@ -501,7 +501,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
   registerCompactTool({
     name: "mabs_update_brief",
     label: "Update MABS Product Brief",
-    description: "Record answers, assumptions, or a scope revision on a brief. Requires the brief version you last read, so concurrent edits cannot be lost.",
+    description: "Record answers, assumptions, a scope revision, or the brief's project type and review choice. Requires the brief version you last read, so concurrent edits cannot be lost. This is where governance is set before a project exists.",
     promptSnippet: "Record an answer or scope change on a MABS brief",
     promptGuidelines: [
       "Pass mabs_update_brief the expectedVersion from the brief you last read; if rejected, re-read the brief and merge.",
@@ -529,9 +529,11 @@ export default function mabsExtension(pi: ExtensionAPI) {
   registerCompactTool({
     name: "mabs_set_project_governance",
     label: "Set MABS Project Governance",
-    description: "Record an explicit project type and review choice at the current governance version. Client projects always require review.",
-    promptSnippet: "Record an explicit MABS project type and review decision",
+    description: "Record an explicit project type and review choice for a REGISTERED project at its current governance version. Client projects always require review. For a product brief that is not yet bootstrapped, use mabs_update_brief with patch.projectType and patch.reviewChoice instead.",
+    promptSnippet: "Record an explicit MABS project type and review decision on a registered project",
     promptGuidelines: [
+      "Use mabs_set_project_governance only with a registered project; for a brief, set projectType and reviewChoice through mabs_update_brief or mabs_resolve_intake.",
+      "If mabs_set_project_governance returns wrong_subject, follow its named operation instead of retrying.",
       "Use mabs_set_project_governance only for choices the user explicitly supplied; never infer personal from a repository name or an existing review preset.",
       "When mabs_set_project_governance records client, use required review; never retry client with review off.",
     ],

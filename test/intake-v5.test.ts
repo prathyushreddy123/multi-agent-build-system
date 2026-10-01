@@ -324,3 +324,30 @@ test("INT-02: schema 19 adds intake requests to an existing schema 18 database",
   assert.equal(upgraded.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, "19");
   assert.ok(upgraded.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_requests'"));
 });
+
+// --- INT-03 ------------------------------------------------------------------
+
+test("INT-03: project governance on a brief names the brief operation and version instead of a usage error", (t) => {
+  const { root } = setup(t);
+  const { run, json } = cliFor(root);
+  // Without governance, creation returns the pending question and the draft brief.
+  const created = json<{ draft: { id: string; version: number } }>("brief", "create", `--payload=${JSON.stringify({
+    title: "governed", objective: "Summarize notes.",
+  })}`, "--by=prathyush");
+  const brief = { brief: created.draft };
+
+  const onBrief = run("project", "governance", brief.brief.id, "--type=personal", "--review=off", "--version=1", "--by=prathyush");
+  assert.equal(onBrief.status, 1);
+  const body = JSON.parse(onBrief.stderr) as { error: string; subject: string; briefId: string; briefVersion: number; operation: string };
+  assert.equal(body.error, "wrong_subject");
+  assert.equal(body.subject, "brief");
+  assert.equal(body.briefId, brief.brief.id);
+  assert.equal(body.briefVersion, brief.brief.version);
+  assert.equal(body.operation, "mabs_update_brief");
+
+  const unknown = run("project", "governance", "no-such-thing", "--type=personal", "--review=off", "--version=1");
+  assert.equal(unknown.status, 1);
+  const missing = JSON.parse(unknown.stderr) as { error: string; subject: string };
+  assert.equal(missing.error, "wrong_subject");
+  assert.equal(missing.subject, "unknown");
+});

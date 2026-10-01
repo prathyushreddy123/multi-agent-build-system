@@ -187,6 +187,34 @@ export function answerClarification(records: Records, input: {
   return resolveClarification(records, input);
 }
 
+/**
+ * Project governance was requested for something that is not a registered
+ * project. A product brief records its own governance through a brief update;
+ * this names that operation and the version it needs instead of a bare usage
+ * error. Nothing is inferred from the value's name.
+ */
+export function wrongGovernanceSubject(records: Records, value: string): IntakeError {
+  const brief = resolveBrief(records, value);
+  if (brief) {
+    return new IntakeError(
+      "wrong_subject",
+      `${value} is product brief ${brief.id}, not a registered project. Record its project type and review choice on the brief ` +
+      "with mabs_update_brief (patch.projectType / patch.reviewChoice); project governance applies only after bootstrap or registration.",
+      {
+        subject: "brief", briefId: brief.id, briefVersion: brief.version, linkedProjectId: brief.projectId,
+        operation: "mabs_update_brief",
+        command: `brief update ${brief.id} --version=${brief.version} --summary=... --payload='{"projectType":...,"reviewChoice":...}'`,
+      },
+    );
+  }
+  return new IntakeError(
+    "wrong_subject",
+    `No registered project matches ${value}. For a product that is still a brief, use mabs_update_brief with ` +
+    "patch.projectType and patch.reviewChoice; for an existing repository, register it as a project first.",
+    { subject: "unknown", value, operation: "mabs_update_brief" },
+  );
+}
+
 export interface IntakeResolution {
   clarificationId: string;
   /** The user's own words. Exactly one of answer or assumption. */

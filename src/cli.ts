@@ -51,6 +51,7 @@ import {
   proposePlan,
   resolveIntake,
   submitAcceptedPlan,
+  wrongGovernanceSubject,
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
 import { briefGovernance, createBrief, listBriefs, resolveBrief, updateBrief } from "./intake/store.ts";
@@ -526,7 +527,9 @@ async function main(): Promise<void> {
     }
     if (area === "project" && action === "governance") {
       const args = parseArgs(rest);
-      const project = args.positionals[0] ? resolveProject(records, args.positionals[0] as string) : null;
+      const subject = args.positionals[0];
+      const project = subject ? resolveProject(records, subject) : null;
+      if (subject && !project) throw wrongGovernanceSubject(records, subject);
       const projectType = textOption(args, "type") as ProjectType | undefined;
       const suppliedReview = resolveReviewChoice(textOption(args, "delivery"), textOption(args, "review"));
       const reviewChoice = projectType === "client" && suppliedReview === undefined ? "required" : suppliedReview;
