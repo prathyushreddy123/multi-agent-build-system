@@ -24,6 +24,33 @@ function compact(text: string): string {
   return `${text.slice(0, MAX_OUTPUT)}\n[truncated; use the MABS workbench for full details]`;
 }
 
+/** Brief fields the conversation may set explicitly; shared by update and resolve. */
+const briefPatchSchema = Type.Object({
+  title: Type.Optional(Type.String()),
+  purpose: Type.Optional(Type.String()),
+  audience: Type.Optional(Type.String()),
+  objective: Type.Optional(Type.String()),
+  constraints: Type.Optional(Type.Array(Type.String())),
+  unknowns: Type.Optional(Type.Array(Type.String())),
+  assumptions: Type.Optional(Type.Array(Type.String())),
+  acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
+  targetPath: Type.Optional(Type.String()),
+  projectType: Type.Optional(Type.String({ description: "Explicit user choice: personal, client, or other" })),
+  reviewChoice: Type.Optional(Type.String({ description: "Explicit user choice: off, risk, or required" })),
+  proposedStack: Type.Optional(Type.Object({
+    language: Type.Optional(Type.String()),
+    runtime: Type.Optional(Type.String()),
+    packageManager: Type.Optional(Type.String()),
+    components: Type.Optional(Type.Array(Type.String())),
+    rationale: Type.Optional(Type.String()),
+  })),
+  qualitySettings: Type.Optional(Type.Object({
+    reviewPreset: Type.Optional(Type.String({ description: "experiment, personal, or client" })),
+    checks: Type.Optional(Type.Array(Type.String())),
+    notes: Type.Optional(Type.String()),
+  })),
+});
+
 export default function mabsExtension(pi: ExtensionAPI) {
   async function run(args: string[], signal?: AbortSignal): Promise<string> {
     const result = await pi.exec(process.execPath, [CLI, ...args], { cwd: ROOT, signal, timeout: 60_000 });
@@ -485,31 +512,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
       brief: Type.String({ description: "Brief ID" }),
       expectedVersion: Type.Number(),
       summary: Type.String({ description: "One line: what changed and why" }),
-      patch: Type.Object({
-        title: Type.Optional(Type.String()),
-        purpose: Type.Optional(Type.String()),
-        audience: Type.Optional(Type.String()),
-        objective: Type.Optional(Type.String()),
-        constraints: Type.Optional(Type.Array(Type.String())),
-        unknowns: Type.Optional(Type.Array(Type.String())),
-        assumptions: Type.Optional(Type.Array(Type.String())),
-        acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
-        targetPath: Type.Optional(Type.String()),
-        projectType: Type.Optional(Type.String({ description: "Explicit user choice: personal, client, or other" })),
-        reviewChoice: Type.Optional(Type.String({ description: "Explicit user choice: off, risk, or required" })),
-        proposedStack: Type.Optional(Type.Object({
-          language: Type.Optional(Type.String()),
-          runtime: Type.Optional(Type.String()),
-          packageManager: Type.Optional(Type.String()),
-          components: Type.Optional(Type.Array(Type.String())),
-          rationale: Type.Optional(Type.String()),
-        })),
-        qualitySettings: Type.Optional(Type.Object({
-          reviewPreset: Type.Optional(Type.String({ description: "experiment, personal, or client" })),
-          checks: Type.Optional(Type.Array(Type.String())),
-          notes: Type.Optional(Type.String()),
-        })),
-      }),
+      patch: briefPatchSchema,
     }),
     async execute(_toolCallId, params, signal) {
       const output = await run([
@@ -600,6 +603,45 @@ export default function mabsExtension(pi: ExtensionAPI) {
         ...(params.brief ? [`--brief=${params.brief}`] : []),
         ...(params.answer ? [`--answer=${params.answer}`] : []),
         ...(params.assumption ? [`--assumption=${params.assumption}`] : []),
+        "--by=pi-conversation",
+      ], signal);
+      return { content: [{ type: "text", text: output }], details: { output } };
+    },
+  });
+
+  registerCompactTool({
+    name: "mabs_resolve_intake",
+    label: "Resolve MABS Intake",
+    description: "Record several answers or assumptions, and optionally an explicit brief change, in one all-or-nothing request. Nothing is written if any part is invalid; retrying the same requestId returns the recorded result.",
+    promptSnippet: "Record several intake answers and an explicit brief change at once",
+    promptGuidelines: [
+      "Prefer mabs_resolve_intake over several mabs_answer_clarification calls when the user answered more than one question.",
+      "In mabs_resolve_intake give each resolution exactly one of answer (the user's words) or assumption (disclosed to the user).",
+      "mabs_resolve_intake patch fields are your explicit interpretation; the service infers nothing. Include summary whenever patch is present.",
+      "If mabs_resolve_intake reports already_resolved, ask the user before retrying with revise: true.",
+    ],
+    parameters: Type.Object({
+      brief: Type.String({ description: "Brief ID" }),
+      expectedVersion: Type.Number({ description: "Brief version last read" }),
+      requestId: Type.Optional(Type.String({ description: "Reuse the same id when retrying this exact request" })),
+      resolutions: Type.Optional(Type.Array(Type.Object({
+        clarificationId: Type.String(),
+        answer: Type.Optional(Type.String()),
+        assumption: Type.Optional(Type.String()),
+      }))),
+      patch: Type.Optional(briefPatchSchema),
+      summary: Type.Optional(Type.String({ description: "One line: what changed and why; required with patch" })),
+      revise: Type.Optional(Type.Boolean({ description: "Replace an already-recorded answer; only after the user confirms" })),
+    }),
+    async execute(toolCallId, params, signal) {
+      const output = await run([
+        "brief", "resolve", params.brief,
+        `--version=${String(params.expectedVersion)}`,
+        `--request=${params.requestId ?? `pi-${toolCallId}`}`,
+        `--payload=${JSON.stringify({
+          resolutions: params.resolutions ?? [], patch: params.patch ?? null,
+          summary: params.summary ?? null, revise: params.revise ?? false,
+        })}`,
         "--by=pi-conversation",
       ], signal);
       return { content: [{ type: "text", text: output }], details: { output } };

@@ -10,10 +10,11 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { IntakeError } from "../src/intake/errors.ts";
-import { answerClarification, askClarifications } from "../src/intake/service.ts";
-import { createBrief, getClarification } from "../src/intake/store.ts";
+import type { ExecutionPlan } from "../src/domain/plan.ts";
+import { acceptPlan, answerClarification, askClarifications, proposePlan, resolveIntake } from "../src/intake/service.ts";
+import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification } from "../src/intake/store.ts";
 import { Records } from "../src/store/records.ts";
-import { Store } from "../src/store/db.ts";
+import { SCHEMA_VERSION, Store } from "../src/store/db.ts";
 
 function setup(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "mabs-v5-intake-"));
@@ -38,6 +39,38 @@ function cliFor(root: string) {
   const run = (...args: string[]) => spawnSync(process.execPath, [script, ...args], { env, encoding: "utf8" });
   const json = <T>(...args: string[]): T => JSON.parse(execFileSync(process.execPath, [script, ...args], { env, encoding: "utf8" })) as T;
   return { run, json };
+}
+
+function smallPlan(): ExecutionPlan {
+  return {
+    objective: "Summarize weekly notes.",
+    mode: "sequential",
+    reason: "One cohesive change with its tests.",
+    tasks: [{
+      key: "summary",
+      title: "Weekly summary command",
+      objective: "Read the notes folder and print a weekly summary.",
+      acceptanceCriteria: ["A summary is printed for a folder of notes"],
+      executionMode: "sequential",
+      executionReason: "Single deliverable.",
+      allowedScope: ["src"],
+    }],
+  };
+}
+
+function proposeAndAccept(records: Records, briefId: string) {
+  const proposed = proposePlan(records, {
+    brief: briefId,
+    summary: "A local command that summarizes a week of notes.",
+    rationale: "Smallest useful tool.",
+    scope: "One command.",
+    requirements: [{ id: "REQ-1", text: "A weekly summary is printed." }],
+    plan: smallPlan(),
+  });
+  assert.equal(proposed.valid, true, proposed.errors.join("; "));
+  const proposal = proposed.proposal as NonNullable<typeof proposed.proposal>;
+  acceptPlan(records, { brief: briefId, proposalId: proposal.id, fingerprint: proposal.fingerprint, acceptedBy: "prathyush" });
+  return proposal;
 }
 
 const refusal = (code: string) => (error: unknown) => error instanceof IntakeError && error.code === code;
@@ -126,4 +159,168 @@ test("INT-01: the CLI returns ids directly and prints refusals as structured JSO
   assert.equal(body.error, "unknown_clarification");
   assert.equal(body.briefId, brief.id);
   assert.deepEqual(body.openClarificationIds, []);
+});
+
+// --- INT-02 ------------------------------------------------------------------
+
+function twoQuestions(records: Records) {
+  const brief = personalBrief(records);
+  const asked = askClarifications(records, {
+    brief: brief.id,
+    questions: [
+      { question: "Where do the notes live?", whyItMatters: "Reader.", field: "source" },
+      { question: "Which day?", whyItMatters: "Schedule.", field: "schedule" },
+    ],
+  });
+  const [first, second] = asked.requested.map((item) => item.id) as [string, string];
+  return { brief: getBrief(records, brief.id)!, first, second };
+}
+
+test("INT-02: answers and an explicit brief change commit together", (t) => {
+  const { records } = setup(t);
+  const { brief, first, second } = twoQuestions(records);
+  const result = resolveIntake(records, {
+    brief: brief.id, expectedVersion: brief.version, requestId: "req-1", actor: "prathyush",
+    resolutions: [
+      { clarificationId: first, answer: "A Markdown folder." },
+      { clarificationId: second, assumption: "Assuming Friday until told otherwise." },
+    ],
+    patch: { constraints: ["Reads local Markdown only"] },
+    summary: "Notes are local Markdown.",
+  });
+  assert.equal(result.replayed, false);
+  assert.equal(result.briefVersion, brief.version + 1);
+  assert.deepEqual(result.changed, ["constraints"]);
+  assert.deepEqual(result.resolved.map((item) => item.state), ["answered", "assumed"]);
+  assert.equal(result.resolved[0]?.answer, "A Markdown folder.", "the user's words are preserved");
+  assert.equal(result.resolved[1]?.assumption, "Assuming Friday until told otherwise.", "the assumption is kept separately");
+  assert.deepEqual(result.openQuestions, []);
+});
+
+test("INT-02: one invalid resolution writes nothing at all", (t) => {
+  const { records } = setup(t);
+  const { brief, first, second } = twoQuestions(records);
+  const eventsBefore = conversationFor(records, brief.id).length;
+  const cases: [string, Parameters<typeof resolveIntake>[1]["resolutions"], unknown][] = [
+    ["both answer and assumption", [{ clarificationId: first, answer: "x" }, { clarificationId: second, answer: "y", assumption: "z" }], "invalid_resolution"],
+    ["neither", [{ clarificationId: first, answer: "x" }, { clarificationId: second }], "invalid_resolution"],
+    ["unknown id", [{ clarificationId: first, answer: "x" }, { clarificationId: "clr_missing", answer: "y" }], "unknown_clarification"],
+    ["duplicate id", [{ clarificationId: first, answer: "x" }, { clarificationId: first, answer: "y" }], "invalid_resolution"],
+  ];
+  for (const [label, resolutions, code] of cases) {
+    assert.throws(
+      () => resolveIntake(records, { brief: brief.id, expectedVersion: brief.version, requestId: `bad-${label}`, resolutions }),
+      refusal(code as string), label,
+    );
+  }
+  // A valid answer paired with an invalid explicit patch also rolls back.
+  assert.throws(() => resolveIntake(records, {
+    brief: brief.id, expectedVersion: brief.version, requestId: "bad-patch",
+    resolutions: [{ clarificationId: first, answer: "x" }], patch: { projectType: "nonsense" as never }, summary: "bad",
+  }), /Unknown project type/);
+  assert.equal(getClarification(records, first)?.state, "open");
+  assert.equal(getClarification(records, second)?.state, "open");
+  assert.equal(getBrief(records, brief.id)?.version, brief.version);
+  assert.equal(conversationFor(records, brief.id).length, eventsBefore, "no audit events from a refused request");
+});
+
+test("INT-02: an identical retry replays the result; a different request under the same id conflicts", (t) => {
+  const { records } = setup(t);
+  const { brief, first } = twoQuestions(records);
+  const request = {
+    brief: brief.id, expectedVersion: brief.version, requestId: "req-retry",
+    resolutions: [{ clarificationId: first, answer: "A Markdown folder." }],
+    patch: { audience: "Me" }, summary: "Audience is the author.",
+  };
+  const original = resolveIntake(records, request);
+  const events = conversationFor(records, brief.id).length;
+  const replay = resolveIntake(records, request);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.briefVersion, original.briefVersion);
+  assert.equal(getBrief(records, brief.id)?.version, original.briefVersion, "the patch was not applied twice");
+  assert.equal(conversationFor(records, brief.id).length, events, "no duplicate audit events on retry");
+
+  assert.throws(() => resolveIntake(records, { ...request, patch: { audience: "My team" } }), refusal("request_conflict"));
+});
+
+test("INT-02: a stale expected version is refused so concurrent changes are not lost", (t) => {
+  const { records } = setup(t);
+  const { brief, first, second } = twoQuestions(records);
+  resolveIntake(records, {
+    brief: brief.id, expectedVersion: brief.version, requestId: "writer-a",
+    resolutions: [{ clarificationId: first, answer: "Folder." }], patch: { audience: "Me" }, summary: "A",
+  });
+  assert.throws(() => resolveIntake(records, {
+    brief: brief.id, expectedVersion: brief.version, requestId: "writer-b",
+    resolutions: [{ clarificationId: second, answer: "Friday." }], patch: { audience: "Team" }, summary: "B",
+  }), (error: unknown) => {
+    assert.ok(error instanceof IntakeError && error.code === "stale_version");
+    assert.equal(error.details.currentVersion, brief.version + 1);
+    return true;
+  });
+  assert.equal(getClarification(records, second)?.state, "open");
+  assert.equal(getBrief(records, brief.id)?.audience, "Me");
+});
+
+test("INT-02: an answered question needs an explicit revision to change", (t) => {
+  const { records } = setup(t);
+  const { brief, first } = twoQuestions(records);
+  const at = (requestId: string, answer: string, revise = false) => resolveIntake(records, {
+    brief: brief.id, expectedVersion: brief.version, requestId, revise, resolutions: [{ clarificationId: first, answer }],
+  });
+  at("r1", "Folder.");
+  assert.equal(at("r2", "Folder.").resolved[0]?.unchanged, true, "restating the same answer is harmless");
+  assert.throws(() => at("r3", "Notion."), refusal("already_resolved"));
+  assert.equal(getClarification(records, first)?.answer, "Folder.");
+  const revised = at("r4", "Notion.", true);
+  assert.equal(revised.resolved[0]?.answer, "Notion.");
+});
+
+test("INT-02: a governance change in a batch invalidates stale acceptance exactly as an update does", (t) => {
+  const { records } = setup(t);
+  const brief = personalBrief(records);
+  proposeAndAccept(records, brief.id);
+  const accepted = getBrief(records, brief.id)!;
+  assert.ok(activeAcceptance(records, brief.id));
+  const result = resolveIntake(records, {
+    brief: brief.id, expectedVersion: accepted.version, requestId: "gov",
+    patch: { reviewChoice: "required" }, summary: "The user wants independent review.",
+  });
+  assert.equal(result.invalidatedAcceptances, 1);
+  assert.equal(activeAcceptance(records, brief.id), null);
+  assert.equal(result.state, "CLARIFYING");
+});
+
+test("INT-02: the CLI resolve command is all-or-nothing and retry-safe", (t) => {
+  const { root } = setup(t);
+  const { run, json } = cliFor(root);
+  const brief = json<{ id: string; version: number }>("brief", "create", `--payload=${JSON.stringify({
+    title: "cli-batch", objective: "Summarize notes.", projectType: "personal", reviewChoice: "off",
+  })}`, "--by=prathyush");
+  const asked = json<{ briefVersion: number; requested: { id: string }[] }>("brief", "ask", brief.id, `--payload=${JSON.stringify({
+    questions: [{ question: "Where?", whyItMatters: "Reader.", field: "a" }, { question: "When?", whyItMatters: "Schedule.", field: "b" }],
+  })}`);
+  const payload = JSON.stringify({ resolutions: asked.requested.map((item) => ({ clarificationId: item.id, answer: "Yes." })) });
+  const args = ["brief", "resolve", brief.id, `--version=${asked.briefVersion}`, "--request=cli-1", `--payload=${payload}`, "--by=prathyush"];
+  const first = json<{ resolved: unknown[]; replayed: boolean }>(...args);
+  assert.equal(first.resolved.length, 2);
+  assert.equal(json<{ replayed: boolean }>(...args).replayed, true);
+  const conflict = run("brief", "resolve", brief.id, `--version=${asked.briefVersion}`, "--request=cli-1", "--payload={\"patch\":{\"audience\":\"x\"},\"summary\":\"y\"}");
+  assert.equal(conflict.status, 1);
+  assert.equal((JSON.parse(conflict.stderr) as { error: string }).error, "request_conflict");
+});
+
+test("INT-02: schema 19 adds intake requests to an existing schema 18 database", (t) => {
+  const { root } = setup(t);
+  assert.equal(SCHEMA_VERSION, "19");
+  const path = join(root, "v18.sqlite");
+  const fresh = new Store(path);
+  fresh.run("DROP TABLE intake_requests");
+  fresh.run("UPDATE schema_meta SET value = '18' WHERE key = 'schema_version'");
+  fresh.close();
+
+  const upgraded = new Store(path);
+  t.after(() => upgraded.close());
+  assert.equal(upgraded.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, "19");
+  assert.ok(upgraded.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_requests'"));
 });

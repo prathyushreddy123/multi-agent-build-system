@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dbPath } from "../core/paths.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = "18";
+export const SCHEMA_VERSION = "19";
 const LEGACY_SCHEMA_VERSION = 14;
 
 interface Migration {
@@ -142,6 +142,12 @@ const MIGRATIONS: Migration[] = [
   {
     version: 18,
     file: "migrations/018_trial_bindings.sql",
+    columns: {},
+    indexes: [],
+  },
+  {
+    version: 19,
+    file: "migrations/019_intake_requests.sql",
     columns: {},
     indexes: [],
   },

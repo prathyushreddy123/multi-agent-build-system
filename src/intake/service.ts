@@ -33,9 +33,11 @@ import {
   resolveClarification,
   setBriefState,
   syncGovernanceClarifications,
+  updateBrief,
 } from "./store.ts";
+import { insertIntakeRequest, matchIntakeRequest, requestHash } from "./requests.ts";
 import { IntakeError } from "./errors.ts";
-import type { ClarificationItem, ProductBrief, ProposalVersion } from "./types.ts";
+import type { AcceptanceBinding, BriefFieldPatch, ClarificationItem, ProductBrief, ProposalVersion } from "./types.ts";
 
 export interface ProposalInput {
   summary: string;
@@ -183,6 +185,148 @@ export function answerClarification(records: Records, input: {
 }) {
   requireClarification(records, input.id, input.brief);
   return resolveClarification(records, input);
+}
+
+export interface IntakeResolution {
+  clarificationId: string;
+  /** The user's own words. Exactly one of answer or assumption. */
+  answer?: string | null;
+  /** An assumption disclosed to the user because they could not answer. */
+  assumption?: string | null;
+}
+
+export interface ResolveIntakeInput {
+  brief: string;
+  expectedVersion: number;
+  /** Caller-chosen id: an identical retry returns the recorded result. */
+  requestId: string;
+  resolutions?: IntakeResolution[];
+  /** Explicit, already-interpreted brief fields. The service infers nothing. */
+  patch?: BriefFieldPatch | null;
+  /** Required with a patch: what changed and why. */
+  summary?: string | null;
+  /** Allow replacing an already-recorded answer or assumption with a different one. */
+  revise?: boolean;
+  actor?: string;
+}
+
+export interface ResolveIntakeResult {
+  requestId: string;
+  briefId: string;
+  briefVersion: number;
+  state: ProductBrief["state"];
+  resolved: (ClarificationRecord & { answer: string | null; assumption: string | null; unchanged: boolean })[];
+  changed: string[];
+  invalidatedAcceptances: number;
+  openQuestions: ClarificationRecord[];
+  /** True when this is the recorded result of an earlier identical request. */
+  replayed: boolean;
+}
+
+/**
+ * Record several answers, and optionally an explicit brief change, as one
+ * all-or-nothing request. Every part is checked before anything is written;
+ * the answers, the brief revision, and the request record commit together.
+ */
+export function resolveIntake(records: Records, input: ResolveIntakeInput): ResolveIntakeResult {
+  const requestId = input.requestId?.trim();
+  if (!requestId) throw new IntakeError("invalid_resolution", "A request id is required so a retry cannot apply the answers twice.");
+  const resolutions = input.resolutions ?? [];
+  const patch = input.patch ?? null;
+  if (resolutions.length === 0 && !patch) {
+    throw new IntakeError("invalid_resolution", "Provide at least one answer or assumption, or an explicit brief change.");
+  }
+  const actor = input.actor ?? "agent";
+
+  return records.store.tx(() => {
+    const brief = requireBrief(records, input.brief);
+    const payloadHash = requestHash("resolve", {
+      briefId: brief.id, expectedVersion: input.expectedVersion, resolutions, patch,
+      summary: input.summary ?? null, revise: input.revise === true,
+    });
+    const recorded = matchIntakeRequest<Record<string, unknown>, ResolveIntakeResult>(records, {
+      requestId, briefId: brief.id, operation: "resolve", payloadHash,
+    });
+    if (recorded?.result) return { ...recorded.result, replayed: true };
+
+    if (brief.version !== input.expectedVersion) {
+      throw new IntakeError(
+        "stale_version",
+        `Brief ${brief.id} changed since version ${input.expectedVersion}; it is now at version ${brief.version}. ` +
+        "Read the current brief before resolving again.",
+        { briefId: brief.id, expectedVersion: input.expectedVersion, currentVersion: brief.version },
+      );
+    }
+    if (patch && !input.summary?.trim()) {
+      throw new IntakeError("invalid_resolution", "A brief change needs a one-line summary of what changed and why.");
+    }
+
+    // Validate every resolution before writing any of them.
+    const seen = new Set<string>();
+    const plan: { item: ClarificationItem; answer: string | null; assumption: string | null; unchanged: boolean }[] = [];
+    for (const resolution of resolutions) {
+      const id = resolution.clarificationId;
+      if (seen.has(id)) throw new IntakeError("invalid_resolution", `Clarification ${id} appears more than once in this request.`, { clarificationId: id });
+      seen.add(id);
+      const item = requireClarification(records, id, brief.id);
+      const answer = resolution.answer?.trim() || null;
+      const assumption = resolution.assumption?.trim() || null;
+      if ((answer === null) === (assumption === null)) {
+        throw new IntakeError(
+          "invalid_resolution",
+          `Clarification ${id} needs exactly one of answer (the user's words) or assumption (disclosed to the user).`,
+          { clarificationId: id },
+        );
+      }
+      if (item.state === "withdrawn") {
+        throw new IntakeError("invalid_resolution", `Clarification ${id} was withdrawn and cannot be answered.`, { clarificationId: id });
+      }
+      const unchanged = item.state !== "open" && item.answer === answer && item.assumption === assumption;
+      if (item.state !== "open" && !unchanged && input.revise !== true) {
+        throw new IntakeError(
+          "already_resolved",
+          `Clarification ${id} is already ${item.state}; set revise to replace the recorded ${item.answer !== null ? "answer" : "assumption"}.`,
+          { clarificationId: id, state: item.state, answer: item.answer, assumption: item.assumption },
+        );
+      }
+      plan.push({ item, answer, assumption, unchanged });
+    }
+
+    for (const entry of plan) {
+      if (entry.unchanged) continue;
+      resolveClarification(records, {
+        id: entry.item.id, answer: entry.answer ?? undefined, assumption: entry.assumption ?? undefined,
+        actor: entry.answer !== null ? (input.actor ?? "user") : actor,
+      });
+    }
+    let changed: string[] = [];
+    let invalidated: AcceptanceBinding[] = [];
+    if (patch) {
+      const update = updateBrief(records, {
+        briefId: brief.id, expectedVersion: input.expectedVersion, patch, summary: input.summary as string, actor,
+      });
+      changed = update.changed;
+      invalidated = update.invalidated;
+    }
+
+    const current = getBrief(records, brief.id) as ProductBrief;
+    const result: ResolveIntakeResult = {
+      requestId,
+      briefId: current.id,
+      briefVersion: current.version,
+      state: current.state,
+      resolved: plan.map((entry) => {
+        const item = getClarification(records, entry.item.id) as ClarificationItem;
+        return { ...clarificationRecord(item), answer: item.answer, assumption: item.assumption, unchanged: entry.unchanged };
+      }),
+      changed,
+      invalidatedAcceptances: invalidated.length,
+      openQuestions: listClarifications(records, brief.id, "open").map((item) => clarificationRecord(item)),
+      replayed: false,
+    };
+    insertIntakeRequest(records, { requestId, briefId: brief.id, operation: "resolve", payloadHash, state: "completed", result });
+    return result;
+  });
 }
 
 /**

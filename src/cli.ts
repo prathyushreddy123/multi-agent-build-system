@@ -49,6 +49,7 @@ import {
   briefDetail,
   productSummary,
   proposePlan,
+  resolveIntake,
   submitAcceptedPlan,
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
@@ -169,6 +170,8 @@ PRODUCTS AND PLANS
   brief update <brief> --version=N --summary=... --payload='{...}'
   brief ask <brief> --payload='{"questions":[...]}'
   brief answer <clarification> --answer=... | --assumption=... [--brief=<brief>]
+  brief resolve <brief> --version=N --request=<id> --payload='{"resolutions":[...],"patch":{...},"summary":...}'
+                                                Several answers and a brief change, all or nothing; retry-safe
   brief propose <brief> --payload='{"summary":...,"plan":{...}}'
   brief accept <brief> <proposal> --fingerprint=... --by=<person> [--note=...]
   brief submit <brief> [--project=id]           Apply the accepted plan; no hand-written JSON
@@ -915,6 +918,25 @@ async function main(): Promise<void> {
         console.log(JSON.stringify(answerClarification(records, {
           id, brief: textOption(args, "brief"), answer: textOption(args, "answer"), assumption: textOption(args, "assumption"), actor,
         }), null, 2));
+        return;
+      }
+      if (action === "resolve") {
+        const value = args.positionals[0];
+        const expectedVersion = Number(textOption(args, "version"));
+        const requestId = textOption(args, "request");
+        if (!value || !requestId || !Number.isSafeInteger(expectedVersion)) {
+          throw new Error("Usage: mabs brief resolve <brief> --version=N --request=<id> --payload='{\"resolutions\":[...],\"patch\":{...},\"summary\":...}'");
+        }
+        const result = resolveIntake(records, {
+          brief: value, expectedVersion, requestId, actor,
+          resolutions: payload.resolutions as never,
+          patch: (payload.patch ?? null) as never,
+          summary: (payload.summary ?? null) as string | null,
+          revise: payload.revise === true,
+        });
+        const brief = resolveBrief(records, result.briefId);
+        const pending = brief ? governanceNeedsInput({ kind: "brief", id: brief.id }, briefGovernance(brief)) : null;
+        console.log(JSON.stringify(pending ? { ...pending, resolution: result } : result, null, 2));
         return;
       }
       if (action === "propose") {
