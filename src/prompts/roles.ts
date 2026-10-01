@@ -42,20 +42,34 @@ export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {
  * every field. Indentation and empty fields were a fifth of a small packet.
  */
 export function renderWorkerInput(workerInput: WorkerInput): string {
-  const prune = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(prune);
-    if (value === null || typeof value !== "object") return value;
-    const kept: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      const pruned = prune(item);
-      if (pruned === null || pruned === undefined) continue;
-      if (Array.isArray(pruned) && pruned.length === 0) continue;
-      if (typeof pruned === "object" && !Array.isArray(pruned) && Object.keys(pruned).length === 0) continue;
-      kept[key] = pruned;
-    }
-    return kept;
-  };
-  return JSON.stringify(prune(workerInput));
+  return JSON.stringify(pruneForWorker(workerInput));
+}
+
+/** Drop null, empty-list, and empty-object fields at every depth, as the worker sees them. */
+export function pruneForWorker(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(pruneForWorker);
+  if (value === null || typeof value !== "object") return value;
+  const kept: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const pruned = pruneForWorker(item);
+    if (pruned === null || pruned === undefined) continue;
+    if (Array.isArray(pruned) && pruned.length === 0) continue;
+    if (typeof pruned === "object" && !Array.isArray(pruned) && Object.keys(pruned).length === 0) continue;
+    kept[key] = pruned;
+  }
+  return kept;
+}
+
+/**
+ * UTF-8 bytes a value occupies in the rendered worker input: zero when the
+ * renderer omits it, otherwise its compact pruned JSON.
+ */
+export function renderedBytes(value: unknown): number {
+  const pruned = pruneForWorker(value);
+  if (pruned === null || pruned === undefined) return 0;
+  if (Array.isArray(pruned) && pruned.length === 0) return 0;
+  if (typeof pruned === "object" && !Array.isArray(pruned) && Object.keys(pruned).length === 0) return 0;
+  return Buffer.byteLength(JSON.stringify(pruned), "utf8");
 }
 
 export function assembleWorkerPrompt(input: {

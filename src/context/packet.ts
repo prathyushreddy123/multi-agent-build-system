@@ -8,7 +8,7 @@ import { CONTRACT_VERSION } from "../domain/contract.ts";
 import type { WorkerInput, WorkerRole } from "../domain/contract.ts";
 import type { TaskObligation } from "../domain/execution.ts";
 import { lessonsForTask } from "../incidents/lessons.ts";
-import { assembleWorkerPrompt } from "../prompts/roles.ts";
+import { assembleWorkerPrompt, renderWorkerInput, renderedBytes } from "../prompts/roles.ts";
 import { guidanceForAttempt, guidanceText } from "../prompts/versions.ts";
 import type { Project, Records, Task, TaskCheckpoint } from "../store/records.ts";
 import type { Workspace } from "../workspace/git.ts";
@@ -35,7 +35,8 @@ export interface ContextPacket {
 export type PacketPurpose = "implementation" | "repair" | "review";
 
 /** Byte-derived estimate; recorded with every packet so a later estimator cannot be confused with it. */
-export const CONTEXT_ESTIMATOR_VERSION = "utf8-bytes-div4.v1";
+/** v2: section bytes measure the rendered worker input that is sent, not the stored packet. */
+export const CONTEXT_ESTIMATOR_VERSION = "utf8-bytes-div4.v2";
 /** Inline omission entries; the complete inventory is always written to disk when larger. */
 const INLINE_OMISSIONS = 20;
 
@@ -46,7 +47,11 @@ export interface PromptAccounting {
   promptBytes: number;
   promptTokenEstimate: number;
   budgetTokens: number;
-  /** Serialized bytes per prompt section; `instructions` is everything outside the worker input. */
+  /**
+   * UTF-8 bytes per section of the sent prompt. `instructions + worker_input`
+   * equals promptBytes; the worker-input parts plus `worker_input_other` equal
+   * worker_input. Bytes divided by four is an estimate, not a tokenizer count.
+   */
   sectionBytes: Record<string, number>;
   mandatoryCount: number;
   optionalCount: number;
@@ -370,17 +375,25 @@ export function buildContextPacket(input: {
   }
   const derivedTokenEstimate = workerInput.context.derived_token_estimate;
 
+  // Measured on the strings actually sent: the worker input as rendered into
+  // the prompt (compact, pruned), not the pretty-printed stored packet.
   const promptBytes = Buffer.byteLength(prompt, "utf8");
-  const workerInputBytes = Buffer.byteLength(JSON.stringify(workerInput, null, 2), "utf8");
+  const workerInputBytes = Buffer.byteLength(renderWorkerInput(workerInput), "utf8");
+  const parts = {
+    requirements: renderedBytes(workerInput.context.requirements),
+    obligations: renderedBytes(workerInput.context.obligations),
+    previous_findings: renderedBytes(workerInput.context.previous_findings),
+    checkpoint: renderedBytes(workerInput.context.checkpoint),
+    file_context: renderedBytes(workerInput.context.file_context),
+    omissions: renderedBytes(workerInput.context.omissions),
+  };
+  // instructions + worker_input = promptBytes, and the worker_input parts plus
+  // worker_input_other (task, contract, workspace, keys and framing) = worker_input.
   const sectionBytes = {
     instructions: promptBytes - workerInputBytes,
     worker_input: workerInputBytes,
-    requirements: Buffer.byteLength(JSON.stringify(workerInput.context.requirements), "utf8"),
-    obligations: Buffer.byteLength(JSON.stringify(workerInput.context.obligations), "utf8"),
-    previous_findings: Buffer.byteLength(JSON.stringify(workerInput.context.previous_findings), "utf8"),
-    checkpoint: Buffer.byteLength(JSON.stringify(workerInput.context.checkpoint), "utf8"),
-    file_context: Buffer.byteLength(JSON.stringify(workerInput.context.file_context), "utf8"),
-    omissions: Buffer.byteLength(JSON.stringify(workerInput.context.omissions), "utf8"),
+    ...parts,
+    worker_input_other: workerInputBytes - Object.values(parts).reduce((total, bytes) => total + bytes, 0),
   };
   const accounting: PromptAccounting = {
     budgetPolicy,

@@ -102,10 +102,21 @@ test("CTX-02: recorded prompt bytes and fingerprint match the exact string sent,
   assert.equal(packet?.prompt_bytes, Buffer.byteLength(sent, "utf8"));
   assert.notEqual(packet?.prompt_bytes, sent.length, "bytes, not UTF-16 code units");
   assert.equal(packet?.content_fingerprint, `sha256:${createHash("sha256").update(sent).digest("hex")}`);
-  assert.equal(packet?.estimator_version, "utf8-bytes-div4.v1");
+  assert.equal(packet?.estimator_version, "utf8-bytes-div4.v2");
   assert.equal(packet?.purpose, "implementation");
   const sections = JSON.parse(String(packet?.section_sizes)) as Record<string, number>;
   assert.equal((sections.instructions ?? 0) + (sections.worker_input ?? 0), packet?.prompt_bytes);
+  // worker_input is the rendered line that was sent, not the pretty-printed stored packet.
+  const lines = sent.split("\n");
+  const rendered = lines[lines.indexOf("Worker input:") + 1] as string;
+  assert.equal(sections.worker_input, Buffer.byteLength(rendered, "utf8"));
+  for (const [name, bytes] of Object.entries(sections)) assert.ok(bytes >= 0, `${name} is ${bytes}`);
+  const parts = ["requirements", "obligations", "previous_findings", "checkpoint", "file_context", "omissions", "worker_input_other"];
+  assert.equal(parts.reduce((total, name) => total + (sections[name] ?? 0), 0), sections.worker_input, "worker-input parts sum exactly");
+  const prepared = records.listEvents(task.id).find((event) => event.kind === "attempt.prompt_prepared");
+  const preparedData = JSON.parse(String(prepared?.data)) as { coldPromptBytes: number; resumePromptBytes: number | null };
+  assert.equal(preparedData.coldPromptBytes, packet?.prompt_bytes);
+  assert.equal(preparedData.resumePromptBytes, null, "a cold implementation attempt has no resume brief");
 });
 
 test("CTX-03: under the complete-prompt policy, mandatory overflow blocks preparation instead of truncating", async (t) => {

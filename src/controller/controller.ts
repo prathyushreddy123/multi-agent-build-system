@@ -2693,6 +2693,17 @@ export class Controller {
       engineVersion: ENGINE_REVISION,
     });
     this.records.updateTaskFields(task.id, { claimed_by: launchId, claimed_at: new Date().toISOString() });
+    // A resumed repair sends the short brief; the full packet is only its cold
+    // fallback. The session_resumed / session_resume_fallback event says which
+    // one the provider actually received.
+    this.records.recordEvent({
+      kind: "attempt.prompt_prepared", projectId: task.projectId, taskId: task.id, attemptId,
+      data: {
+        coldPromptBytes: Buffer.byteLength(packet.prompt, "utf8"),
+        resumePromptBytes: resume ? Buffer.byteLength(resume.prompt, "utf8") : null,
+        packetId: packet.id,
+      },
+    });
     this.records.recordRouting({
       taskId: task.id,
       attemptId,

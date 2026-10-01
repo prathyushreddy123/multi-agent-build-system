@@ -179,6 +179,12 @@ test("a repair on the same route continues the implementer's session with a shor
   assert.equal(attempts[1]?.parentSessionId, "sess-1");
   assert.equal(attempts[1]?.parentAttemptId, attempts[0]?.id);
   assert.equal(records.listEventsOfKind(task.id, "attempt.session_resumed").length, 1);
+  // Accounting records what the resumed repair actually sent, beside its cold fallback.
+  const prepared = records.listEventsOfKind(task.id, "attempt.prompt_prepared")
+    .map((event) => JSON.parse(String(event.data)) as { coldPromptBytes: number; resumePromptBytes: number | null });
+  assert.equal(prepared.length, 2);
+  assert.equal(prepared[1]?.resumePromptBytes, Buffer.byteLength(repair?.resume?.prompt ?? "", "utf8"));
+  assert.equal(prepared[1]?.coldPromptBytes, Buffer.byteLength(repair?.prompt ?? "", "utf8"));
 });
 
 test("a repair on a different model starts cold", async (t) => {

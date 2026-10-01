@@ -310,8 +310,17 @@ async function runMabs(fixture: Fixture, harness: "mabs-claude" | "mabs-codex", 
     const dir = join(state, "artifacts", taskId, id);
     let raw = "";
     let promptBytes: number | null = null;
-    try { raw = String((JSON.parse(readFileSync(join(dir, "completion.json"), "utf8")) as { result?: { raw?: string } }).result?.raw ?? ""); } catch { /* no completion */ }
-    try { promptBytes = Buffer.byteLength(String((JSON.parse(readFileSync(join(dir, "launch.json"), "utf8")) as { prompt?: string }).prompt ?? "")); } catch { /* no launch spec */ }
+    let resumed = false;
+    try {
+      const completion = JSON.parse(readFileSync(join(dir, "completion.json"), "utf8")) as { result?: { raw?: string; resume?: { used?: boolean } } };
+      raw = String(completion.result?.raw ?? "");
+      resumed = completion.result?.resume?.used === true;
+    } catch { /* no completion */ }
+    try {
+      // Count the prompt the provider received: the resume brief when the session resumed, else the full packet.
+      const spec = JSON.parse(readFileSync(join(dir, "launch.json"), "utf8")) as { prompt?: string; resume?: { prompt?: string } };
+      promptBytes = Buffer.byteLength(String((resumed ? spec.resume?.prompt : spec.prompt) ?? ""));
+    } catch { /* no launch spec */ }
     const startedAt = Date.parse(String(attempt.startedAt));
     const endedAt = Date.parse(String(attempt.endedAt));
     return {
