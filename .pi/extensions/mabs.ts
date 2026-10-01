@@ -520,7 +520,7 @@ export default function mabsExtension(pi: ExtensionAPI) {
     taskClass: Type.Optional(Type.String({ description: "mechanical, small_implementation, complex_coding, diagnosis, planning, research" })),
     changeRisk: Type.Optional(Type.String({ description: "low, medium, or high" })),
     language: Type.Optional(Type.String()),
-    allowedScope: Type.Optional(Type.Array(Type.String(), { description: "Repository-relative paths this task may edit" })),
+    allowedScope: Type.Optional(Type.Array(Type.String(), { description: "Repository-relative directories or files this task may edit, e.g. \"src\" or \"README.md\" (path prefixes, not globs)" })),
     executionMode: Type.String({ description: "single, sequential, parallel, or mixed" }),
     executionReason: Type.String({ description: "Why this task runs that way, and why it is separate if it could be part of another task" }),
     requirements: Type.Optional(Type.Array(Type.String(), {

@@ -45,13 +45,31 @@ export interface PlanValidation {
   topologicalOrder: string[];
 }
 
+/**
+ * Scopes are repository-relative path prefixes. A trailing `/**` or `/*` is
+ * the same prefix written as a glob, so it is normalized away; `**`, `*`, or
+ * `.` alone is the whole repository (""). Anything else glob-like cannot be a
+ * prefix and is refused when the plan is validated.
+ */
+export function normalizeScope(scope: string): string {
+  let value = scope.replaceAll("\\", "/").trim().replace(/^\.\//, "");
+  while (/(^|\/)\*\*?$/.test(value)) value = value.replace(/\/?\*\*?$/, "");
+  value = value.replace(/\/+$/, "");
+  return value === "." ? "" : value;
+}
+
+/** Whether a repository-relative file falls inside one normalized scope. */
+export function pathInScope(file: string, scope: string): boolean {
+  const path = normalizeScope(file);
+  return scope === "" || path === scope || path.startsWith(`${scope}/`);
+}
+
 export function scopesOverlap(left: string[], right: string[]): boolean {
   if (left.length === 0 || right.length === 0) return true;
-  const normalize = (scope: string) => scope.replace(/^\.\//, "").replace(/\/$/, "");
   return left.some((a) => right.some((b) => {
-    const x = normalize(a);
-    const y = normalize(b);
-    return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+    const x = normalizeScope(a);
+    const y = normalizeScope(b);
+    return x === "" || y === "" || x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
   }));
 }
 
@@ -128,6 +146,12 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
         return !normalized || normalized.startsWith("/") || normalized.split("/").includes("..");
       });
       if (invalidScope) errors.push(`${label}: allowedScope must contain only repository-relative paths.`);
+      else {
+        const globs = task.allowedScope.filter((scope) => /[*?[\]{}]/.test(normalizeScope(scope)));
+        if (globs.length > 0) {
+          errors.push(`${label}: allowedScope entries are path prefixes, not globs (${globs.join(", ")}); use a directory or file path such as "src" or "test/cli.test.js".`);
+        }
+      }
     }
   }
 

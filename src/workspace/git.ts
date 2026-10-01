@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { exec } from "../core/exec.ts";
+import { normalizeScope, pathInScope } from "../domain/plan.ts";
 import { worktreeRoot } from "../core/paths.ts";
 import type { Project, Task } from "../store/records.ts";
 
@@ -175,12 +176,8 @@ export async function finalizeWorkspace(path: string, task: Task): Promise<{ rev
   const baseRevision = task.baseRevision ?? await workspaceRevision(path);
   const changedBeforeCommit = await workspaceChangedFiles(path, baseRevision);
   if (task.allowedScope.length > 0) {
-    const normalize = (value: string) => value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
-    const scopes = task.allowedScope.map(normalize);
-    const outsideScope = changedBeforeCommit.filter((file) => {
-      const normalized = normalize(file);
-      return !scopes.some((scope) => normalized === scope || normalized.startsWith(`${scope}/`));
-    });
+    const scopes = task.allowedScope.map(normalizeScope);
+    const outsideScope = changedBeforeCommit.filter((file) => !scopes.some((scope) => pathInScope(file, scope)));
     if (outsideScope.length > 0) {
       throw new Error(`Worker changed files outside the allowed scope: ${outsideScope.join(", ")}`);
     }

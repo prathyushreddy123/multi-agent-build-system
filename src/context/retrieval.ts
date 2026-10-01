@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 
 import type { Project, Task } from "../store/records.ts";
+import { normalizeScope, pathInScope } from "../domain/plan.ts";
 
 export interface RetrievedFile {
   path: string;
@@ -161,7 +162,7 @@ export function retrieveContext(input: {
   const keywordText = [...explicit].reduce((text, path) => text.split(path).join(" "), sourceText);
   const keywords = terms(keywordText);
   const dependencyFiles = new Set((input.dependencyFiles ?? []).map(normalize));
-  const scopes = input.task.allowedScope.map(normalize);
+  const scopes = input.task.allowedScope.map(normalizeScope);
   const omitted: OmittedFile[] = [];
   const warnings: string[] = [];
   let tracked: string[];
@@ -194,7 +195,7 @@ export function retrieveContext(input: {
     let score = 0;
     if (explicit.has(path) || explicit.has(basename(path))) { score += 100; reasons.push("explicitly referenced by task or requirement"); }
     if (dependencyFiles.has(path)) { score += 90; reasons.push("changed by a completed dependency"); }
-    if (scopes.some((scope) => path === scope || path.startsWith(`${scope}/`))) { score += 60; reasons.push("inside declared task scope"); }
+    if (scopes.some((scope) => pathInScope(path, scope))) { score += 60; reasons.push("inside declared task scope"); }
     if (MANIFESTS.has(path) || [...MANIFESTS].some((manifest) => path.startsWith(`${manifest}/`))) {
       score += 40; reasons.push("repository manifest or project guidance");
     }

@@ -110,3 +110,23 @@ test("worker environment removes paid API access and guard fails closed", () => 
   assert.throws(() => assertNoPaidFallback(parent), /Refusing to launch/);
   assert.doesNotThrow(() => assertNoPaidFallback(result.env));
 });
+
+test("scopes written as directory globs are the same path prefix; other globs are refused", async () => {
+  const { normalizeScope, pathInScope, scopesOverlap, validateExecutionPlan } = await import("../src/domain/plan.ts");
+  assert.equal(normalizeScope("src/**"), "src");
+  assert.equal(normalizeScope("./src/*"), "src");
+  assert.equal(normalizeScope("src/"), "src");
+  assert.equal(normalizeScope("**"), "");
+  assert.ok(pathInScope("src/cli.js", normalizeScope("src/**")), "a live V3 run blocked here: src/** must allow src/cli.js");
+  assert.ok(!pathInScope("srcfoo/cli.js", "src"));
+  assert.ok(pathInScope("anything/at/all.js", normalizeScope("**")));
+  assert.ok(scopesOverlap(["src/**"], ["src/store"]));
+  assert.ok(!scopesOverlap(["src/**"], ["test/**"]));
+  const plan = (scope: string[]) => ({ objective: "o", mode: "single", reason: "r", tasks: [{
+    key: "t", title: "t", objective: "o", acceptanceCriteria: ["a"], executionMode: "single", executionReason: "r", allowedScope: scope,
+  }] }) as never;
+  assert.equal(validateExecutionPlan(plan(["src/**", "test/**"])).valid, true);
+  const refused = validateExecutionPlan(plan(["test/*.test.js"]));
+  assert.equal(refused.valid, false);
+  assert.match(refused.errors.join(" "), /path prefixes, not globs \(test\/\*\.test\.js\)/);
+});
