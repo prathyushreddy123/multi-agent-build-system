@@ -157,8 +157,10 @@ function printHelp(): void {
 
 EVERYDAY
   status                                    Queue, controller liveness, and health
-  controller run [--adapter=codex] [--ui] [--port=4317] [--force]
-                                            Run the controller loop (refuses a second instance unless --force)
+  controller run [--adapter=codex | --pin-adapter=codex] [--ui] [--port=4317] [--force]
+                                            Run the controller loop (refuses a second instance unless --force).
+                                            --adapter prefers a provider and may fall back with a recorded reason;
+                                            --pin-adapter never runs implementation on another provider
       [--model=...] [--effort=low|medium|high] [--capacity-fallback=allow|wait]
       [--workers=1] [--gate-limit=N] [--adaptive]   One model worker unless a pilot is approved
       [--export=file:/abs/path|https://collector]  Optional redacted telemetry export (off by default)
@@ -1625,7 +1627,13 @@ async function main(): Promise<void> {
     }
     if (area === "controller" && (action === "once" || action === "run")) {
       const args = parseArgs(rest);
-      const adapter = textOption(args, "adapter") ?? process.env.MABS_ADAPTER;
+      const pinned = textOption(args, "pin-adapter");
+      if (pinned !== undefined && pinned !== "claude" && pinned !== "codex") throw new Error("--pin-adapter must be claude or codex");
+      if (pinned && textOption(args, "adapter") && textOption(args, "adapter") !== pinned) {
+        throw new Error("--adapter (a preference) and --pin-adapter (strict) name different providers; choose one.");
+      }
+      // --adapter is a preference: tried first, with a recorded fallback. --pin-adapter is strict for implementation.
+      const adapter = pinned ?? textOption(args, "adapter") ?? process.env.MABS_ADAPTER;
       if (adapter !== undefined && adapter !== "claude" && adapter !== "codex") throw new Error("--adapter must be claude or codex");
 
       // Refuse to become the second controller. Without this, the loser of the
@@ -1644,6 +1652,7 @@ async function main(): Promise<void> {
         // `routing verify-entitlement` run beside a live controller takes effect on its next tick.
         capabilityRegistrySource: { path: entitlementOverlayPath(), load: loadCapabilityRegistry },
         defaultAdapter: adapter as "claude" | "codex" | undefined,
+        pinnedAdapter: pinned as "claude" | "codex" | undefined,
         defaultModel: textOption(args, "model") ?? null,
         defaultEffort: textOption(args, "effort") ?? null,
         capacityFallback: capacityFallbackOption(textOption(args, "capacity-fallback")),

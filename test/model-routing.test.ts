@@ -423,6 +423,49 @@ test("RTE-03: a busy preferred route waits unless capacity fallback is explicitl
   assert.match(allowed.fallbackReason ?? "", /Capacity fallback: codex at configured concurrency/);
 });
 
+test("ROUTE-01: a pin selects only the pinned provider and records the mode", () => {
+  const pinned = selectRoute({ task: task(), ...routes, providers: available(), pinnedAdapter: "claude" });
+  assert.equal(pinned.chosen?.adapter, "claude");
+  assert.equal(pinned.routeMode, "pinned");
+  assert.equal(pinned.decision, "primary", "skipping another provider's routes is not a fallback");
+  assert.ok(pinned.rejected.some((item) => item.candidate.adapter === "codex" && /route pinned to claude/.test(item.reason)));
+  assert.equal(selectRoute({ task: task(), ...routes, providers: available() }).routeMode, "policy");
+});
+
+test("ROUTE-01: an unavailable or busy pinned provider waits or blocks; no other provider is substituted", () => {
+  const cooled = selectRoute({
+    task: task(), ...routes, providers: available({ codex: { available: false, reason: "cooldown after quota" } }), pinnedAdapter: "codex",
+  });
+  assert.equal(cooled.chosen, null);
+  assert.equal(cooled.decision, "no_route");
+  assert.equal(cooled.eligible.length, 0);
+  assert.match(cooled.reason, /Pinned provider codex cannot run this task now \(cooldown after quota\); no other provider is substituted/);
+
+  const busy = selectRoute({
+    task: task(), ...routes, providers: available({ codex: { active: 1, limit: 1 } }), pinnedAdapter: "codex", capacityFallback: "allow",
+  });
+  assert.equal(busy.chosen, null, "capacity fallback never crosses a pin");
+  assert.equal(busy.decision, "capacity_wait");
+  assert.deepEqual(busy.deferred.map((item) => item.adapter), ["codex"]);
+
+  const policy = structuredClone(DEFAULT_ROUTING_POLICY);
+  policy.routes.small_implementation = policy.routes.small_implementation.filter((candidate) => candidate.adapter === "codex");
+  const missing = selectRoute({ task: task(), ...routes, policy, providers: available(), pinnedAdapter: "claude" });
+  assert.equal(missing.chosen, null);
+  assert.equal(missing.decision, "no_route");
+  assert.match(missing.reason, /no claude route for small_implementation/);
+});
+
+test("ROUTE-01: a preference falls back to another provider with an observable reason", () => {
+  const preferred = selectRoute({
+    task: task(), ...routes, providers: available({ claude: { available: false, reason: "signed out" } }), preferredAdapter: "claude",
+  });
+  assert.equal(preferred.routeMode, "preferred");
+  assert.equal(preferred.chosen?.adapter, "codex");
+  assert.equal(preferred.decision, "provider_fallback");
+  assert.match(preferred.fallbackReason ?? "", /claude \(signed out\)/);
+});
+
 test("RTE-04: an exhausted quota domain excludes every route inside it", () => {
   const shared: CapabilityRegistry = {
     version: "shared-account",
@@ -507,6 +550,56 @@ test("controller passes the exact route effort to the adapter and records reques
   assert.equal(route?.quota_domain_id, "openai:chatgpt-subscription");
   assert.deepEqual(route?.effective_selection, { adapter: "codex", model: CODEX_MODEL, effort: "low", delegation: "disabled" });
   assert.ok(Array.isArray(route?.eligibility_evidence));
+});
+
+test("ROUTE-01: a pinned controller never starts another provider when the pin cannot run", async (t) => {
+  const { records, task: created } = controllerSetup(t);
+  records.noteProviderFailure("codex", "QUOTA", "subscription window exhausted");
+  const codex = new StubAdapter("codex");
+  const claude = new StubAdapter("claude");
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), pinnedAdapter: "codex", workerLimit: 1,
+  });
+  await controller.tick();
+  await controller.stop();
+  assert.equal(codex.starts.length + claude.starts.length, 0, "no alternative worker started");
+  const blocked = records.getTask(created.id);
+  assert.equal(blocked?.state, "BLOCKED");
+  assert.equal(blocked?.failureClass, "QUOTA", "a pinned provider in cooldown is a quota wait, not a config error");
+  assert.match(blocked?.blockedReason ?? "", /no other provider is substituted/);
+
+  // The same unavailability under a preference falls back, and says so.
+  const preferring = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), defaultAdapter: "codex", workerLimit: 1,
+  });
+  records.transition(created.id, "READY", { blocked_reason: null, failure_class: null }, { reason: "test retry" });
+  await preferring.tick();
+  await preferring.stop();
+  assert.equal(claude.starts.length, 1);
+  const routed = records.routingForTask(created.id).at(-1);
+  assert.match(String(routed?.fallback_reason ?? routed?.reason ?? ""), /codex/);
+});
+
+test("ROUTE-01: a pinned implementation still gets an independent reviewer, and the mode is recorded", async (t) => {
+  const { records, task: created } = controllerSetup(t);
+  const codex = new StubAdapter("codex");
+  const claude = new StubAdapter("claude");
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["codex", codex], ["claude", claude]]), pinnedAdapter: "claude", workerLimit: 1,
+  });
+  const review = (controller as unknown as {
+    selectReviewRoute(task: Task, route: string, implementer?: string): { chosen: { adapter: string } | null; routeMode?: string };
+  }).selectReviewRoute(records.getTask(created.id) as Task, "independent_provider", "claude");
+  assert.equal(review.chosen?.adapter, "codex", "the implementation pin does not constrain the reviewer");
+  assert.notEqual(review.routeMode, "pinned");
+
+  await controller.tick();
+  await controller.stop();
+  assert.equal(claude.starts.length, 1);
+  assert.equal(codex.starts.length, 0);
+  const override = records.listEvents(created.id).find((event) => event.kind === "routing.override");
+  const data = JSON.parse(String(override?.data)) as { routeMode: string; pinnedAdapter: string; chosenAdapter: string };
+  assert.deepEqual([data.routeMode, data.pinnedAdapter, data.chosenAdapter], ["pinned", "claude", "claude"]);
 });
 
 test("an ineligible operator override blocks as CONFIG with zero worker launches", async (t) => {

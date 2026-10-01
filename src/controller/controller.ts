@@ -108,7 +108,14 @@ export interface ControllerOptions {
   activeProjectLimit?: number;
   perProjectWorkerLimit?: number;
   pollIntervalMs?: number;
+  /** Tried first for every route; may fall back to another provider with a recorded reason. */
   defaultAdapter?: "claude" | "codex";
+  /**
+   * Implementation and repair run only on this provider; when it cannot run,
+   * the task waits or blocks instead of moving to another provider. Review
+   * routing is unaffected, so required independent review stays possible.
+   */
+  pinnedAdapter?: "claude" | "codex";
   defaultModel?: string | null;
   defaultEffort?: string | null;
   workerTimeoutMs?: number;
@@ -152,6 +159,7 @@ export class Controller {
     perProjectWorkerLimit: number;
     pollIntervalMs: number;
     defaultAdapter: "claude" | "codex";
+    pinnedAdapter: "claude" | "codex" | null;
     defaultModel: string | null;
     defaultEffort: string | null;
     workerTimeoutMs: number;
@@ -202,7 +210,9 @@ export class Controller {
       activeProjectLimit: options.activeProjectLimit ?? 2,
       perProjectWorkerLimit: options.perProjectWorkerLimit ?? workerLimit,
       pollIntervalMs: options.pollIntervalMs ?? 2_000,
-      defaultAdapter: options.defaultAdapter ?? "codex",
+      // A pin also selects the provider that --model and --effort apply to.
+      defaultAdapter: options.pinnedAdapter ?? options.defaultAdapter ?? "codex",
+      pinnedAdapter: options.pinnedAdapter ?? null,
       defaultModel: options.defaultModel ?? null,
       defaultEffort: options.defaultEffort ?? null,
       workerTimeoutMs: options.workerTimeoutMs ?? 45 * 60_000,
@@ -228,7 +238,7 @@ export class Controller {
     this.adaptive = options.adaptiveConcurrency
       ? new AdaptiveConcurrency(this.options.workerLimit, { raiseAfterHealthyTicks: options.adaptiveConcurrency.raiseAfterHealthyTicks })
       : null;
-    this.preferredAdapter = options.defaultAdapter ?? null;
+    this.preferredAdapter = options.defaultAdapter ?? options.pinnedAdapter ?? null;
     if (!Number.isSafeInteger(this.options.workerLimit) || this.options.workerLimit < 1) throw new Error("Worker limit must be a positive integer");
     if (!Number.isSafeInteger(this.options.perProjectWorkerLimit) || this.options.perProjectWorkerLimit < 1) throw new Error("Per-project worker limit must be a positive integer");
     if (!Number.isSafeInteger(this.options.activeProjectLimit) || this.options.activeProjectLimit < 1) throw new Error("Active-project limit must be a positive integer");
@@ -422,6 +432,7 @@ export class Controller {
       adapters: this.adapters,
       providers,
       preferredAdapter: this.preferredAdapter,
+      pinnedAdapter: task.taskClass === "review" ? null : this.options.pinnedAdapter ?? null,
       excludedAdapters: exclusions,
       excludedQuotaDomains,
       availableTools,
@@ -432,7 +443,18 @@ export class Controller {
     // A live experiment trial runs exactly its variant's route: no project or
     // operator override may substitute another model into the measurement.
     const trial = task.taskClass === "review" ? null : trialBindingForTask(this.records, task.id);
-    if (trial) return this.applyTrialRoute(selection, trial);
+    if (trial) {
+      const trialAdapter = (trial.appliedConfig as { adapter?: string }).adapter;
+      if (this.options.pinnedAdapter && trialAdapter && trialAdapter !== this.options.pinnedAdapter) {
+        selection.chosen = null;
+        selection.deferred = [];
+        selection.quotaDomain = null;
+        selection.decision = "no_route";
+        selection.reason = `Trial route needs ${trialAdapter}, but this controller is pinned to ${this.options.pinnedAdapter}; neither is substituted.`;
+        return selection;
+      }
+      return this.applyTrialRoute(selection, trial);
+    }
     const projectOverride = this.records.getProject(task.projectId)?.routingOverrides[task.taskClass];
     if (projectOverride) {
       const eligibleOverride = selection.eligible.find((candidate) =>
@@ -474,7 +496,7 @@ export class Controller {
       selection.quotaDomain = evaluation.evidence.quotaDomain;
     }
     if (selection.chosen && (this.preferredAdapter || this.options.defaultModel || this.options.defaultEffort)) {
-      selection.reason += ` Operator override: adapter=${this.preferredAdapter ?? "policy"}, model=${this.options.defaultModel ?? "policy"}, effort=${this.options.defaultEffort ?? "policy"}.`;
+      selection.reason += ` Operator override (${selection.routeMode ?? "policy"}): adapter=${this.preferredAdapter ?? "policy"}, model=${this.options.defaultModel ?? "policy"}, effort=${this.options.defaultEffort ?? "policy"}.`;
     }
     return selection;
   }
@@ -2731,6 +2753,9 @@ export class Controller {
         data: {
           attemptId,
           adapter: this.preferredAdapter,
+          routeMode: selection.routeMode ?? "policy",
+          pinnedAdapter: kind === "review" ? null : this.options.pinnedAdapter ?? null,
+          chosenAdapter: adapter.name,
           model: this.options.defaultModel,
           effort: this.options.defaultEffort,
         },

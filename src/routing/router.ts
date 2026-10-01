@@ -129,7 +129,15 @@ export interface RouteSelection {
   eligibility: EligibilityEvidence[];
   /** What the policy asked for before availability and eligibility filtering. */
   requested: RouteCandidate | null;
+  /**
+   * How the operator constrained the provider: `policy` (none), `preferred`
+   * (tried first, may fall back with a recorded reason), or `pinned` (never
+   * substituted; the route waits or blocks instead).
+   */
+  routeMode?: RouteMode;
 }
+
+export type RouteMode = "policy" | "preferred" | "pinned";
 
 export function normalizeTaskClass(value: string): TaskClass {
   if (!TASK_CLASSES.includes(value as TaskClass)) throw new Error(`Unknown task class: ${value}`);
@@ -142,6 +150,8 @@ export function selectRoute(input: {
   adapters: Map<string, WorkerAdapter>;
   providers: ProviderAvailability[];
   preferredAdapter?: string | null;
+  /** Only this provider's routes may be chosen; no other provider is ever substituted. */
+  pinnedAdapter?: string | null;
   excludedAdapters?: Set<string>;
   /** Quota domains already exhausted at this task boundary; a model switch inside one cannot create capacity. */
   excludedQuotaDomains?: Set<string>;
@@ -170,7 +180,19 @@ export function selectRoute(input: {
     }
     return { ...candidate };
   });
-  if (input.preferredAdapter) {
+  const rejected: { candidate: RouteCandidate; reason: string }[] = [];
+  const routeMode: RouteMode = input.pinnedAdapter ? "pinned" : input.preferredAdapter ? "preferred" : "policy";
+  const policyHadRoutes = candidates.length > 0;
+  if (input.pinnedAdapter) {
+    // Other providers' routes are out before any eligibility or fallback logic,
+    // so a fallback can only ever be between the pinned provider's own routes.
+    for (const candidate of candidates) {
+      if (candidate.adapter !== input.pinnedAdapter) {
+        rejected.push({ candidate, reason: `route pinned to ${input.pinnedAdapter}; another provider is never substituted` });
+      }
+    }
+    candidates = candidates.filter((candidate) => candidate.adapter === input.pinnedAdapter);
+  } else if (input.preferredAdapter) {
     candidates.sort((a, b) => Number(b.adapter === input.preferredAdapter) - Number(a.adapter === input.preferredAdapter));
   }
   const requested = candidates[0] ?? null;
@@ -178,7 +200,6 @@ export function selectRoute(input: {
   const providerMap = new Map(input.providers.map((provider) => [provider.provider, provider]));
   const eligible: RouteCandidate[] = [];
   const deferred: RouteCandidate[] = [];
-  const rejected: { candidate: RouteCandidate; reason: string }[] = [];
   const eligibility: EligibilityEvidence[] = [];
   const quotaDomainOf = new Map<RouteCandidate, string>();
   const missingTools = input.task.requiredTools.filter((tool) => input.availableTools && !input.availableTools.has(tool));
@@ -245,7 +266,7 @@ export function selectRoute(input: {
     }
   } else if (deferred.length > 0) {
     decision = "capacity_wait";
-  } else if (candidates.length === 0) {
+  } else if (candidates.length === 0 && !policyHadRoutes) {
     decision = "deterministic";
   } else {
     decision = "no_route";
@@ -269,8 +290,15 @@ export function selectRoute(input: {
       `Selected by ${policy.version} for ${effectiveClass} (${profile}).`,
     ].filter(Boolean).join(" ");
   } else if (deferred.length > 0) reason = "Eligible subscription providers are currently at their configured concurrency limits.";
-  else if (candidates.length === 0) reason = `${taskClass} is deterministic and has no model route.`;
-  else {
+  else if (candidates.length === 0 && !policyHadRoutes) reason = `${taskClass} is deterministic and has no model route.`;
+  else if (candidates.length === 0) {
+    reason = `Route is pinned to ${input.pinnedAdapter}, but ${policy.version} has no ${input.pinnedAdapter} route for ${effectiveClass}; ` +
+      "no other provider is substituted.";
+  } else if (routeMode === "pinned") {
+    const own = rejected.filter((item) => item.candidate.adapter === input.pinnedAdapter).map((item) => item.reason);
+    reason = `Pinned provider ${input.pinnedAdapter} cannot run this task now (${own.join("; ") || "unavailable"}); ` +
+      "no other provider is substituted.";
+  } else {
     reason = "No eligible subscription provider is available; paid fallback is forbidden.";
     const ineligible = rejected.filter((item) => item.reason.startsWith("capability ineligible"));
     if (ineligible.length === rejected.length) reason += ` ${ineligible.map((item) => item.reason).join(" | ")}`;
@@ -289,5 +317,6 @@ export function selectRoute(input: {
     quotaDomain: chosen ? quotaDomainOf.get(chosen) ?? null : null,
     eligibility,
     requested,
+    routeMode,
   };
 }

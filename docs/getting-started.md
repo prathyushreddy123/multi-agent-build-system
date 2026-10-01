@@ -104,7 +104,7 @@ Save the `id` printed by `task add`. Use a different project name if `demo` is a
 node src/cli.ts controller run --adapter=codex --workers=1 --ui
 ```
 
-Use `--adapter=claude` if that is your authenticated provider. This flag reorders the routing policy's candidates; it cannot make an ineligible route usable. If Codex's entitlement is not verified (step 1), `--adapter=codex` still runs on Claude, and `task show` records the provider fallback. Omit the flag to use the routing policy. You can also set the preference with `MABS_ADAPTER=codex|claude`.
+Use `--adapter=claude` if that is your authenticated provider. This flag reorders the routing policy's candidates; it cannot make an ineligible route usable. If Codex's entitlement is not verified (step 1), `--adapter=codex` still runs on Claude, and `task show` records the provider fallback. Omit the flag to use the routing policy. You can also set the preference with `MABS_ADAPTER=codex|claude`. To require one provider instead, use `--pin-adapter=codex`: implementation and repair then run only on Codex, and wait or block when it cannot run rather than moving to Claude. Review routing is not pinned, so a required independent reviewer can still run.
 
 A second `controller run` against the same state refuses to start while one is live, and exits 0. (`--force` overrides this; it is meant for recovery, not normal use.) When review is triggered, it runs on a different provider from the implementer. With only one eligible provider, a `standard` project's review waits as `Review pending:` until a second provider becomes eligible.
 
