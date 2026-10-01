@@ -1,0 +1,6 @@
+commit: b89e7ce359c128683be2ce2a751c9fd95013275c
+node: v24.20.0
+pi: 0.86.1
+claude: 2.1.283 (Claude Code)
+codex: codex-cli 0.157.1
+tsc: Version 7.0.2

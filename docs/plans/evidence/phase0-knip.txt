@@ -1,0 +1,106 @@
+npm notice run mabs@0.1.0 npx
+npm notice run 'knip' --config <scratch>/knip.json --no-exit-code --reporter compact
+Unused files (1)
+bench/fixtures/pocket-ledger/template/src/cli.ts: bench/fixtures/pocket-ledger/template/src/cli.ts
+Unlisted binaries (1)
+bench/pi-turn.ts: pi
+Unresolved imports (1)
+bench/fixtures/parse-duration/hidden.test.js: ../src/parse.js, ../src/format.js
+Unused exports (58)
+src/bootstrap/service.ts: BOOTSTRAP_STEPS
+src/context/packet.ts: CONTEXT_ESTIMATOR_VERSION
+src/context/retrieval.ts: headRevision
+src/controller/controller.ts: REVIEW_RECOVERY_PREFIX
+src/core/failure.ts: FAILURE_CLASSES, FAILURE_CATEGORIES, FAILURE_CLASSIFIER_VERSION, categoryIsProviderUnavailable, categoryForFailureClass, recoveryActionFor
+src/core/ids.ts: newId, uuid
+src/core/paths.ts: ensureStateDir
+src/curator/service.ts: CURATOR_SUITE_VERSION
+src/diagnostics/history.ts: HISTORY_AUDIT_FORMAT, HISTORY_USAGE_NORMALIZER, supportedHistorySchemaVersion
+src/diagnostics/upgrade.ts: UPGRADE_VALIDATION_FORMAT
+src/diagnostics/views.ts: VIEWS_VERSION
+src/domain/config.ts: CONTEXT_BUDGET_POLICIES, DEFAULT_POLICY_VERSIONS
+src/domain/contract.ts: CONTRACT_FAILURE
+src/domain/execution.ts: STAGE_STATES, OBLIGATION_STATES
+src/domain/policy.ts: CONSEQUENTIAL_ACTIONS, isConsequential
+src/domain/project-policy.ts: DELIVERY_MODES, DELIVERY_MODE_REVIEW
+src/environment/preflight.ts: ENVIRONMENT_PREFLIGHT_VERSION
+src/incidents/lessons.ts: LESSON_LIMIT
+src/incidents/projection.ts: INCIDENT_CLASSIFIER_VERSION, SYSTEMIC_CATEGORIES, incidentSignature
+src/incidents/types.ts: INCIDENT_LIFECYCLES
+src/intake/service.ts: getBrief, listClarifications, listProposals
+src/intake/store.ts: DEFAULT_STACK, DEFAULT_QUALITY, DEFAULT_OPERATIONS, findBriefByTitle, briefRevisions, assertBriefTransition, getClarification, invalidateAcceptance, resumableBootstrapRun
+src/maintenance/lock.ts: maintenanceLockPath, maintenanceLockHolder
+src/maintenance/migrate.ts: detectLayout, drainBlockers
+src/maintenance/retention.ts: retentionCandidates, pruneOldBackups
+src/operations/service.ts: operationsFingerprint, listOperationRuns
+src/operator/capabilities.ts: findPiPackageDir
+src/operator/code.ts: configuredViewer
+src/operator/context.ts: plausibleTasks
+src/operator/files.ts: MAX_INLINE_BYTES
+src/operator/herdr.ts: HerdrError, herdrSession, getPane
+src/operator/launcher.ts: renderLauncherScreen
+src/operator/links.ts: LINK_SCHEME
+src/operator/liveness.ts: LEASE_STALE_MS
+src/operator/logs.ts: DEFAULT_CHUNK_BYTES, attemptEvidenceDir
+src/operator/preferences.ts: PREFERENCES_VERSION
+src/operator/progress.ts: DEFAULT_STALE_MS, CONTROLLER_STALE_MS
+src/operator/viewer.ts: viewerDir, readViewerRequest
+src/operator/vscode.ts: VSCODE_EXECUTABLE_ENV, VsCodeError
+src/optimization/experiments.ts: EXPERIMENT_PROTOCOL_VERSION, LIVE_TRIAL_KEYS, changedDimensions, validateProtocol, getExperiment, listMeasurements, listTrialBindings
+src/profiles/index.ts: APPLICATION_PROFILE_VERSION, APPLICATION_PROFILES, inferProfile
+src/profiles/tools.ts: projectBinDirs
+src/prompts/roles.ts: ROLE_PROMPT_VERSION, ROLE_INSTRUCTIONS, renderWorkerInput
+src/prompts/versions.ts: GUIDANCE_VERSIONS
+src/review/policy.ts: FINDING_SEVERITIES, DEFAULT_FINDING_SEVERITY, DEFAULT_BLOCKING_SEVERITIES, REVIEW_SCOPES, REVIEW_CADENCES, REVIEWER_ROUTES, CAPACITY_ACTIONS, QUALITY_EXPECTATIONS, findingSeverity, labelFinding, REVIEW_TRIAGE_VERSION
+src/routing/capabilities.ts: CAPABILITY_REGISTRY_VERSION, QUOTA_DOMAINS, readEntitlementVerifications
+src/routing/router.ts: normalizeTaskClass
+src/scheduling/types.ts: ADMISSION_STATES
+src/store/records.ts: DEFAULT_REVIEW_POLICY, REQUIREMENT_OWNERSHIP_VERSION
+src/telemetry/exporter.ts: EXPORT_SCHEMA_VERSION
+src/telemetry/sink.ts: DEFAULT_TELEMETRY_QUEUE, DISABLED_TELEMETRY
+src/telemetry/stream.ts: TELEMETRY_VERSION, DEFAULT_LIVE_LOG_BYTES
+src/usage/index.ts: usageSemanticsFor, USAGE_SUBTOTAL_SEMANTICS, normalizeAttemptUsage, subtotalOf
+src/usage/normalize.ts: usageSemanticsFor
+src/usage/summary.ts: USAGE_SUBTOTAL_SEMANTICS
+src/usage/types.ts: USAGE_SOURCE_SEMANTICS, USAGE_STREAM_KINDS
+src/verify/baseline.ts: TASK_CLASSES
+src/verify/launch.ts: REQUIRED_CLI_SURFACE
+Unused exported types (38)
+src/bootstrap/service.ts: BootstrapStepName
+src/context/packet.ts: PromptAccounting
+src/context/retrieval.ts: OmittedFile
+src/diagnostics/history.ts: HistoricalTaskAudit, HistoricalUsageAudit
+src/domain/config.ts: ContextBudgetPolicy, RoutingOverride
+src/domain/contract.ts: WorkerOutcome, ContractViolation
+src/domain/execution.ts: ObligationKind
+src/domain/plan.ts: ExecutionMode, PlannedTask
+src/domain/project-policy.ts: DeliveryMode, GovernanceQuestion
+src/environment/preflight.ts: ReadinessState, EvidenceStatus, PreflightEvidence, SetupAction, SetupPlan, WorktreeExpectation, PreflightComponent
+src/gates/runner.ts: QualityCoverage, QualityStatus, GateJobCompletion
+src/incidents/types.ts: IncidentConfidence, IncidentLifecycle
+src/maintenance/migrate.ts: DatabaseLayout, RestoreRehearsal
+src/operations/types.ts: OperationRunState
+src/operator/capabilities.ts: ProbeStatus, OperatorProbe
+src/operator/context.ts: ContextView
+src/operator/files.ts: ChangeCategory, ChangeStatus
+src/operator/herdr.ts: ScopedToolSurface, SurfaceAction, SurfaceResult
+src/operator/launcher.ts: LauncherChoice
+src/operator/liveness.ts: ControllerLivenessState
+src/operator/logs.ts: EvidenceKind, EvidenceEntry
+src/operator/preferences.ts: ExternalEditor, WorkspacePreferences
+src/operator/progress.ts: StepSource, StepStatus, DeliveryState, ProviderView
+src/operator/rendering.ts: LineTone
+src/operator/summaries.ts: SummaryBasis
+src/operator/vscode.ts: VsCodeExecutableSource
+src/optimization/experiments.ts: ExperimentMetric, TrialCase, CaseComparison
+src/profiles/tools.ts: ToolSource
+src/review/policy.ts: ReviewScope, ReviewCadence, CapacityAction, QualityExpectation, MatchedRiskRule, ReviewItemKind
+src/routing/capabilities.ts: Entitlement, DelegationControl
+src/routing/router.ts: RouteDecision
+src/scheduling/types.ts: AdmissionState
+src/store/records.ts: GateStatus
+src/usage/index.ts: NormalizeUsageOptions, UsageSourceEvent, NormalizedAttemptUsage
+src/usage/types.ts: DurationStatus
+src/verify/baseline.ts: TaskClass
+src/verify/launch.ts: AppliedLaunchSettings, ObservedDelegation
+src/verify/phase0.ts: ProbeStatus
