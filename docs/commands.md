@@ -131,6 +131,10 @@ Flags on `controller run` or `controller once`:
 | `node src/cli.ts project governance PROJECT --type=personal --delivery=standard --version=N` | Set the project's rigor: `fast` (checks only), `standard` (checks plus risk-triggered review), or `verified` (checks plus required independent review that blocks when no reviewer can run). Each is exactly `--review=off\|risk\|required`; `project add` accepts the same flag |
 | `node src/cli.ts review request TASK_ID` | Record a manual review request; does not itself prove review happened |
 | `node src/cli.ts product show BRIEF_ID` | Show the brief, pending decisions, work, and next actions |
+| `node src/cli.ts brief ask BRIEF_ID --payload='{"questions":[...]}'` | Record material questions; returns each question's id (`requested`) and all open questions |
+| `node src/cli.ts brief resolve BRIEF_ID --version=N --request=ID --payload='{"resolutions":[...],"patch":{...},"summary":"..."}'` | Record several answers or assumptions, plus an optional explicit brief change, all or nothing. Retrying the same `--request` returns the recorded result; a different request under that id is refused. A recorded answer changes only with `"revise":true` |
+| `node src/cli.ts brief start BRIEF_ID PROPOSAL_ID --fingerprint=... --request=ID --target=DIR` (or `--project=PROJECT`) | Start the *accepted* plan in one resumable step: bootstrap a new directory and link the plan, or submit it to a registered project. Never accepts a plan; a retry with the same `--request` continues from recorded progress and refuses work whose acceptance or governance changed |
+| `node src/cli.ts brief show BRIEF_ID --section=open-questions\|proposal-tasks\|tasks\|outputs\|assumptions --page=N` | One page of a long list that a conversation view omitted |
 | `node src/cli.ts ops status PROJECT` | Inspect effective optional-operation settings |
 | `node src/cli.ts ops prepare PROJECT ci` | Prepare a dry-run plan; does not write provider config or enable CI |
 | `node src/cli.ts optimization routing PROJECT` | Inspect recorded routing outcomes, not remaining quota or actual spend |
@@ -204,7 +208,9 @@ The [Pi extension](../.pi/extensions/mabs.ts) also wraps the CLI. These **can** 
 | `/mabs-curate ...`, `/mabs-optimize ...` | `curator ...` and `optimization ...` |
 | `/mabs-backup` | `maintenance backup` |
 
-Model-facing tools the extension registers: `mabs_status`, `mabs_create_brief`, `mabs_update_brief`, `mabs_set_project_governance`, `mabs_ask_clarifications`, `mabs_answer_clarification`, `mabs_propose_plan`, `mabs_accept_plan`, `mabs_submit_plan`, `mabs_submit_task`, `mabs_bootstrap_project`, `mabs_get_product`, `mabs_get_operations`, and `mabs_prepare_operation`. Governance is never answered for you: the model must ask, and `mabs_accept_plan` binds your explicit acceptance to the exact proposal fingerprint.
+Model-facing tools the extension registers: `mabs_status`, `mabs_create_brief`, `mabs_update_brief`, `mabs_set_project_governance`, `mabs_ask_clarifications`, `mabs_answer_clarification`, `mabs_resolve_intake`, `mabs_propose_plan`, `mabs_accept_plan`, `mabs_start_work`, `mabs_submit_plan`, `mabs_submit_task`, `mabs_bootstrap_project`, `mabs_get_product`, `mabs_get_operations`, and `mabs_prepare_operation`. Governance is never answered for you: the model must ask, and `mabs_accept_plan` binds your explicit acceptance to the exact proposal fingerprint. A brief's project type and review choice are set with `mabs_update_brief` (or `mabs_resolve_intake`); `mabs_set_project_governance` is only for a registered project and otherwise answers `wrong_subject`.
+
+The intake and product tools ask the CLI for `--view=conversation`: compact JSON that keeps ids, versions, fingerprints, states, warnings, and next actions, and pages long lists with an `omitted` count and the `brief show --section=... --page=N` command that returns the rest. The CLI's default output is still the full record. Refusals the conversation can act on (`unknown_clarification`, `stale_version`, `already_resolved`, `request_conflict`, `wrong_subject`, `stale_start`) are printed as JSON on stderr.
 
 ### Code surface from the CLI
 

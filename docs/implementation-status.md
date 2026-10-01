@@ -91,6 +91,19 @@ Per-package implementation records, including what is implemented versus activat
 
 Measured results are in the [Efficiency v4 benchmark](benchmarks/efficiency-v4.md).
 
+## Efficiency v5 — October 2026 (branch `mabs/efficiency-v5`, not yet merged)
+
+Requirement ledger and evidence: [v5 implementation ledger](plans/mabs-efficiency-implementation.md).
+
+| Requirement | Change | Current guide |
+| --- | --- | --- |
+| INT-01 | `brief ask` returns question ids; answers can name their brief | [Commands](commands.md#plans-review-and-optional-operations) |
+| INT-02 | `brief resolve`: batch answers and an explicit brief change, all or nothing, retry-safe (schema 19 `intake_requests`) | [Commands](commands.md#plans-review-and-optional-operations) |
+| INT-03 | Governance on a brief answers `wrong_subject` with the brief operation | [Commands](commands.md#pi-conversational-and-control-commands) |
+| INT-04 | `brief start`: accepted work in one resumable step | [Commands](commands.md#plans-review-and-optional-operations) |
+| OUT-01 | Bounded `--view=conversation` results for intake and product tools | [Commands](commands.md#pi-conversational-and-control-commands) |
+| BENCH-02 | Claude turns and Codex tool items recorded separately | [Ledger](plans/mabs-efficiency-implementation.md) |
+
 ## Reading evidence correctly
 
 - Paths under `~/.local/state/mabs` refer to the original verification machine. A fresh clone does not contain those private runtime artifacts.
