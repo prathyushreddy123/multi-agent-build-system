@@ -6,7 +6,7 @@
  * checks, and consent that is bound to one exact proposal version. A model can
  * propose; it cannot decide that the user agreed.
  */
-import { applyExecutionPlan, validateExecutionPlan, type ExecutionPlan } from "../domain/plan.ts";
+import { applyExecutionPlan, requirementOwnershipErrors, validateExecutionPlan, type ExecutionPlan } from "../domain/plan.ts";
 import { requireProjectReadiness } from "../domain/project-policy.ts";
 import { normalizeReviewPolicy } from "../review/policy.ts";
 import type { Records, Task } from "../store/records.ts";
@@ -384,6 +384,7 @@ export function proposePlan(records: Records, input: ProposalInput & { brief: st
 
   const validation = validateExecutionPlan(input.plan);
   errors.push(...validation.errors);
+  if (validation.valid) errors.push(...requirementOwnershipErrors(input.plan, requirements));
 
   const openQuestions = listClarifications(records, brief.id, "open");
   const warnings = [...validation.warnings];

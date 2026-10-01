@@ -65,7 +65,7 @@ The proposal must contain:
 - concise scope and out-of-scope boundaries;
 - stable requirement IDs;
 - milestones;
-- tasks with objective and acceptance criteria;
+- tasks with objective and acceptance criteria, sized as one cohesive task unless a split has a concrete reason (independent deliverable, real dependency, parallel benefit, or context size); a small implementation keeps its tests and docs in the same task;
 - valid dependency keys;
 - an execution mode and reason for the plan and every task;
 - repository-relative, disjoint edit scopes for unordered parallel tasks;

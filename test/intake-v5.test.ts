@@ -10,7 +10,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { IntakeError } from "../src/intake/errors.ts";
-import type { ExecutionPlan } from "../src/domain/plan.ts";
+import { validateExecutionPlan, type ExecutionPlan } from "../src/domain/plan.ts";
 import { acceptPlan, answerClarification, askClarifications, productSummary, proposePlan, resolveIntake } from "../src/intake/service.ts";
 import { askView, briefSection, productView, proposeView, resolveView } from "../src/intake/projection.ts";
 import { startAcceptedWork, type StartAcceptedWorkInput } from "../src/intake/start.ts";
@@ -591,4 +591,58 @@ test("OUT-01: the CLI prints the full record by default and the bounded view on 
   assert.equal(started.tasks.total, 1);
   assert.ok(started.tasks.shown[0]?.id);
   assert.equal(run("product", "show", brief.id, "--view=bogus").status, 1);
+});
+
+// --- PLAN-01 -----------------------------------------------------------------
+
+
+const step = (key: string, overrides: Partial<ExecutionPlan["tasks"][number]> = {}): ExecutionPlan["tasks"][number] => ({
+  key, title: `Step ${key}`, objective: `Do ${key}.`, acceptanceCriteria: [`${key} works`],
+  executionMode: "sequential", executionReason: "Ordered.", allowedScope: [`src/${key}`], ...overrides,
+});
+const fragmentation = (plan: ExecutionPlan) => validateExecutionPlan(plan).warnings.filter((warning) => warning.startsWith("Possible fragmentation"));
+
+test("PLAN-01: a tests-only task that follows its implementation is flagged, never rejected", () => {
+  const plan: ExecutionPlan = { objective: "o", mode: "sequential", reason: "r", tasks: [
+    step("impl"), step("tests", { dependsOn: ["impl"], allowedScope: ["tests/", "src/habit.test.ts", "README.md"] }),
+  ] };
+  const validation = validateExecutionPlan(plan);
+  assert.equal(validation.valid, true, "advisory only");
+  assert.equal(fragmentation(plan).length, 1);
+  assert.match(fragmentation(plan)[0] ?? "", /tests edits only tests or documentation for impl/);
+  // An independent audit with no dependency is not flagged.
+  const audit: ExecutionPlan = { ...plan, tasks: [step("impl"), step("audit", { allowedScope: ["docs/audit.md"] })] };
+  assert.deepEqual(fragmentation(audit), []);
+});
+
+test("PLAN-01: a strict chain of small tasks is flagged; real structure is not", () => {
+  const chain: ExecutionPlan = { objective: "o", mode: "sequential", reason: "r", tasks: [
+    step("model"), step("store", { dependsOn: ["model"] }), step("cli", { dependsOn: ["store"] }),
+  ] };
+  assert.equal(fragmentation(chain).length, 1);
+  assert.match(fragmentation(chain)[0] ?? "", /3 small tasks run as one strict chain/);
+
+  const one: ExecutionPlan = { objective: "o", mode: "single", reason: "r", tasks: [step("all", { executionMode: "single" })] };
+  assert.deepEqual(fragmentation(one), [], "one cohesive task is the preferred shape");
+  const complex: ExecutionPlan = { ...chain, tasks: chain.tasks.map((task, index) => index === 1 ? { ...task, complexity: "high" } : task) };
+  assert.deepEqual(fragmentation(complex), [], "a high-complexity step justifies separation");
+  const fanOut: ExecutionPlan = { ...chain, tasks: [step("core"), step("a", { dependsOn: ["core"] }), step("b", { dependsOn: ["core"] })] };
+  assert.deepEqual(fragmentation(fanOut), [], "independent branches are not a chain");
+});
+
+test("PLAN-01: declared requirement ownership must cover every mandatory requirement", (t) => {
+  const { records } = setup(t);
+  const brief = personalBrief(records, "ownership");
+  const propose = (tasks: ExecutionPlan["tasks"]) => proposePlan(records, {
+    brief: brief.id, summary: "s", rationale: "r", scope: "s",
+    requirements: [{ id: "REQ-1", text: "One." }, { id: "REQ-2", text: "Two." }, { id: "REQ-3", text: "Nice to have.", mandatory: false }],
+    plan: { objective: "o", mode: "single", reason: "r", tasks },
+  });
+  const orphan = propose([step("all", { executionMode: "single", requirements: ["REQ-1"] })]);
+  assert.equal(orphan.valid, false);
+  assert.match(orphan.errors.join(" "), /REQ-2 have no owning task/);
+  const unknown = propose([step("all", { executionMode: "single", requirements: ["REQ-1", "REQ-2", "REQ-9"] })]);
+  assert.match(unknown.errors.join(" "), /owns unknown requirement\(s\) REQ-9/);
+  assert.equal(propose([step("all", { executionMode: "single", requirements: ["REQ-1", "REQ-2"] })]).valid, true, "optional requirements need no owner");
+  assert.equal(propose([step("all", { executionMode: "single" })]).valid, true, "no declared ownership keeps legacy broad coverage");
 });

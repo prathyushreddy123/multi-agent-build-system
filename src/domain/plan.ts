@@ -177,7 +177,80 @@ export function validateExecutionPlan(plan: ExecutionPlan): PlanValidation {
     }
   }
 
+  if (errors.length === 0) warnings.push(...fragmentationWarnings(plan, dependencies));
   return { valid: errors.length === 0, errors: [...new Set(errors)], warnings, topologicalOrder: order };
+}
+
+/** A path that holds only tests or documentation, judged by its location and name. */
+function testOrDocPath(scope: string): boolean {
+  const normalized = scope.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const segments = normalized.split("/");
+  const name = segments.at(-1) ?? "";
+  return segments.some((segment) => ["test", "tests", "__tests__", "spec", "specs", "doc", "docs"].includes(segment)) ||
+    /\.(test|spec)\.[^.]+$/.test(name) || /^readme(\.|$)/i.test(name) || /\.(md|rst|adoc)$/i.test(name);
+}
+
+/**
+ * Advisory signs that small work was split more than it needs to be. These are
+ * structural (scopes and the dependency graph), never title matching, and they
+ * never reject a plan: a separate audit or a genuinely dependent step stays
+ * valid, and its execution reason says why.
+ */
+export function fragmentationWarnings(plan: ExecutionPlan, dependencies: Map<string, string[]>): string[] {
+  const warnings: string[] = [];
+  const tasks = plan.tasks;
+  for (const task of tasks) {
+    const scope = task.allowedScope ?? [];
+    const deps = dependencies.get(task.key) ?? [];
+    if (scope.length > 0 && deps.length > 0 && scope.every(testOrDocPath)) {
+      warnings.push(
+        `Possible fragmentation: ${task.key} edits only tests or documentation for ${deps.join(", ")}. ` +
+        "Tests and docs normally belong in the task that implements the change; keep it separate only for an independent audit, and say so in its executionReason.",
+      );
+    }
+  }
+  const small = (task: PlannedTask) =>
+    (task.taskClass === undefined || task.taskClass === "small_implementation" || task.taskClass === "mechanical") &&
+    task.complexity !== "high" && task.contextSize !== "high" && task.executionMode !== "parallel";
+  if (tasks.length >= 3 && plan.mode !== "parallel" && tasks.every(small)) {
+    // A single chain: one root, and every other task depends on exactly one task that nothing else depends on.
+    const dependents = new Map<string, number>();
+    for (const deps of dependencies.values()) for (const dep of deps) dependents.set(dep, (dependents.get(dep) ?? 0) + 1);
+    const roots = tasks.filter((task) => (dependencies.get(task.key) ?? []).length === 0);
+    const chain = roots.length === 1 &&
+      tasks.every((task) => (dependencies.get(task.key) ?? []).length <= 1) &&
+      [...dependents.values()].every((count) => count === 1);
+    if (chain) {
+      warnings.push(
+        `Possible fragmentation: ${tasks.length} small tasks run as one strict chain. One cohesive task, including its tests and docs, ` +
+        "usually costs less; split only for an independent deliverable, a step that needs the previous one's accepted result, " +
+        "parallel benefit, or context that would not fit, and state that reason.",
+      );
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Requirement ownership, when a plan declares it, must name known IDs and
+ * leave no mandatory requirement without an owner. A plan that declares none
+ * keeps legacy broad coverage.
+ */
+export function requirementOwnershipErrors(plan: ExecutionPlan, requirements: { id: string; mandatory?: boolean }[]): string[] {
+  const declaring = (plan.tasks ?? []).filter((task) => Array.isArray(task.requirements));
+  if (declaring.length === 0) return [];
+  const known = new Set(requirements.map((requirement) => requirement.id));
+  const errors: string[] = [];
+  for (const task of declaring) {
+    const unknown = (task.requirements ?? []).filter((id) => !known.has(id));
+    if (unknown.length > 0) errors.push(`${task.key}: owns unknown requirement(s) ${unknown.join(", ")}.`);
+  }
+  const owned = new Set(declaring.flatMap((task) => task.requirements ?? []));
+  const orphaned = requirements.filter((requirement) => requirement.mandatory !== false && !owned.has(requirement.id)).map((item) => item.id);
+  if (orphaned.length > 0) {
+    errors.push(`Mandatory requirement(s) ${orphaned.join(", ")} have no owning task; assign each to a task, or declare no ownership for broad coverage.`);
+  }
+  return errors;
 }
 
 export function applyExecutionPlan(records: Records, projectId: string, plan: ExecutionPlan): Task[] {
