@@ -103,6 +103,10 @@ Requirement ledger and evidence: [v5 implementation ledger](plans/mabs-efficienc
 | INT-04 | `brief start`: accepted work in one resumable step | [Commands](commands.md#plans-review-and-optional-operations) |
 | OUT-01 | Bounded `--view=conversation` results for intake and product tools | [Commands](commands.md#pi-conversational-and-control-commands) |
 | BENCH-02 | Claude turns and Codex tool items recorded separately | [Ledger](plans/mabs-efficiency-implementation.md) |
+| CTX-01 | Prompt sections measured on the strings actually sent; resumed repairs record their brief size | [Ledger](plans/mabs-efficiency-implementation.md#phase-2) |
+| ROUTE-01 | `--pin-adapter` never substitutes a provider; `--adapter` stays a preference | [Routing](routing-policy-v1.md) |
+| PLAN-01 | One cohesive task preferred; fragmentation warnings; requirement ownership checked | [Ledger](plans/mabs-efficiency-implementation.md#phase-2) |
+| EXEC-01 | Worker recipes: run the program by name, no shell (schema 20) | [System overview](architecture/system-overview.md#what-a-worker-can-do) |
 
 ## Reading evidence correctly
 
