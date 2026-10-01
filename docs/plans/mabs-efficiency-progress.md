@@ -4,7 +4,7 @@ Resume from here in a new session. The details live in the [ledger](mabs-efficie
 
 - **Branch / worktree:** `mabs/efficiency-v5` at `~/worktrees/mabs-v5` (main checkout untouched except `b89e7ce`)
 - **Authorized:** Phases 0–2, offline only. Stop and report before Phase 3.
-- **Current phase:** Phase 2 complete. **Waiting for review before Phase 3 and for a live-validation decision.**
+- **Current phase:** Phase 2 complete and live-checked (V2-ROUTE, V2-EXEC passed). Starting Phase 3.
 - **Baseline:** typecheck ✔, extension typecheck ✔, `npm test` 414/414 ×3
 
 ## Done
@@ -15,6 +15,6 @@ Resume from here in a new session. The details live in the [ledger](mabs-efficie
 - Phase 2: CTX-01 `cd71616`, ROUTE-01 `791ce08`, PLAN-01 `05c2e78`, EXEC-01 `ee94831` (schema 20). Tests 459/459, typechecks clean. Migration 18→20 rehearsed on a live copy.
 
 ## Next (needs approval)
-1. The live validation envelope in the ledger (≤ 6 subscription attempts).
+1. Live checks are tracked in [mabs-efficiency-validation.md](mabs-efficiency-validation.md); V3-PARITY runs after Phase 3 (propose its budget first).
 2. Phase 3: GOV-01, UX-01, CTX-02 (CTX-03 stays optional).
 3. Before merging: `maintenance migrate` on the live database (18 → 20, rehearsed on a copy).

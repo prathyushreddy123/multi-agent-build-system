@@ -1,0 +1,18 @@
+{
+  "check": "V2-EXEC",
+  "commit": "792de94",
+  "date": "2026-10-01",
+  "setup": "scratch state; bootstrapped JavaScript project (checks: typecheck, test; recipe: run = node src/cli.js); one small implementation task; controller once --pin-adapter=claude --effort=low; review off",
+  "providerAttempts": 1,
+  "model": "claude-sonnet-5",
+  "wallSeconds": 42,
+  "numTurns": 11,
+  "permissionDenials": 0,
+  "toolErrors": 0,
+  "toolSequence": ["Read", "Edit", "Read", "Edit", "Edit", "Edit", "ToolSearch(select mcp__mabs__run_checks, mcp__mabs__run_recipe)", "mcp__mabs__run_recipe run [greet, Ada] -> exit 0", "mcp__mabs__run_checks -> typecheck PASS, test PASS", "Write .mabs/result.json"],
+  "controllerGates": { "revision": "73527f8", "typecheck": "PASS", "test": "PASS" },
+  "finalState": "DONE",
+  "usage": { "freshInput": 20, "cacheRead": 262407, "output": 2689, "note": "provider-reported, cached-inclusive; not a subscription allowance measure" },
+  "promptAccounting": { "estimator": "utf8-bytes-div4.v2", "packetPromptBytes": 6928, "launchPromptBytes": 6928, "instructions": 3165, "worker_input": 3763, "partsSumToWorkerInput": true },
+  "observation": "Claude Code loads the MCP tools lazily, so the worker spent one turn on ToolSearch before calling them. Not a denial; a possible later optimization."
+}

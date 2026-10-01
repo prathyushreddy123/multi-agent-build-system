@@ -1,0 +1,20 @@
+{
+  "check": "V2-ROUTE",
+  "commit": "792de94",
+  "note": "scratch state; real adapters; zero provider calls",
+  "codexPinNoEntitlement": {
+    "task": "tsk_01M3WBFW384JFY67AG5X2RBS9T",
+    "state": "BLOCKED",
+    "failureClass": "CONFIG",
+    "blockedReason": "Pinned provider codex cannot run this task now (capability ineligible: codex:gpt-5.6-sol subscription entitlement is unknown); no other provider is substituted.",
+    "attempts": 0
+  },
+  "claudePinInCooldown": {
+    "task": "tsk_01M3WBGCAM5Y3GJ3HT4N9RRGJG",
+    "state": "BLOCKED",
+    "failureClass": "QUOTA",
+    "blockedReason": "Pinned provider claude cannot run this task now (V2-ROUTE: simulated Claude session window exhausted); no other provider is substituted.",
+    "attempts": 0
+  },
+  "attemptsInScratchDb": 0
+}
