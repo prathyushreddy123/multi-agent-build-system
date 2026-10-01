@@ -7,7 +7,8 @@ import type { FailureClass } from "../core/failure.ts";
  * silently become success: it is a CONTRACT failure with the raw transcript
  * preserved as evidence.
  */
-export const CONTRACT_VERSION = "1.3.0";
+/** 1.4.0: workspace.recipes lists named exploratory commands. */
+export const CONTRACT_VERSION = "1.4.0";
 
 export type WorkerRole = "implementer" | "reviewer" | "researcher" | "troubleshooter" | "curator";
 
@@ -50,6 +51,8 @@ export interface WorkerInput {
     forbidden_actions: string[];
     /** Registered checks, as the controller will run them; empty when none are registered. */
     checks: { name: string; command: string; required: boolean }[];
+    /** Named exploratory commands (contract 1.4.0); absent in older packets. Never acceptance evidence. */
+    recipes?: { name: string; command: string; max_args: number; description: string }[];
   };
   execution: {
     harness: string;

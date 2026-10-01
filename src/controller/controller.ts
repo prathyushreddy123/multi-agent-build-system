@@ -2775,6 +2775,7 @@ export class Controller {
         // Implementers verify their own change against the registered checks;
         // a reviewer already has the controller's gate evidence.
         workerChecks: kind === "review" ? [] : project.checkCommands,
+        workerRecipes: kind === "review" ? [] : project.workerRecipes,
         resume,
       });
       this.records.setAttemptProcess(attempt.id, handle.pid, handle.sessionId);

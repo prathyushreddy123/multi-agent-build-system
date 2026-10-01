@@ -15,6 +15,7 @@ import {
   updateBootstrapRun,
 } from "../intake/store.ts";
 import { requireProjectReadiness } from "../domain/project-policy.ts";
+import { smokeRecipes } from "../domain/recipes.ts";
 import { submitAcceptedPlan } from "../intake/service.ts";
 import type { BootstrapRun, BootstrapStep, ProductBrief } from "../intake/types.ts";
 import { resolveApplicationProfiles, scaffoldProfile, type PackageManager, type ProfileKind } from "../profiles/index.ts";
@@ -246,11 +247,17 @@ export function bootstrapProject(records: Records, input: BootstrapInput): Boots
       if (!project) throw new Error("Project registration did not produce a project.");
       resolution = resolveApplicationProfiles(targetPath);
       records.updateProjectChecks(project.id, resolution.checks);
+      // A worker trying the program it builds should not have to guess a permitted command.
+      const recipes = smokeRecipes(targetPath, resolution);
+      if (recipes.length > 0 && (records.getProject(project.id)?.workerRecipes.length ?? 0) === 0) {
+        records.updateProjectRecipes(project.id, recipes, "bootstrap-smoke-recipe");
+      }
       project = records.getProject(project.id);
       run = updateBootstrapRun(records, run.id, { profileResolution: resolution });
-      return resolution.checks.length > 0
+      const recipeNote = recipes.length > 0 ? ` Registered run recipe(s): ${recipes.map((recipe) => recipe.name).join(", ")}.` : "";
+      return (resolution.checks.length > 0
         ? `Registered ${resolution.checks.length} post-scaffold quality check(s).`
-        : `No checks were declared; quality coverage remains explicitly not configured. Setup requirements: ${resolution.missingPrerequisites.join("; ") || "none detected"}.`;
+        : `No checks were declared; quality coverage remains explicitly not configured. Setup requirements: ${resolution.missingPrerequisites.join("; ") || "none detected"}.`) + recipeNote;
     });
     runStep("plan_linkage", () => {
       if (!project) throw new Error("Cannot link a plan without a registered project.");

@@ -3,7 +3,7 @@ import type { WorkerInput } from "../domain/contract.ts";
 
 export type WorkerPurpose = "implementation" | "repair" | "review";
 
-export const ROLE_PROMPT_VERSION = "worker-roles-v4";
+export const ROLE_PROMPT_VERSION = "worker-roles-v5";
 
 /**
  * How this worker verifies its change. Claude has the controller's exact-name
@@ -11,12 +11,24 @@ export const ROLE_PROMPT_VERSION = "worker-roles-v4";
  * re-runs the checks, so the worker never needs another route to them.
  */
 export function checkInstructions(workerInput: WorkerInput, purpose: WorkerPurpose): string[] {
+  if (purpose === "review") return [];
+  const claude = workerInput.execution?.harness === "claude";
+  const lines: string[] = [];
   // Packets recorded before contract 1.3.0 carry no checks list.
-  if (purpose === "review" || (workerInput.workspace?.checks ?? []).length === 0) return [];
-  return workerInput.execution?.harness === "claude"
-    ? ["Verify your change with the run_checks tool before reporting completed; it runs the registered checks in workspace.checks. " +
-      "Do not try other ways to run them; the controller re-runs them to accept the change."]
-    : ["Verify your change by running the commands in workspace.checks exactly before reporting completed; the controller re-runs them to accept the change."];
+  if ((workerInput.workspace?.checks ?? []).length > 0) {
+    lines.push(claude
+      ? "Verify your change with the run_checks tool before reporting completed; it runs the registered checks in workspace.checks. " +
+        "Do not try other ways to run them; the controller re-runs them to accept the change."
+      : "Verify your change by running the commands in workspace.checks exactly before reporting completed; the controller re-runs them to accept the change.");
+  }
+  // Packets recorded before contract 1.4.0 carry no recipes.
+  if ((workerInput.workspace?.recipes ?? []).length > 0) {
+    lines.push(claude
+      ? "To try the program itself, use the run_recipe tool with a recipe from workspace.recipes and your arguments; other shell commands are not permitted. " +
+        "Its output is exploration, not acceptance evidence."
+      : "To try the program itself, run a command from workspace.recipes with your arguments. Its output is exploration, not acceptance evidence.");
+  }
+  return lines;
 }
 
 export const ROLE_INSTRUCTIONS: Record<WorkerPurpose, readonly string[]> = {

@@ -8,6 +8,7 @@ import { DEFAULT_ROUTING_POLICY, TASK_CLASSES, type TaskClass } from "../routing
 import { DEFAULT_CAPABILITY_REGISTRY, evaluateCapability } from "../routing/capabilities.ts";
 import { evaluateProjectReadiness, PROJECT_POLICY_VERSION, PROJECT_TYPES, REVIEW_CHOICES, unresolvedGovernance } from "./project-policy.ts";
 import type { ProjectGovernance } from "./project-policy.ts";
+import { validateRecipes, type WorkerRecipe } from "./recipes.ts";
 
 export interface PromptProfile {
   implementationAddendum: string | null;
@@ -45,6 +46,8 @@ export interface ProjectConfigSnapshot {
   approvalPolicy: ProjectApprovalPolicy;
   reviewPolicy: ReviewPolicy;
   checkCommands: GateSpec[];
+  /** Present only when a project has recipes, so older snapshots stay byte-identical. */
+  workerRecipes?: WorkerRecipe[];
   promptProfile: PromptProfile;
   controllerSettings: ProjectControllerSettings;
   governance?: ProjectGovernance;
@@ -95,6 +98,7 @@ export function projectConfigSnapshot(project: Project): ProjectConfigSnapshot {
     approvalPolicy: project.approvalPolicy,
     reviewPolicy: project.reviewPolicy,
     checkCommands: project.checkCommands,
+    ...(project.workerRecipes.length > 0 ? { workerRecipes: project.workerRecipes } : {}),
     promptProfile: project.promptProfile,
     controllerSettings: { ...DEFAULT_CONTROLLER_SETTINGS, ...project.controllerSettings },
     governance: project.governance,
@@ -126,9 +130,10 @@ export function validateProjectConfig(config: ProjectConfigSnapshot): string[] {
   const errors: string[] = [];
   if (!config || typeof config !== "object") return ["Configuration must be an object."];
   errors.push(...unknownKeys(config, [
-    "routingProfile", "routingOverrides", "approvalPolicy", "reviewPolicy", "checkCommands", "promptProfile", "controllerSettings",
+    "routingProfile", "routingOverrides", "approvalPolicy", "reviewPolicy", "checkCommands", "workerRecipes", "promptProfile", "controllerSettings",
     "governance", "policyVersions",
   ], "configuration"));
+  if (config.workerRecipes !== undefined) errors.push(...validateRecipes(config.workerRecipes));
   if (typeof config.routingProfile !== "string" || !config.routingProfile.trim()) errors.push("routingProfile is required.");
   if (!config.routingOverrides || typeof config.routingOverrides !== "object" || Array.isArray(config.routingOverrides)) {
     errors.push("routingOverrides must be an object.");

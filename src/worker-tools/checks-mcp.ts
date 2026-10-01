@@ -12,24 +12,76 @@
  *
  *   node checks-mcp.ts <spec.json>   spec: {cwd, checks: GateSpec[], logPath?}
  */
-import { appendFileSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { exec } from "../core/exec.ts";
+import { RECIPE_DEFAULT_TIMEOUT_MS, RECIPE_TMP_PLACEHOLDER, recipeArgumentErrors, type WorkerRecipe } from "../domain/recipes.ts";
 import type { GateSpec } from "../store/records.ts";
 
 export const CHECKS_SERVER_NAME = "mabs";
 export const CHECKS_TOOL_NAME = "run_checks";
 /** The name Claude Code gives the tool: mcp__<server>__<tool>. */
 export const CHECKS_TOOL_PERMISSION = `mcp__${CHECKS_SERVER_NAME}__${CHECKS_TOOL_NAME}`;
+export const RECIPE_TOOL_NAME = "run_recipe";
+export const RECIPE_TOOL_PERMISSION = `mcp__${CHECKS_SERVER_NAME}__${RECIPE_TOOL_NAME}`;
 const OUTPUT_TAIL_CHARS = 4_000;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 
 export interface ChecksSpec {
   cwd: string;
   checks: GateSpec[];
+  /** Named exploratory commands; run_recipe is offered only when there are some. */
+  recipes?: WorkerRecipe[];
   logPath?: string;
+}
+
+export interface RecipeOutcome {
+  name: string;
+  status: "EXITED" | "TIMEOUT" | "REFUSED";
+  exitCode: number | null;
+  durationMs: number;
+  output: string;
+}
+
+/**
+ * Run one named recipe with validated arguments. An unknown recipe or a bad
+ * argument is refused before anything starts. `{tmp}` in an argument names a
+ * scratch directory that exists only for this run.
+ */
+export async function runRecipe(spec: ChecksSpec, name: unknown, args: unknown): Promise<RecipeOutcome> {
+  const refused = (output: string): RecipeOutcome => ({ name: String(name), status: "REFUSED", exitCode: null, durationMs: 0, output });
+  const recipe = (spec.recipes ?? []).find((item) => item.name === name);
+  if (!recipe) return refused(`Unknown recipe ${String(name)}; not run. Available: ${(spec.recipes ?? []).map((item) => item.name).join(", ") || "none"}.`);
+  const errors = recipeArgumentErrors(recipe, args, spec.cwd);
+  if (errors.length > 0) return refused(`Refused, not run: ${errors.join(" ")}`);
+  const scratch = mkdtempSync(join(tmpdir(), "mabs-recipe-"));
+  try {
+    const [command, ...fixed] = recipe.command as [string, ...string[]];
+    const supplied = ((args as string[] | undefined) ?? []).map((arg) => arg.replaceAll(RECIPE_TMP_PLACEHOLDER, scratch));
+    const result = await exec(command, [...fixed, ...supplied], {
+      cwd: recipe.cwd ? resolve(spec.cwd, recipe.cwd) : spec.cwd,
+      timeoutMs: recipe.timeoutMs ?? RECIPE_DEFAULT_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, ...(recipe.env ?? {}), MABS_RECIPE_TMP: scratch },
+    });
+    const combined = `${result.stdout}${result.stderr ? `\n--- stderr ---\n${result.stderr}` : ""}`;
+    return {
+      name: recipe.name, status: result.timedOut ? "TIMEOUT" : "EXITED", exitCode: result.code, durationMs: result.durationMs,
+      output: combined.length > OUTPUT_TAIL_CHARS ? `[first ${combined.length - OUTPUT_TAIL_CHARS} characters omitted]\n${combined.slice(-OUTPUT_TAIL_CHARS)}` : combined,
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+export function renderRecipe(outcome: RecipeOutcome): string {
+  const head = outcome.status === "REFUSED"
+    ? `REFUSED ${outcome.name}`
+    : `${outcome.status} ${outcome.name} (exit ${outcome.exitCode ?? "none"}, ${(outcome.durationMs / 1000).toFixed(1)}s)`;
+  return `${head}. Exploratory run, not acceptance evidence; the controller's checks decide.\n${outcome.output}`;
 }
 
 export interface CheckOutcome {
@@ -84,6 +136,25 @@ const TOOL = {
   },
 };
 
+function recipeTool(recipes: WorkerRecipe[]) {
+  return {
+    name: RECIPE_TOOL_NAME,
+    description: "Run one of this project's named recipes (for example, run the program you are building) with optional arguments, " +
+      "and see its exit code and output. Exploratory only: it is never acceptance evidence. No shell; unknown recipes and arguments " +
+      `that point outside the worktree are refused. Use ${RECIPE_TMP_PLACEHOLDER} in an argument for a scratch directory. Recipes: ` +
+      recipes.map((recipe) => `${recipe.name} (${recipe.command.join(" ")} + up to ${recipe.maxArgs} args): ${recipe.description}`).join("; "),
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", enum: recipes.map((recipe) => recipe.name) },
+        args: { type: "array", items: { type: "string" }, description: "Arguments appended to the recipe's fixed command." },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  };
+}
+
 interface Request { jsonrpc: "2.0"; id?: number | string | null; method: string; params?: Record<string, unknown> }
 
 async function handle(spec: ChecksSpec, request: Request): Promise<unknown> {
@@ -97,8 +168,16 @@ async function handle(spec: ChecksSpec, request: Request): Promise<unknown> {
     case "ping":
       return {};
     case "tools/list":
-      return { tools: [TOOL] };
+      return { tools: (spec.recipes ?? []).length > 0 ? [TOOL, recipeTool(spec.recipes ?? [])] : [TOOL] };
     case "tools/call": {
+      if (request.params?.name === RECIPE_TOOL_NAME && (spec.recipes ?? []).length > 0) {
+        const args = (request.params?.arguments ?? {}) as { name?: unknown; args?: unknown };
+        const outcome = await runRecipe(spec, args.name, args.args);
+        if (spec.logPath) {
+          appendFileSync(spec.logPath, `${JSON.stringify({ at: new Date().toISOString(), kind: "recipe", name: outcome.name, status: outcome.status, exitCode: outcome.exitCode, durationMs: outcome.durationMs })}\n`, { mode: 0o600 });
+        }
+        return { content: [{ type: "text", text: renderRecipe(outcome) }], isError: outcome.status === "REFUSED" };
+      }
       if (request.params?.name !== CHECKS_TOOL_NAME) throw Object.assign(new Error(`Unknown tool ${String(request.params?.name)}`), { code: -32602 });
       const args = (request.params?.arguments ?? {}) as { names?: unknown };
       const names = Array.isArray(args.names) ? args.names.filter((item): item is string => typeof item === "string") : undefined;

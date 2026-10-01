@@ -602,6 +602,22 @@ test("ROUTE-01: a pinned implementation still gets an independent reviewer, and 
   assert.deepEqual([data.routeMode, data.pinnedAdapter, data.chosenAdapter], ["pinned", "claude", "claude"]);
 });
 
+test("EXEC-01: implementation launches carry the project's recipes; the packet lists them", async (t) => {
+  const { records, task: created } = controllerSetup(t);
+  const recipe = { name: "run", description: "Run the program.", command: ["node", "src/cli.js"], maxArgs: 4 };
+  records.updateProjectRecipes(created.projectId, [recipe]);
+  const claude = new StubAdapter("claude");
+  const controller = new Controller(records, { capabilityRegistry: VERIFIED_REGISTRY,
+    adapters: new Map<string, WorkerAdapter>([["claude", claude]]), pinnedAdapter: "claude", workerLimit: 1,
+  });
+  await controller.tick();
+  await controller.stop();
+  assert.deepEqual(claude.starts[0]?.workerRecipes, [recipe]);
+  assert.match(claude.starts[0]?.prompt ?? "", /"recipes":\[\{"name":"run","command":"node src\/cli.js","max_args":4/);
+  assert.match(claude.starts[0]?.prompt ?? "", /run_recipe tool/);
+  assert.match(claude.starts[0]?.prompt ?? "", /"allowed_actions":\["read","edit","run_recipe"\]/);
+});
+
 test("an ineligible operator override blocks as CONFIG with zero worker launches", async (t) => {
   const { records, task: created } = controllerSetup(t);
   const codex = new StubAdapter("codex");

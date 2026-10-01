@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,7 +11,8 @@ import type { WorkerInput } from "../src/domain/contract.ts";
 import { assembleWorkerPrompt, checkInstructions } from "../src/prompts/roles.ts";
 import type { GateSpec } from "../src/store/records.ts";
 import { checkServerMcpConfig, claudeArgs } from "../src/verify/launch.ts";
-import { CHECKS_TOOL_PERMISSION, renderOutcomes, runRegisteredChecks, serve } from "../src/worker-tools/checks-mcp.ts";
+import { CHECKS_TOOL_PERMISSION, RECIPE_TOOL_PERMISSION, renderOutcomes, runRecipe, runRegisteredChecks, serve } from "../src/worker-tools/checks-mcp.ts";
+import { validateRecipes, type WorkerRecipe } from "../src/domain/recipes.ts";
 
 const SERVER = fileURLToPath(new URL("../src/worker-tools/checks-mcp.ts", import.meta.url));
 
@@ -112,4 +113,136 @@ test("the prompt tells each harness how to verify, and says nothing when there i
   assert.deepEqual(checkInstructions(workerInput("claude", []), "implementation"), []);
   const prompt = assembleWorkerPrompt({ purpose: "implementation", workerInput: workerInput("claude", checks), projectAddendum: null, guidance: [] });
   assert.match(prompt, /run_checks tool/);
+});
+
+// --- EXEC-01: named recipes ---------------------------------------------------
+
+/** A tiny program that echoes its arguments and writes a marker when it runs. */
+function programIn(cwd: string): WorkerRecipe {
+  writeFileSync(join(cwd, "app.js"), [
+    "const fs = require('node:fs');",
+    "fs.writeFileSync('ran.marker', 'yes');",
+    "const [cmd, ...rest] = process.argv.slice(2);",
+    "if (cmd === 'write') { fs.writeFileSync(rest[0], 'data'); console.log('wrote ' + rest[0]); }",
+    "else if (cmd === 'sleep') setTimeout(() => {}, 60_000);",
+    "else if (cmd === 'loud') console.log('y'.repeat(9000) + ' END');",
+    "else console.log('args: ' + JSON.stringify([cmd, ...rest]) + ' tmp=' + process.env.MABS_RECIPE_TMP);",
+  ].join("\n"));
+  return { name: "run", description: "Run the app.", command: [process.execPath, "app.js"], maxArgs: 3, timeoutMs: 1_000 };
+}
+
+test("EXEC-01: a Claude worker gets run_recipe by exact name only when the project has recipes", () => {
+  const base = { prompt: "p", model: "claude-sonnet-5", effort: "medium" };
+  const allowed = (args: string[]) => args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--disallowedTools"));
+  assert.equal(allowed(claudeArgs(base, { specPath: "/tmp/s.json" })).includes(RECIPE_TOOL_PERMISSION), false);
+  const withRecipes = allowed(claudeArgs(base, { specPath: "/tmp/s.json", recipes: true }));
+  assert.ok(withRecipes.includes(RECIPE_TOOL_PERMISSION));
+  assert.ok(!withRecipes.some((tool) => /npm|node|Bash\(\*/.test(tool)), "no broad shell pattern is added");
+});
+
+test("EXEC-01: a recipe runs with validated arguments and a scratch directory that is removed afterwards", async (t) => {
+  const cwd = tempDir(t);
+  const recipe = programIn(cwd);
+  const outcome = await runRecipe({ cwd, checks: [], recipes: [recipe] }, "run", ["hello", "src/x.txt"]);
+  assert.equal(outcome.status, "EXITED");
+  assert.equal(outcome.exitCode, 0);
+  assert.match(outcome.output, /args: \["hello","src\/x.txt"\]/);
+  const scratch = outcome.output.match(/tmp=(\S+)/)?.[1] ?? "";
+  assert.ok(scratch && !existsSync(scratch), "the scratch directory does not outlive the run");
+
+  const wrote = await runRecipe({ cwd, checks: [], recipes: [recipe] }, "run", ["write", "{tmp}/out.txt"]);
+  assert.equal(wrote.exitCode, 0);
+  assert.doesNotMatch(wrote.output, /\{tmp\}/, "the placeholder is replaced with the real scratch path");
+});
+
+test("EXEC-01: unknown recipes, extra arguments, and paths outside the worktree are refused without running", async (t) => {
+  const cwd = tempDir(t);
+  const recipe = programIn(cwd);
+  const spec = { cwd, checks: [], recipes: [recipe] };
+  for (const [name, args, pattern] of [
+    ["rm", [], /Unknown recipe rm; not run/],
+    ["run", ["a", "b", "c", "d"], /at most 3 argument/],
+    ["run", ["../outside.txt"], /outside the worktree/],
+    ["run", ["/etc/passwd"], /outside the worktree/],
+    ["run", ["--out=../../x"], /outside the worktree/],
+    ["run", ["~/.ssh/id_rsa"], /home-directory path/],
+    ["run", "not-an-array", /args must be an array/],
+  ] as [string, unknown, RegExp][]) {
+    const outcome = await runRecipe(spec, name, args);
+    assert.equal(outcome.status, "REFUSED", `${name} ${JSON.stringify(args)}`);
+    assert.match(outcome.output, pattern);
+  }
+  assert.equal(existsSync(join(cwd, "ran.marker")), false, "no refused call started the program");
+});
+
+test("EXEC-01: a recipe timeout is observable and output stays bounded", async (t) => {
+  const cwd = tempDir(t);
+  const recipe = programIn(cwd);
+  const slow = await runRecipe({ cwd, checks: [], recipes: [recipe] }, "run", ["sleep"]);
+  assert.equal(slow.status, "TIMEOUT");
+  const loud = await runRecipe({ cwd, checks: [], recipes: [recipe] }, "run", ["loud"]);
+  assert.ok(loud.output.length < 4_200, `output is ${loud.output.length} characters`);
+  assert.match(loud.output, /^\[first \d+ characters omitted\]/);
+  assert.match(loud.output, /END/, "the end of the output is kept");
+});
+
+test("EXEC-01: the MCP server lists run_recipe only with recipes, labels output as exploratory, and logs calls", async (t) => {
+  const cwd = tempDir(t);
+  const recipe = programIn(cwd);
+  const ask = async (spec: Parameters<typeof serve>[0], messages: object[]) => {
+    const input = new PassThrough();
+    const replies: Record<string, unknown>[] = [];
+    const done = serve(spec, input, (line) => replies.push(JSON.parse(line) as Record<string, unknown>));
+    for (const message of messages) input.write(`${JSON.stringify(message)}\n`);
+    input.end();
+    await done;
+    return replies;
+  };
+  const list = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+  const without = await ask({ cwd, checks: [passing] }, [list]);
+  assert.deepEqual((without[0]?.result as { tools: { name: string }[] }).tools.map((tool) => tool.name), ["run_checks"]);
+
+  const log = join(cwd, "calls.log");
+  const replies = await ask({ cwd, checks: [passing], recipes: [recipe], logPath: log }, [
+    list,
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_recipe", arguments: { name: "run", args: ["hi"] } } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "run_recipe", arguments: { name: "nope" } } },
+  ]);
+  const tools = (replies[0]?.result as { tools: { name: string; inputSchema: { properties: { name: { enum: string[] } } } }[] }).tools;
+  assert.deepEqual(tools.map((tool) => tool.name), ["run_checks", "run_recipe"]);
+  assert.deepEqual(tools[1]?.inputSchema.properties.name.enum, ["run"]);
+  const ran = replies[1]?.result as { content: { text: string }[]; isError: boolean };
+  assert.match(ran.content[0]?.text ?? "", /^EXITED run \(exit 0.*Exploratory run, not acceptance evidence/s);
+  assert.equal(ran.isError, false);
+  assert.equal((replies[2]?.result as { isError: boolean }).isError, true);
+  const logged = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { kind: string; status: string });
+  assert.deepEqual(logged.map((entry) => [entry.kind, entry.status]), [["recipe", "EXITED"], ["recipe", "REFUSED"]]);
+});
+
+test("EXEC-01: recipe definitions are validated before they can be registered", () => {
+  const good: WorkerRecipe = { name: "run", description: "Run it.", command: ["node", "src/cli.js"], maxArgs: 4 };
+  assert.deepEqual(validateRecipes([good]), []);
+  const errors = validateRecipes([
+    { ...good, name: "Run It" },
+    { ...good, maxArgs: 99 },
+    { ...good, name: "env", env: { PATH: "/tmp", NODE_OPTIONS: "--require x" } },
+    { ...good, name: "cwd", cwd: "../elsewhere" },
+    { ...good, name: "extra", shell: true },
+    good, good,
+  ]).join(" ");
+  for (const pattern of [/lowercase letters/, /maxArgs must be/, /PATH is not allowed/, /NODE_OPTIONS is not allowed/, /cwd must be repository-relative/, /unknown field\(s\) shell/, /Duplicate recipe name run/]) {
+    assert.match(errors, pattern);
+  }
+});
+
+test("EXEC-01: workers are told how to try the program; reviewers are not", () => {
+  const input = (harness: string, recipes: unknown[]) => ({
+    workspace: { checks: [], recipes },
+    execution: { harness },
+  }) as unknown as WorkerInput;
+  const recipe = [{ name: "run", command: "node src/cli.js", max_args: 4, description: "Run it." }];
+  assert.match(checkInstructions(input("claude", recipe), "implementation").join(" "), /run_recipe tool/);
+  assert.match(checkInstructions(input("codex", recipe), "repair").join(" "), /run a command from workspace.recipes/);
+  assert.deepEqual(checkInstructions(input("claude", recipe), "review"), []);
+  assert.deepEqual(checkInstructions(input("claude", []), "implementation"), [], "no recipes, no recipe instruction");
 });

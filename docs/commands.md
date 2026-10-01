@@ -46,6 +46,7 @@ Inspection commands do not launch workers. Commands that open MABS records can i
 | --- | --- |
 | `node src/cli.ts controller run --workers=1 --ui` | Run the loop and workbench, using policy-based routing |
 | `node src/cli.ts controller run --adapter=codex --workers=1 --ui` | Prefer Codex through an explicit operator override; another provider may still run it, with the fallback recorded |
+| `node src/cli.ts project recipes PROJECT [--set='[...]' \| --clear]` | List or replace the named commands workers may run to try the program (`name`, `description`, `command` argv, `maxArgs`, optional `cwd`, `timeoutMs`, `env`). A change is a new configuration version. Output is exploratory, never acceptance evidence |
 | `node src/cli.ts controller run --pin-adapter=codex --workers=1 --ui` | Run implementation and repair only on Codex; when it cannot run, tasks wait or block instead of moving to Claude. Reviews are not pinned |
 | `node src/cli.ts controller once` | Reconcile and dispatch one cycle; **not** a dry run |
 | `node src/cli.ts controller run --ui --port=4318` | Serve the workbench on another port |

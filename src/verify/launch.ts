@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 
 import { exec, type ExecResult } from "../core/exec.ts";
 import type { GateSpec } from "../store/records.ts";
-import { CHECKS_SERVER_NAME, CHECKS_TOOL_PERMISSION, type ChecksSpec } from "../worker-tools/checks-mcp.ts";
+import { CHECKS_SERVER_NAME, CHECKS_TOOL_PERMISSION, RECIPE_TOOL_PERMISSION, type ChecksSpec } from "../worker-tools/checks-mcp.ts";
+import type { WorkerRecipe } from "../domain/recipes.ts";
 import { LiveLog, ProgressWriter, ProviderStreamParser, type StreamProgress } from "../telemetry/stream.ts";
 import { CODEX_MODEL, DISABLED_DELEGATION, type DelegationPolicy } from "../routing/capabilities.ts";
 import { buildWorkerEnv, assertNoPaidFallback } from "./env.ts";
@@ -35,6 +36,8 @@ export interface LaunchOptions {
   liveLogBytes?: number;
   /** Registered project checks the worker may run through the controller's check tool. */
   workerChecks?: GateSpec[];
+  /** Named exploratory commands, served beside run_checks; never acceptance evidence. */
+  workerRecipes?: WorkerRecipe[];
   /**
    * Continue an earlier provider session with a short brief instead of the
    * full packet in `prompt`. If the session cannot be resumed before any model
@@ -51,6 +54,8 @@ export interface ResumeLaunch {
 /** Where a Claude worker's check tool reads its registered checks; set only when there are checks. */
 export interface CheckServerLaunch {
   specPath: string;
+  /** The server also offers run_recipe, which needs its own exact-name permission. */
+  recipes?: boolean;
 }
 
 /**
@@ -176,6 +181,7 @@ export function claudeArgs(
     // Exact-name permission: the worker can run registered checks without a
     // shell pattern that the provider's command-safety check may still deny.
     ...(checkServer ? [CHECKS_TOOL_PERMISSION] : []),
+    ...(checkServer?.recipes ? [RECIPE_TOOL_PERMISSION] : []),
     "--disallowedTools",
     ...CLAUDE_DELEGATION_TOOLS,
     // Ignore user, project, and local settings files: their hooks, plugins,
@@ -329,9 +335,10 @@ export async function launchClaude(options: LaunchOptions): Promise<LaunchResult
   assertNoPaidFallback(env);
   const provenance = await requireSubscriptionProvenance("claude", env);
   let checkServer: CheckServerLaunch | null = null;
-  if (options.workerChecks && options.workerChecks.length > 0) {
-    checkServer = { specPath: `${options.evidencePath}.checks.json` };
-    const spec: ChecksSpec = { cwd: options.cwd, checks: options.workerChecks, logPath: `${options.evidencePath}.checks.log` };
+  const recipes = options.workerRecipes ?? [];
+  if ((options.workerChecks && options.workerChecks.length > 0) || recipes.length > 0) {
+    checkServer = { specPath: `${options.evidencePath}.checks.json`, recipes: recipes.length > 0 };
+    const spec: ChecksSpec = { cwd: options.cwd, checks: options.workerChecks ?? [], recipes, logPath: `${options.evidencePath}.checks.log` };
     writeFileSync(checkServer.specPath, JSON.stringify(spec, null, 2), { mode: 0o600 });
   }
   return withResume(options, (prompt, resumeSessionId) =>

@@ -1,6 +1,7 @@
 import type { FailureClass } from "../core/failure.ts";
 import type { ValidationResult } from "../domain/contract.ts";
 import type { CapabilityRegistry, DelegationPolicy } from "../routing/capabilities.ts";
+import type { WorkerRecipe } from "../domain/recipes.ts";
 import type { GateSpec } from "../store/records.ts";
 import type { LaunchResult, ResumeLaunch } from "../verify/launch.ts";
 
@@ -26,6 +27,8 @@ export interface AdapterLaunch {
   completionPath: string;
   /** Registered project checks the worker may run through the controller's check tool. */
   workerChecks?: GateSpec[];
+  /** Named exploratory commands the worker may run; never acceptance evidence. */
+  workerRecipes?: WorkerRecipe[];
   /** Continue an earlier provider session with a short brief; `prompt` stays the cold fallback. */
   resume?: ResumeLaunch;
 }

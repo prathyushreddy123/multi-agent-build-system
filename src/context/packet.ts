@@ -254,7 +254,9 @@ export function buildContextPacket(input: {
       allowed_scope: input.task.allowedScope.length > 0 ? input.task.allowedScope : ["."],
       // Only what the worker can actually do: implementers get the registered-check
       // tool when checks exist; reviewers read the controller's gate evidence instead.
-      allowed_actions: purpose === "review" ? ["read"] : input.project.checkCommands.length > 0 ? ["read", "edit", "run_checks"] : ["read", "edit"],
+      allowed_actions: purpose === "review"
+        ? ["read"]
+        : ["read", "edit", ...(input.project.checkCommands.length > 0 ? ["run_checks"] : []), ...(input.project.workerRecipes.length > 0 ? ["run_recipe"] : [])],
       forbidden_actions: purpose === "review"
         ? ["edit", "git_commit", "push", "merge", "deploy", "delete_shared_data", "change_scope"]
         : ["git_commit (controller-owned)", "push", "merge", "deploy", "delete_shared_data", "change_scope"],
@@ -262,6 +264,12 @@ export function buildContextPacket(input: {
         name: check.name,
         command: `${check.cwd ? `(cd ${check.cwd}) ` : ""}${check.command.join(" ")}`,
         required: check.required,
+      })),
+      recipes: purpose === "review" ? [] : input.project.workerRecipes.map((recipe) => ({
+        name: recipe.name,
+        command: `${recipe.cwd ? `(cd ${recipe.cwd}) ` : ""}${recipe.command.join(" ")}`,
+        max_args: recipe.maxArgs,
+        description: recipe.description,
       })),
     },
     execution: {

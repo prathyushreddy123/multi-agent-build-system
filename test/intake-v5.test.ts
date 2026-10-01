@@ -15,6 +15,8 @@ import { acceptPlan, answerClarification, askClarifications, productSummary, pro
 import { askView, briefSection, productView, proposeView, resolveView } from "../src/intake/projection.ts";
 import { startAcceptedWork, type StartAcceptedWorkInput } from "../src/intake/start.ts";
 import { activeAcceptance, conversationFor, createBrief, getBrief, getClarification, listBootstrapRuns } from "../src/intake/store.ts";
+import { projectConfigSnapshot, canonicalConfig } from "../src/domain/config.ts";
+import { runRecipe } from "../src/worker-tools/checks-mcp.ts";
 import { Records } from "../src/store/records.ts";
 import { SCHEMA_VERSION, Store } from "../src/store/db.ts";
 
@@ -314,7 +316,7 @@ test("INT-02: the CLI resolve command is all-or-nothing and retry-safe", (t) => 
 
 test("INT-02: schema 19 adds intake requests to an existing schema 18 database", (t) => {
   const { root } = setup(t);
-  assert.equal(SCHEMA_VERSION, "19");
+  assert.ok(Number(SCHEMA_VERSION) >= 19);
   const path = join(root, "v18.sqlite");
   const fresh = new Store(path);
   fresh.run("DROP TABLE intake_requests");
@@ -323,7 +325,7 @@ test("INT-02: schema 19 adds intake requests to an existing schema 18 database",
 
   const upgraded = new Store(path);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, "19");
+  assert.equal(upgraded.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, SCHEMA_VERSION);
   assert.ok(upgraded.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_requests'"));
 });
 
@@ -645,4 +647,53 @@ test("PLAN-01: declared requirement ownership must cover every mandatory require
   assert.match(unknown.errors.join(" "), /owns unknown requirement\(s\) REQ-9/);
   assert.equal(propose([step("all", { executionMode: "single", requirements: ["REQ-1", "REQ-2"] })]).valid, true, "optional requirements need no owner");
   assert.equal(propose([step("all", { executionMode: "single" })]).valid, true, "no declared ownership keeps legacy broad coverage");
+});
+
+// --- EXEC-01: bootstrap registers a representative run recipe -----------------
+
+test("EXEC-01: bootstrap registers a working run recipe from the resolved profile", async (t) => {
+  const { root, records } = setup(t);
+  const { brief, proposal } = acceptedForStart(records, "recipe-tool");
+  const target = join(root, "product");
+  const started = startAcceptedWork(records, startInput(brief.id, proposal, target));
+  assert.equal(started.status, "completed", started.error ?? "");
+  const project = records.getProject(started.projectId as string)!;
+  assert.equal(project.workerRecipes.length, 1);
+  const [recipe] = project.workerRecipes;
+  assert.equal(recipe?.name, "run");
+  assert.deepEqual(recipe?.command.slice(0, 1), ["python3"]);
+  assert.match(recipe?.command[1] ?? "", /cli\.py$/);
+  const outcome = await runRecipe({ cwd: target, checks: [], recipes: project.workerRecipes }, "run", []);
+  assert.equal(outcome.status, "EXITED");
+  assert.equal(outcome.exitCode, 0, outcome.output);
+  assert.match(outcome.output, /is ready/);
+  const snapshot = projectConfigSnapshot(project);
+  assert.deepEqual(snapshot.workerRecipes, project.workerRecipes, "recipes are part of the versioned configuration");
+});
+
+test("EXEC-01: a project without recipes keeps a byte-identical configuration snapshot", (t) => {
+  const { records } = setup(t);
+  const project = records.createProject({ name: "plain", repoPath: "/tmp/plain", projectType: "personal", reviewChoice: "off" });
+  assert.equal("workerRecipes" in projectConfigSnapshot(project), false);
+  const before = canonicalConfig(projectConfigSnapshot(project));
+  assert.doesNotMatch(before, /workerRecipes/);
+  records.updateProjectRecipes(project.id, [{ name: "run", description: "Run.", command: ["node", "src/cli.js"], maxArgs: 2 }]);
+  const after = records.getProject(project.id)!;
+  assert.notEqual(after.configVersion, project.configVersion, "a recipe change is a new configuration version");
+  assert.throws(() => records.updateProjectRecipes(project.id, [{ name: "BAD", description: "", command: [], maxArgs: 99 }]), /Invalid worker recipes/);
+});
+
+test("EXEC-01: schema 20 adds empty worker recipes to an existing schema 19 database", (t) => {
+  const { root } = setup(t);
+  const path = join(root, "v19.sqlite");
+  const fresh = new Store(path);
+  const seeded = new Records(fresh);
+  seeded.createProject({ name: "old", repoPath: "/tmp/old", projectType: "personal", reviewChoice: "off" });
+  fresh.run("ALTER TABLE projects DROP COLUMN worker_recipes");
+  fresh.run("UPDATE schema_meta SET value = '19' WHERE key = 'schema_version'");
+  fresh.close();
+  const upgraded = new Records(new Store(path));
+  t.after(() => upgraded.store.close());
+  assert.equal(upgraded.store.get("SELECT value FROM schema_meta WHERE key = 'schema_version'")?.value, SCHEMA_VERSION);
+  assert.deepEqual(upgraded.listProjects()[0]?.workerRecipes, []);
 });

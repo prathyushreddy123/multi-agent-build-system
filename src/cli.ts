@@ -54,6 +54,7 @@ import {
   wrongGovernanceSubject,
 } from "./intake/service.ts";
 import { IntakeError } from "./intake/errors.ts";
+import { validateRecipes, type WorkerRecipe } from "./domain/recipes.ts";
 import { startAcceptedWork } from "./intake/start.ts";
 import {
   acceptView, askView, briefSection, productView, proposeView, resolveView, startView, type BriefSection,
@@ -194,6 +195,8 @@ PROJECTS AND TASKS
       [--review=off|risk|required]              Delivery is the review choice: fast=off, standard=risk, verified=required
   project governance <project> --type=... [--delivery=...|--review=...] --version=N
   project list | project status <id|name> <active|paused|archived>
+  project recipes <project> [--set='[...]' | --clear]
+                                            Named commands workers may run to try the program (exploratory, never evidence)
   project review <id|name> [required|substantive|none]
   project preset <id|name> <experiment|personal|client> [--reason=...] [--acknowledge-weakening]
   project base <id|name> <branch>              Change target and invalidate open approvals
@@ -567,6 +570,21 @@ async function main(): Promise<void> {
         source: "cli-project-governance",
       }, version);
       console.log(JSON.stringify({ decision, project: records.getProject(project.id) }, null, 2));
+      return;
+    }
+    if (area === "project" && action === "recipes") {
+      const args = parseArgs(rest);
+      const project = args.positionals[0] ? resolveProject(records, args.positionals[0] as string) : null;
+      if (!project) throw new Error("Usage: mabs project recipes <project> [--set='[{\"name\":...,\"command\":[...],\"maxArgs\":N,\"description\":...}]' | --clear]");
+      const set = textOption(args, "set");
+      if (set !== undefined || args.options.has("clear")) {
+        const recipes = args.options.has("clear") ? [] : JSON.parse(set as string) as unknown;
+        const errors = validateRecipes(recipes);
+        if (errors.length > 0) throw new Error(`Invalid worker recipes:\n${errors.join("\n")}`);
+        records.updateProjectRecipes(project.id, recipes as WorkerRecipe[]);
+      }
+      const current = records.getProject(project.id);
+      console.log(JSON.stringify({ project: project.id, configVersion: current?.configVersion, recipes: current?.workerRecipes ?? [] }, null, 2));
       return;
     }
     if (area === "project" && action === "list") {

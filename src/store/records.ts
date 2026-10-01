@@ -6,6 +6,7 @@ import type { Row, StoreOptions } from "./db.ts";
 import { ids } from "../core/ids.ts";
 import { DEFAULT_CONTROLLER_SETTINGS, DEFAULT_PROMPT_PROFILE, normalizeProjectConfig, projectConfigSnapshot, validateProjectConfig } from "../domain/config.ts";
 import type { ProjectConfigSnapshot, ProjectControllerSettings, PromptProfile, RoutingOverrides } from "../domain/config.ts";
+import { validateRecipes, type WorkerRecipe } from "../domain/recipes.ts";
 import { assertTransition, IN_FLIGHT_BLOCKED_PREFIXES, SLOT_HOLDING_STATES } from "../domain/states.ts";
 import type { TaskState } from "../domain/states.ts";
 import { evaluate } from "../domain/policy.ts";
@@ -84,6 +85,8 @@ export interface Project {
   promptProfile: PromptProfile;
   controllerSettings: ProjectControllerSettings;
   checkCommands: GateSpec[];
+  /** Exploratory commands workers may run by name; never acceptance evidence. */
+  workerRecipes: WorkerRecipe[];
   configVersion: string;
   goal: string | null;
   governance: ProjectGovernance;
@@ -328,6 +331,7 @@ function toProject(row: Row): Project {
       ...fromJson<Partial<ProjectControllerSettings>>(row.controller_settings, {}),
     },
     checkCommands: fromJson<GateSpec[]>(row.check_commands, []),
+    workerRecipes: fromJson<WorkerRecipe[]>(row.worker_recipes, []),
     configVersion: row.config_version as string,
     goal: (row.goal as string) ?? null,
     governance: {
@@ -1042,6 +1046,23 @@ export class Records {
       this.invalidateProjectApprovals(id, "Quality configuration changed.");
       this.recordCurrentProjectConfig(id, configVersion, "quality-check-change", parentId);
       this.recordEvent({ kind: "project.checks_updated", projectId: id, data: { count: checks.length, configVersion } });
+    });
+    return configVersion;
+  }
+
+  updateProjectRecipes(id: string, recipes: WorkerRecipe[], source = "worker-recipe-change"): string {
+    const errors = validateRecipes(recipes);
+    if (errors.length > 0) throw new Error(`Invalid worker recipes:\n${errors.join("\n")}`);
+    const parentId = this.getProject(id)?.configVersion ?? null;
+    const configVersion = ids.config();
+    this.store.tx(() => {
+      this.store.run(
+        "UPDATE projects SET worker_recipes = ?, config_version = ?, updated_at = ? WHERE id = ?",
+        toJson(recipes), configVersion, nowIso(), id,
+      );
+      this.invalidateProjectApprovals(id, "Worker recipes changed.");
+      this.recordCurrentProjectConfig(id, configVersion, source, parentId);
+      this.recordEvent({ kind: "project.recipes_updated", projectId: id, data: { names: recipes.map((recipe) => recipe.name), configVersion } });
     });
     return configVersion;
   }
@@ -3242,10 +3263,10 @@ export class Records {
       this.store.run("UPDATE config_versions SET active = 1 WHERE id = ?", input.configVersion);
       this.store.run(
         `UPDATE projects SET routing_profile = ?, routing_overrides = ?, approval_policy = ?, review_policy = ?,
-           check_commands = ?, prompt_profile = ?, controller_settings = ?, config_version = ?, updated_at = ? WHERE id = ?`,
+           check_commands = ?, worker_recipes = ?, prompt_profile = ?, controller_settings = ?, config_version = ?, updated_at = ? WHERE id = ?`,
         input.config.routingProfile, toJson(input.config.routingOverrides), toJson(input.config.approvalPolicy),
-        toJson(input.config.reviewPolicy), toJson(input.config.checkCommands), toJson(input.config.promptProfile),
-        toJson(input.config.controllerSettings), input.configVersion, nowIso(), input.project.id,
+        toJson(input.config.reviewPolicy), toJson(input.config.checkCommands), toJson(input.config.workerRecipes ?? []),
+        toJson(input.config.promptProfile), toJson(input.config.controllerSettings), input.configVersion, nowIso(), input.project.id,
       );
       if (input.proposalId) {
         this.store.run("UPDATE curator_proposals SET status = 'activated', updated_at = ? WHERE id = ?", nowIso(), input.proposalId);
