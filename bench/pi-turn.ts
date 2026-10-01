@@ -20,6 +20,8 @@ export const MABS_TOOLS = [
   "mabs_status", "mabs_create_brief", "mabs_update_brief", "mabs_set_project_governance", "mabs_ask_clarifications",
   "mabs_answer_clarification", "mabs_propose_plan", "mabs_accept_plan", "mabs_get_operations", "mabs_prepare_operation",
   "mabs_bootstrap_project", "mabs_submit_plan", "mabs_get_product", "mabs_submit_task",
+  // Efficiency v5 intake tools.
+  "mabs_resolve_intake", "mabs_start_work",
 ];
 
 export interface PiUsage { input: number; output: number; cacheRead: number; cacheWrite: number; turns: number }

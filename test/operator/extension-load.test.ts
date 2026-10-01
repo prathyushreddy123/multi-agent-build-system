@@ -223,3 +223,32 @@ test("UX-01: the MABS extension updates status and notices from the feed and nev
     await handlers.get("session_shutdown")?.({}, ctx);
   });
 });
+
+test("UX-01: a stale Pi context stops the feed instead of failing the process", { skip: SKIP }, async () => {
+  await withState(async () => {
+    const factory = await loadExtension("mabs.ts");
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+    let calls = 0;
+    const pi = {
+      on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => { handlers.set(event, handler); return () => undefined; },
+      registerTool: () => undefined,
+      registerCommand: () => undefined,
+      exec: async () => { calls += 1; return { code: 0, stdout: JSON.stringify({ version: "mabs.feed.v1", at: "t", controller: { state: "running", reason: "" }, counts: { active: 0, waiting: 0, attention: 0, done: 0 }, tasks: [] }), stderr: "" }; },
+      sendUserMessage: () => undefined,
+    };
+    const previous = process.env.MABS_FEED_INTERVAL_MS;
+    process.env.MABS_FEED_INTERVAL_MS = "5000";
+    try { factory(pi); } finally {
+      if (previous === undefined) delete process.env.MABS_FEED_INTERVAL_MS; else process.env.MABS_FEED_INTERVAL_MS = previous;
+    }
+    const stale = { get ui(): never { throw new Error("This extension ctx is stale after session replacement"); } };
+    await assert.doesNotReject(handlers.get("session_start")?.({}, stale) as Promise<void>);
+    // The failed first poll stopped the feed for the stale context; a fresh session starts a new one.
+    const statuses: string[] = [];
+    const fresh = { ui: { setStatus: (_key: string, text: string) => statuses.push(text), notify: () => undefined, theme: { fg: (_c: string, text: string) => text } } };
+    await handlers.get("session_start")?.({}, fresh);
+    assert.deepEqual(statuses, ["MABS 0 active · 0 attention"]);
+    assert.ok(calls >= 2);
+    await handlers.get("session_shutdown")?.({}, fresh);
+  });
+});

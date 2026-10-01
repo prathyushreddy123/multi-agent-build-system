@@ -78,33 +78,55 @@ export default function mabsExtension(pi: ExtensionAPI) {
   let polling = false;
   const feedInterval = Number(process.env.MABS_FEED_INTERVAL_MS ?? 15_000);
 
-  async function pollFeed(ctx: { ui: { setStatus(key: string, text: string): void; notify(message: string, kind: "info" | "warning" | "error"): void; theme: { fg(color: string, text: string): string } } }): Promise<void> {
+  function stopFeed(): void {
+    if (feedTimer) clearInterval(feedTimer);
+    feedTimer = null;
+  }
+
+  type FeedContext = { ui: { setStatus(key: string, text: string): void; notify(message: string, kind: "info" | "warning" | "error"): void; theme: { fg(color: string, text: string): string } } };
+
+  async function pollFeed(ctx: FeedContext): Promise<void> {
     if (polling) return;
     polling = true;
     try {
-      const frame = JSON.parse(await run(["progress", "feed"])) as FeedFrame;
-      const { statusLine, notices } = diffFeed(previousFrame, frame);
-      previousFrame = frame;
-      ctx.ui.setStatus("mabs", ctx.ui.theme.fg(frame.counts.attention > 0 ? "warning" : "dim", statusLine));
-      for (const notice of notices) ctx.ui.notify(notice.text, notice.level);
-    } catch {
-      ctx.ui.setStatus("mabs", ctx.ui.theme.fg("warning", "MABS unavailable"));
+      let frame: FeedFrame | null = null;
+      try {
+        frame = JSON.parse(await run(["progress", "feed"])) as FeedFrame;
+      } catch {
+        frame = null;
+      }
+      // A captured context goes stale when Pi replaces or compacts the session,
+      // and any use of it throws. Stop polling instead of failing the process;
+      // the next session_start starts a feed bound to the new context.
+      try {
+        const ui = ctx.ui;
+        if (!frame) {
+          ui.setStatus("mabs", ui.theme.fg("warning", "MABS unavailable"));
+          return;
+        }
+        const { statusLine, notices } = diffFeed(previousFrame, frame);
+        previousFrame = frame;
+        ui.setStatus("mabs", ui.theme.fg(frame.counts.attention > 0 ? "warning" : "dim", statusLine));
+        for (const notice of notices) ui.notify(notice.text, notice.level);
+      } catch {
+        stopFeed();
+      }
     } finally {
       polling = false;
     }
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    stopFeed();
     await pollFeed(ctx);
-    if (feedTimer === null && Number.isFinite(feedInterval) && feedInterval > 0) {
+    if (Number.isFinite(feedInterval) && feedInterval > 0) {
       feedTimer = setInterval(() => { void pollFeed(ctx); }, Math.max(5_000, feedInterval));
       feedTimer.unref?.();
     }
   });
 
   pi.on("session_shutdown", async () => {
-    if (feedTimer) clearInterval(feedTimer);
-    feedTimer = null;
+    stopFeed();
   });
 
   pi.registerCommand("mabs-new", {
